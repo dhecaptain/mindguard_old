@@ -10,12 +10,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.config import CONSENT_EXPIRY_DAYS
-from backend.services.crypto import decrypt_pii, encrypt_pii, hash_email, hash_token, redact_pii
+from backend.services.crypto import (
+    decrypt_pii,
+    encrypt_pii,
+    hash_email,
+    hash_token,
+    redact_pii,
+)
 from backend.services.platform_registry import normalize_platform
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(os.getenv("MINDGUARD_DB_DIR", str(Path(__file__).resolve().parent.parent))) / "mindguard.db"
+DB_PATH = (
+    Path(os.getenv("MINDGUARD_DB_DIR", str(Path(__file__).resolve().parent.parent)))
+    / "mindguard.db"
+)
 
 
 def get_db() -> sqlite3.Connection:
@@ -72,7 +81,9 @@ def health_check() -> dict:
     """Lightweight liveness probe: verify the DB is reachable and schema is present."""
     try:
         conn = get_db()
-        row = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'").fetchone()
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'"
+        ).fetchone()
         conn.close()
         return {"db": "ok", "tables": row["n"] if row else 0}
     except Exception as exc:
@@ -107,8 +118,8 @@ def init_db():
 
 
 def _make_referral_code() -> str:
-    alphabet = string.ascii_uppercase.replace('O', '').replace('I', '') + '23456789'
-    return ''.join(secrets.choice(alphabet) for _ in range(8))
+    alphabet = string.ascii_uppercase.replace("O", "").replace("I", "") + "23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(8))
 
 
 def seed_defaults():
@@ -127,6 +138,7 @@ def seed_defaults():
         return
 
     import bcrypt
+
     is_production = os.getenv("MINDGUARD_ENV", "").strip().lower() == "production"
 
     # The admin must never ship with a known default password. Production should
@@ -144,19 +156,85 @@ def seed_defaults():
 
     now = datetime.now(timezone.utc).isoformat()
     users = [
-        ("admin-001",  "admin@mindguard.org",      "Admin User",      "admin",      admin_hash, "approved", now),
+        (
+            "admin-001",
+            "admin@mindguard.org",
+            "Admin User",
+            "admin",
+            admin_hash,
+            "approved",
+            now,
+        ),
     ]
     if not is_production:
         pw = bcrypt.hashpw(b"password", bcrypt.gensalt()).decode()
-        users.extend([
-            ("couns-001",  "counsellor@mindguard.org",  "Sarah Counsellor","counsellor", pw, "approved", now),
-            ("stud-001",   "student@mindguard.org",     "Demo Student",    "student",    pw, "approved", now),
-            ("stud-002",   "diana@mindguard.org",       "Diana Opiyo",     "student",    pw, "approved", "2025-01-15T00:00:00"),
-            ("stud-003",   "brian@student.ac.ke",       "Brian Mwangi",    "student",    pw, "pending",  "2025-02-03T00:00:00"),
-            ("stud-004",   "fatuma@student.ac.ke",      "Fatuma Hassan",   "student",    pw, "approved", "2025-02-10T00:00:00"),
-            ("stud-005",   "kevin@student.ac.ke",       "Kevin Otieno",    "student",    pw, "pending",  "2025-03-01T00:00:00"),
-            ("couns-002",  "demo@mindguard.org",        "Demo User",       "counsellor", pw, "approved", now),
-        ])
+        users.extend(
+            [
+                (
+                    "couns-001",
+                    "counsellor@mindguard.org",
+                    "Sarah Counsellor",
+                    "counsellor",
+                    pw,
+                    "approved",
+                    now,
+                ),
+                (
+                    "stud-001",
+                    "student@mindguard.org",
+                    "Demo Student",
+                    "student",
+                    pw,
+                    "approved",
+                    now,
+                ),
+                (
+                    "stud-002",
+                    "diana@mindguard.org",
+                    "Diana Opiyo",
+                    "student",
+                    pw,
+                    "approved",
+                    "2025-01-15T00:00:00",
+                ),
+                (
+                    "stud-003",
+                    "brian@student.ac.ke",
+                    "Brian Mwangi",
+                    "student",
+                    pw,
+                    "pending",
+                    "2025-02-03T00:00:00",
+                ),
+                (
+                    "stud-004",
+                    "fatuma@student.ac.ke",
+                    "Fatuma Hassan",
+                    "student",
+                    pw,
+                    "approved",
+                    "2025-02-10T00:00:00",
+                ),
+                (
+                    "stud-005",
+                    "kevin@student.ac.ke",
+                    "Kevin Otieno",
+                    "student",
+                    pw,
+                    "pending",
+                    "2025-03-01T00:00:00",
+                ),
+                (
+                    "couns-002",
+                    "demo@mindguard.org",
+                    "Demo User",
+                    "counsellor",
+                    pw,
+                    "approved",
+                    now,
+                ),
+            ]
+        )
     conn.executemany(
         "INSERT INTO users (id, email, name, role_type, password_hash, status, created_at) VALUES (?,?,?,?,?,?,?)",
         users,
@@ -164,9 +242,27 @@ def seed_defaults():
     if not is_production:
         # Seed a demo conversation between student@mindguard.org and counsellor@mindguard.org
         demo_msgs = [
-            ("msg-001", "couns-001", "stud-001", "Hello! Welcome to MindGuard. How are you feeling today?", now),
-            ("msg-002", "stud-001", "couns-001", "Hi! I'm doing okay, just wanted to check in.", now),
-            ("msg-003", "couns-001", "stud-001", "That's great to hear. I'm here whenever you need someone to talk to.", now),
+            (
+                "msg-001",
+                "couns-001",
+                "stud-001",
+                "Hello! Welcome to MindGuard. How are you feeling today?",
+                now,
+            ),
+            (
+                "msg-002",
+                "stud-001",
+                "couns-001",
+                "Hi! I'm doing okay, just wanted to check in.",
+                now,
+            ),
+            (
+                "msg-003",
+                "couns-001",
+                "stud-001",
+                "That's great to hear. I'm here whenever you need someone to talk to.",
+                now,
+            ),
         ]
         conn.executemany(
             "INSERT OR IGNORE INTO communications (id, sender_id, receiver_id, message, read, created_at) VALUES (?,?,?,?,1,?)",
@@ -178,7 +274,9 @@ def seed_defaults():
 
 def get_user_by_email(email: str):
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM users WHERE email = ?", (email.strip().lower(),)
+    ).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -198,7 +296,9 @@ def get_user_by_id(user_id: str):
 def revoke_token(jti: str, expires_at: str | None = None) -> None:
     """Persist a revoked JWT, pruning expired rows opportunistically."""
     now = datetime.now(timezone.utc).isoformat()
-    expiry = expires_at or (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    expiry = (
+        expires_at or (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    )
     conn = get_db()
     conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (now,))
     conn.execute(
@@ -217,8 +317,13 @@ def is_token_revoked(jti: str) -> bool:
 
 
 def create_user(
-    email: str, name: str, password_hash: str, role_type: str = "student",
-    dob: str | None = None, parent_email: str | None = None, referred_by: str | None = None,
+    email: str,
+    name: str,
+    password_hash: str,
+    role_type: str = "student",
+    dob: str | None = None,
+    parent_email: str | None = None,
+    referred_by: str | None = None,
 ) -> dict:
     uid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -226,17 +331,38 @@ def create_user(
     # Generate a unique referral code
     for _ in range(10):
         code = _make_referral_code()
-        exists = conn.execute("SELECT 1 FROM users WHERE referral_code = ?", (code,)).fetchone()
+        exists = conn.execute(
+            "SELECT 1 FROM users WHERE referral_code = ?", (code,)
+        ).fetchone()
         if not exists:
             break
     conn.execute(
         "INSERT INTO users (id, email, name, role_type, password_hash, status, created_at, dob, parent_email, referral_code, referred_by) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (uid, email.strip().lower(), name, role_type, password_hash, "pending", now, dob, parent_email, code, referred_by),
+        (
+            uid,
+            email.strip().lower(),
+            name,
+            role_type,
+            password_hash,
+            "pending",
+            now,
+            dob,
+            parent_email,
+            code,
+            referred_by,
+        ),
     )
     conn.commit()
     conn.close()
-    return {"id": uid, "email": email, "name": name, "role_type": role_type, "status": "pending", "referral_code": code}
+    return {
+        "id": uid,
+        "email": email,
+        "name": name,
+        "role_type": role_type,
+        "status": "pending",
+        "referral_code": code,
+    }
 
 
 def update_user_password(user_id: str, password_hash: str) -> bool:
@@ -365,12 +491,19 @@ def create_analysis_session(
         ),
     )
     conn.commit()
-    row = conn.execute("SELECT * FROM analysis_sessions WHERE id = ?", (sid,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM analysis_sessions WHERE id = ?", (sid,)
+    ).fetchone()
     conn.close()
     return dict(row) if row else {"id": sid}
 
 
-def update_analysis_session_progress(session_id: str, status: str, progress: dict | None = None, error: dict | None = None) -> bool:
+def update_analysis_session_progress(
+    session_id: str,
+    status: str,
+    progress: dict | None = None,
+    error: dict | None = None,
+) -> bool:
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     cur = conn.execute(
@@ -494,7 +627,9 @@ def get_analysis_session_for_student(
 
 def get_analysis_session(session_id: str) -> dict | None:
     conn = get_db()
-    row = conn.execute("SELECT * FROM analysis_sessions WHERE id = ?", (session_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM analysis_sessions WHERE id = ?", (session_id,)
+    ).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -514,14 +649,18 @@ def update_user_status(user_id: str, status: str) -> bool:
 
 def get_user_by_referral_code(code: str) -> dict | None:
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE referral_code = ?", (code.upper(),)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM users WHERE referral_code = ?", (code.upper(),)
+    ).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
 def get_all_users() -> list[dict]:
     conn = get_db()
-    rows = conn.execute("SELECT id, email, name, role_type, status FROM users ORDER BY created_at DESC").fetchall()
+    rows = conn.execute(
+        "SELECT id, email, name, role_type, status FROM users ORDER BY created_at DESC"
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -542,29 +681,38 @@ def accept_user_terms(user_id: str) -> bool:
 def get_students(limit: int = 200, offset: int = 0, counsellor_id: str | None = None):
     """List student accounts.
 
-    When ``counsellor_id`` is given, scope the list to students the counsellor
-    is assigned to *and* has valid ACCEPTED non-expired consent for, with
-    institution scoping. Admins pass None and see all students.
+    When ``counsellor_id`` is given, scope the list to active assignments in
+    the counsellor's institution. Detailed data endpoints apply the additional
+    active-consent gate. Admins pass None and see all students.
     """
     conn = get_db()
     if counsellor_id:
-        counsellor = conn.execute("SELECT institution_id FROM users WHERE id = ?", (counsellor_id,)).fetchone()
-        c_inst = counsellor["institution_id"] if counsellor and "institution_id" in counsellor.keys() else None
+        counsellor = conn.execute(
+            "SELECT institution_id FROM users WHERE id = ?", (counsellor_id,)
+        ).fetchone()
+        c_inst = (
+            counsellor["institution_id"]
+            if counsellor and "institution_id" in counsellor.keys()
+            else None
+        )
         if c_inst:
             rows = conn.execute(
                 "SELECT DISTINCT u.id, u.email, u.name, u.role_type, u.status, u.created_at "
                 "FROM users u "
                 "JOIN counsellor_student_assignments a ON a.student_id = u.id AND a.counsellor_id = ? AND a.active = 1 "
-                "WHERE u.role_type = 'student' AND u.institution_id = ? "
+                "WHERE u.role_type = 'student' AND u.institution_id = ? AND a.institution_id = ? "
                 "ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
-                (counsellor_id, c_inst, limit, offset),
+                (counsellor_id, c_inst, c_inst, limit, offset),
             ).fetchall()
         else:
+            # Legacy individual accounts may have no institution. They remain
+            # assignment-scoped, while any one-sided institution relationship
+            # is denied by the detail authorization helper.
             rows = conn.execute(
                 "SELECT DISTINCT u.id, u.email, u.name, u.role_type, u.status, u.created_at "
                 "FROM users u "
                 "JOIN counsellor_student_assignments a ON a.student_id = u.id AND a.counsellor_id = ? AND a.active = 1 "
-                "WHERE u.role_type = 'student' AND u.institution_id IS NULL "
+                "WHERE u.role_type = 'student' AND u.institution_id IS NULL AND a.institution_id IS NULL "
                 "ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
                 (counsellor_id, limit, offset),
             ).fetchall()
@@ -580,7 +728,10 @@ def get_students(limit: int = 200, offset: int = 0, counsellor_id: str | None = 
 
 def update_student_status(student_id: str, status: str) -> bool:
     conn = get_db()
-    cur = conn.execute("UPDATE users SET status = ? WHERE id = ? AND role_type = 'student'", (status, student_id))
+    cur = conn.execute(
+        "UPDATE users SET status = ? WHERE id = ? AND role_type = 'student'",
+        (status, student_id),
+    )
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -598,7 +749,9 @@ def ensure_user_approved(user_id: str) -> None:
     conn.close()
 
 
-def save_analysis(user_id: str, platform: str, text: str | None, prob: float, label: str):
+def save_analysis(
+    user_id: str, platform: str, text: str | None, prob: float, label: str
+):
     aid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
@@ -644,9 +797,17 @@ def get_analyses(user_id: str, limit: int = 20):
 
 def get_analytics(user_id: str):
     conn = get_db()
-    total = conn.execute("SELECT COUNT(*) FROM analyses WHERE user_id = ?", (user_id,)).fetchone()[0]
-    neg = conn.execute("SELECT COUNT(*) FROM analyses WHERE user_id = ? AND label = 'Suicidal'", (user_id,)).fetchone()[0]
-    pos = conn.execute("SELECT COUNT(*) FROM analyses WHERE user_id = ? AND label = 'Non-Suicidal'", (user_id,)).fetchone()[0]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM analyses WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
+    neg = conn.execute(
+        "SELECT COUNT(*) FROM analyses WHERE user_id = ? AND label = 'Suicidal'",
+        (user_id,),
+    ).fetchone()[0]
+    pos = conn.execute(
+        "SELECT COUNT(*) FROM analyses WHERE user_id = ? AND label = 'Non-Suicidal'",
+        (user_id,),
+    ).fetchone()[0]
     recent = conn.execute(
         "SELECT * FROM analyses WHERE user_id = ? ORDER BY created_at DESC LIMIT 10",
         (user_id,),
@@ -660,7 +821,9 @@ def get_analytics(user_id: str):
     }
 
 
-def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: str = "") -> dict:
+def create_referral(
+    counsellor_id: str, student_id: str, urgency: str, notes: str = ""
+) -> dict:
     """Create a referral and student notification atomically. Returns full row including student_name."""
     rid = str(uuid.uuid4())
     nid = str(uuid.uuid4())
@@ -675,7 +838,14 @@ def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: st
         )
         conn.execute(
             "INSERT INTO notifications (id, user_id, title, message, type, read, created_at) VALUES (?,?,?,?,?,0,?)",
-            (nid, student_id, "New Referral", f"A referral has been created for you with {urgency} urgency.", "referral", now),
+            (
+                nid,
+                student_id,
+                "New Referral",
+                f"A referral has been created for you with {urgency} urgency.",
+                "referral",
+                now,
+            ),
         )
         conn.commit()
     except Exception:
@@ -688,7 +858,20 @@ def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: st
         (rid,),
     ).fetchone()
     conn.close()
-    return dict(row) if row else {"id": rid, "counsellor_id": counsellor_id, "student_id": student_id, "urgency": urgency, "notes": notes, "status": "open", "created_at": now, "updated_at": now}
+    return (
+        dict(row)
+        if row
+        else {
+            "id": rid,
+            "counsellor_id": counsellor_id,
+            "student_id": student_id,
+            "urgency": urgency,
+            "notes": notes,
+            "status": "open",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
 
 
 def get_referrals(counsellor_id: str | None = None):
@@ -709,7 +892,9 @@ def get_referrals(counsellor_id: str | None = None):
     return [dict(r) for r in rows]
 
 
-def update_referral(referral_id: str, status: str | None = None, notes: str | None = None) -> dict | None:
+def update_referral(
+    referral_id: str, status: str | None = None, notes: str | None = None
+) -> dict | None:
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
     updates = []
@@ -759,7 +944,14 @@ def send_message(sender_id: str, receiver_id: str, message: str) -> dict:
     )
     conn.commit()
     conn.close()
-    return {"id": mid, "sender_id": sender_id, "receiver_id": receiver_id, "message": message, "read": False, "created_at": now}
+    return {
+        "id": mid,
+        "sender_id": sender_id,
+        "receiver_id": receiver_id,
+        "message": message,
+        "read": False,
+        "created_at": now,
+    }
 
 
 def get_conversation(user_id: str, other_id: str, limit: int = 50):
@@ -794,29 +986,42 @@ def get_conversations(user_id: str):
             "ORDER BY created_at DESC LIMIT 1",
             (user_id, other_id, other_id, user_id),
         ).fetchone()
-        other = conn.execute("SELECT name, email FROM users WHERE id = ?", (other_id,)).fetchone()
+        other = conn.execute(
+            "SELECT name, email FROM users WHERE id = ?", (other_id,)
+        ).fetchone()
         unread = conn.execute(
             "SELECT COUNT(*) FROM communications WHERE sender_id = ? AND receiver_id = ? AND read = 0",
             (other_id, user_id),
         ).fetchone()[0]
-        result.append({
-            "other_id": other_id,
-            "other_name": other["name"] if other else "Unknown",
-            "other_email": other["email"] if other else "",
-            "last_message": last["message"] if last else "",
-            "last_time": last["created_at"] if last else "",
-            "unread": unread,
-        })
+        result.append(
+            {
+                "other_id": other_id,
+                "other_name": other["name"] if other else "Unknown",
+                "other_email": other["email"] if other else "",
+                "last_message": last["message"] if last else "",
+                "last_time": last["created_at"] if last else "",
+                "unread": unread,
+            }
+        )
     result.sort(key=lambda x: x["last_time"], reverse=True)
     conn.close()
     return result
 
 
-def mark_read(message_id: str):
+def mark_read(message_id: str, user_id: str | None = None) -> bool:
     conn = get_db()
-    conn.execute("UPDATE communications SET read = 1 WHERE id = ?", (message_id,))
+    if user_id:
+        cur = conn.execute(
+            "UPDATE communications SET read = 1 WHERE id = ? AND (sender_id = ? OR receiver_id = ?)",
+            (message_id, user_id, user_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE communications SET read = 1 WHERE id = ?", (message_id,)
+        )
     conn.commit()
     conn.close()
+    return cur.rowcount > 0
 
 
 def mark_all_read(user_id: str, other_id: str):
@@ -960,6 +1165,7 @@ def get_counsellor_dashboard(counsellor_id: str, is_admin: bool = False):
 
 # ── Institution functions ─────────────────────────────────────────────
 
+
 def create_institution(name: str, inst_type: str = "university") -> dict:
     iid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -993,6 +1199,7 @@ def list_institutions(limit: int = 500) -> list:
 
 # ── Consent functions ─────────────────────────────────────────────────
 
+
 def create_consent(
     student_id: str,
     counsellor_id: str,
@@ -1018,9 +1225,19 @@ def create_consent(
             expires_at, created_at, updated_at, recipient_email_hash
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            cid, student_id, counsellor_id, encrypt_pii(recipient_email), recipient_role,
-            "DRAFT", json.dumps(platforms), mode, None,
-            magic_token_expires_at, expires_at, now_iso, now_iso,
+            cid,
+            student_id,
+            counsellor_id,
+            encrypt_pii(recipient_email),
+            recipient_role,
+            "DRAFT",
+            json.dumps(platforms),
+            mode,
+            None,
+            magic_token_expires_at,
+            expires_at,
+            now_iso,
+            now_iso,
             hash_email(recipient_email),
         ),
     )
@@ -1056,11 +1273,23 @@ def update_consent_status(consent_id: str, status: str, **kwargs) -> dict | None
     """Update consent status and any additional keyword fields. Sets updated_at automatically."""
     now = datetime.now(timezone.utc).isoformat()
     allowed_fields = {
-        "magic_token", "magic_token_expires_at", "signature_name", "signature_ip",
-        "dispatched_at", "viewed_at", "accepted_at", "declined_at", "revoked_at",
-        "expires_at", "platforms_json",
-        "signed_token_hash", "reminders_sent", "response_ip", "response_user_agent",
-        "template_version", "notes",
+        "magic_token",
+        "magic_token_expires_at",
+        "signature_name",
+        "signature_ip",
+        "dispatched_at",
+        "viewed_at",
+        "accepted_at",
+        "declined_at",
+        "revoked_at",
+        "expires_at",
+        "platforms_json",
+        "signed_token_hash",
+        "reminders_sent",
+        "response_ip",
+        "response_user_agent",
+        "template_version",
+        "notes",
     }
     updates = ["status = ?", "updated_at = ?"]
     params = [status, now]
@@ -1189,7 +1418,9 @@ def get_consent_with_student(consent_id: str) -> dict | None:
     return _decrypt_consent_row(dict(row)) if row else None
 
 
-def get_audit_log_for_target(target_type: str, target_id: str, limit: int = 200) -> list:
+def get_audit_log_for_target(
+    target_type: str, target_id: str, limit: int = 200
+) -> list:
     """Immutable audit entries for a single target (e.g. a consent), newest first."""
     conn = get_db()
     rows = conn.execute(
@@ -1240,6 +1471,7 @@ def get_institution_id_for_consent(consent_id: str) -> str | None:
 
 # ── Linked account functions ──────────────────────────────────────────
 
+
 def create_linked_account(
     student_id: str,
     consent_id: str | None,
@@ -1271,12 +1503,18 @@ def get_linked_accounts(student_id: str) -> list:
     return [dict(r) for r in rows]
 
 
-def revoke_linked_account(account_id: str) -> bool:
+def revoke_linked_account(account_id: str, student_id: str | None = None) -> bool:
     conn = get_db()
-    cur = conn.execute(
-        "UPDATE linked_accounts SET status = 'revoked' WHERE id = ?",
-        (account_id,),
-    )
+    if student_id:
+        cur = conn.execute(
+            "UPDATE linked_accounts SET status = 'revoked' WHERE id = ? AND student_id = ?",
+            (account_id, student_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE linked_accounts SET status = 'revoked' WHERE id = ?",
+            (account_id,),
+        )
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -1284,6 +1522,7 @@ def revoke_linked_account(account_id: str) -> bool:
 
 
 # ── Alert functions ───────────────────────────────────────────────────
+
 
 def create_alert(
     student_id: str,
@@ -1313,8 +1552,17 @@ def create_alert(
             id, student_id, counsellor_id, fired_at, risk_score, threshold_at_fire,
             platform, status, created_at
         ) VALUES (?,?,?,?,?,?,?,?,?)""",
-        (alert_id, student_id, counsellor_id, now, risk_score, threshold_at_fire,
-         platform, "OPEN", now),
+        (
+            alert_id,
+            student_id,
+            counsellor_id,
+            now,
+            risk_score,
+            threshold_at_fire,
+            platform,
+            "OPEN",
+            now,
+        ),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -1322,21 +1570,33 @@ def create_alert(
     return dict(row) if row else None
 
 
-def get_alerts(counsellor_id: str, status: str | None = None) -> list:
+def get_alerts(counsellor_id: str | None, status: str | None = None) -> list:
     conn = get_db()
-    if status:
+    if counsellor_id and status:
         rows = conn.execute(
             "SELECT a.*, u.name as student_name, u.email as student_email "
             "FROM alerts a JOIN users u ON a.student_id = u.id "
             "WHERE a.counsellor_id = ? AND a.status = ? ORDER BY a.fired_at DESC",
             (counsellor_id, status),
         ).fetchall()
-    else:
+    elif counsellor_id:
         rows = conn.execute(
             "SELECT a.*, u.name as student_name, u.email as student_email "
             "FROM alerts a JOIN users u ON a.student_id = u.id "
             "WHERE a.counsellor_id = ? ORDER BY a.fired_at DESC",
             (counsellor_id,),
+        ).fetchall()
+    elif status:
+        rows = conn.execute(
+            "SELECT a.*, u.name as student_name, u.email as student_email "
+            "FROM alerts a JOIN users u ON a.student_id = u.id "
+            "WHERE a.status = ? ORDER BY a.fired_at DESC",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT a.*, u.name as student_name, u.email as student_email "
+            "FROM alerts a JOIN users u ON a.student_id = u.id ORDER BY a.fired_at DESC",
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1361,20 +1621,32 @@ def get_alert_by_id(alert_id: str) -> dict | None:
 
 def has_consent_relationship(student_id: str, counsellor_id: str) -> bool:
     conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
     row = conn.execute(
-        "SELECT 1 FROM consents WHERE student_id = ? AND counsellor_id = ? LIMIT 1",
-        (student_id, counsellor_id),
+        "SELECT 1 FROM consents "
+        "WHERE student_id = ? AND counsellor_id = ? AND status = 'ACCEPTED' "
+        "AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?) LIMIT 1",
+        (student_id, counsellor_id, now),
     ).fetchone()
     conn.close()
     return row is not None
 
 
-def has_active_assignment(counsellor_id: str, student_id: str) -> bool:
+def has_active_assignment(
+    counsellor_id: str, student_id: str, institution_id: str | None = None
+) -> bool:
     conn = get_db()
-    row = conn.execute(
-        "SELECT 1 FROM counsellor_student_assignments WHERE counsellor_id = ? AND student_id = ? AND active = 1 LIMIT 1",
-        (counsellor_id, student_id),
-    ).fetchone()
+    if institution_id:
+        row = conn.execute(
+            "SELECT 1 FROM counsellor_student_assignments "
+            "WHERE counsellor_id = ? AND student_id = ? AND institution_id = ? AND active = 1 LIMIT 1",
+            (counsellor_id, student_id, institution_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM counsellor_student_assignments WHERE counsellor_id = ? AND student_id = ? AND active = 1 LIMIT 1",
+            (counsellor_id, student_id),
+        ).fetchone()
     conn.close()
     return row is not None
 
@@ -1402,8 +1674,16 @@ def dispose_alert(
             supersedes_id = ?,
             cooldown_until = ?
         WHERE id = ?""",
-        (disposition, reason_code, reason_note, dispositioned_by,
-         now_iso, supersedes_id, cooldown_until, alert_id),
+        (
+            disposition,
+            reason_code,
+            reason_note,
+            dispositioned_by,
+            now_iso,
+            supersedes_id,
+            cooldown_until,
+            alert_id,
+        ),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
@@ -1412,6 +1692,7 @@ def dispose_alert(
 
 
 # ── Audit log functions ───────────────────────────────────────────────
+
 
 def write_audit(
     actor_id: str | None,
@@ -1428,8 +1709,17 @@ def write_audit(
     conn.execute(
         "INSERT INTO audit_log (id, actor_id, actor_role, action, target_type, target_id, payload_json, ip, occurred_at) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        (aid, actor_id, actor_role, action, target_type, target_id,
-         json.dumps(redact_pii(payload)) if payload else None, ip, now),
+        (
+            aid,
+            actor_id,
+            actor_role,
+            action,
+            target_type,
+            target_id,
+            json.dumps(redact_pii(payload)) if payload else None,
+            ip,
+            now,
+        ),
     )
     conn.commit()
     conn.close()
@@ -1459,7 +1749,9 @@ def get_audit_log(counsellor_id: str, limit: int = 100) -> list:
            ))
         ORDER BY occurred_at DESC LIMIT ?
     """
-    rows = conn.execute(query, (counsellor_id, counsellor_id, counsellor_id, limit)).fetchall()
+    rows = conn.execute(
+        query, (counsellor_id, counsellor_id, counsellor_id, limit)
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1482,6 +1774,7 @@ def get_all_audit_log(limit: int = 100, action: str | None = None) -> list:
 
 
 # ── Notes functions ───────────────────────────────────────────────────
+
 
 def create_note(student_id: str, author_id: str, body: str) -> dict:
     nid = str(uuid.uuid4())
@@ -1509,6 +1802,7 @@ def get_notes(student_id: str) -> list:
 
 
 # ── Rolling risk functions ────────────────────────────────────────────
+
 
 def update_rolling_risk(
     student_id: str,
@@ -1574,12 +1868,16 @@ def create_group(name: str, description: str, created_by: str) -> dict:
 
 def get_group_by_id(group_id: str) -> dict | None:
     conn = get_db()
-    row = conn.execute("SELECT * FROM groups WHERE id = ? AND is_active = 1", (group_id,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM groups WHERE id = ? AND is_active = 1", (group_id,)
+    ).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def update_group(group_id: str, name: str | None = None, description: str | None = None) -> dict | None:
+def update_group(
+    group_id: str, name: str | None = None, description: str | None = None
+) -> dict | None:
     now = datetime.now(timezone.utc).isoformat()
     updates = ["updated_at = ?"]
     params = [now]
@@ -1699,13 +1997,23 @@ def send_group_message(group_id: str, sender_id: str, message: str) -> dict:
     )
     conn.commit()
     conn.close()
-    return {"id": mid, "group_id": group_id, "sender_id": sender_id, "message": message, "created_at": now}
+    return {
+        "id": mid,
+        "group_id": group_id,
+        "sender_id": sender_id,
+        "message": message,
+        "created_at": now,
+    }
 
 
-def get_group_messages(group_id: str, limit: int = 50, before_id: str | None = None) -> list:
+def get_group_messages(
+    group_id: str, limit: int = 50, before_id: str | None = None
+) -> list:
     conn = get_db()
     if before_id:
-        before = conn.execute("SELECT created_at FROM group_messages WHERE id = ?", (before_id,)).fetchone()
+        before = conn.execute(
+            "SELECT created_at FROM group_messages WHERE id = ?", (before_id,)
+        ).fetchone()
         if before:
             rows = conn.execute(
                 """SELECT gm.*, u.name as sender_name FROM group_messages gm
@@ -1761,8 +2069,14 @@ def mark_all_group_messages_read(group_id: str, user_id: str) -> None:
 # ═════════════════════════════════════════════════════════════════════
 
 NOTIFICATION_TYPES = {
-    "message", "group_message", "alert", "referral",
-    "broadcast", "consent", "approval", "system",
+    "message",
+    "group_message",
+    "alert",
+    "referral",
+    "broadcast",
+    "consent",
+    "approval",
+    "system",
 }
 
 
@@ -1779,13 +2093,20 @@ def get_notification_preferences(user_id: str) -> list:
         if ntype in existing:
             pref = existing[ntype]
             muted = json.loads(pref.get("muted_groups") or "[]")
-            result.append({"type": ntype, "enabled": bool(pref["enabled"]), "muted_groups": muted})
+            result.append(
+                {"type": ntype, "enabled": bool(pref["enabled"]), "muted_groups": muted}
+            )
         else:
             result.append({"type": ntype, "enabled": True, "muted_groups": []})
     return result
 
 
-def set_notification_preference(user_id: str, ntype: str, enabled: bool | None = None, muted_groups: list | None = None) -> dict:
+def set_notification_preference(
+    user_id: str,
+    ntype: str,
+    enabled: bool | None = None,
+    muted_groups: list | None = None,
+) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     existing = conn.execute(
@@ -1804,7 +2125,10 @@ def set_notification_preference(user_id: str, ntype: str, enabled: bool | None =
         if updates:
             params.append(user_id)
             params.append(ntype)
-            conn.execute(f"UPDATE notification_preferences SET {', '.join(updates)} WHERE user_id = ? AND type = ?", params)
+            conn.execute(
+                f"UPDATE notification_preferences SET {', '.join(updates)} WHERE user_id = ? AND type = ?",
+                params,
+            )
             conn.commit()
     else:
         muted_json = json.dumps(muted_groups if muted_groups is not None else [])
@@ -1815,7 +2139,11 @@ def set_notification_preference(user_id: str, ntype: str, enabled: bool | None =
         )
         conn.commit()
     conn.close()
-    return {"type": ntype, "enabled": enabled if enabled is not None else True, "muted_groups": muted_groups or []}
+    return {
+        "type": ntype,
+        "enabled": enabled if enabled is not None else True,
+        "muted_groups": muted_groups or [],
+    }
 
 
 def should_notify(user_id: str, ntype: str, group_id: str | None = None) -> bool:
@@ -1842,6 +2170,7 @@ def should_notify(user_id: str, ntype: str, group_id: str | None = None) -> bool
 
 # ── Students ─────────────────────────────────────────────────────────
 
+
 def create_student(
     institution_id: str,
     student_id_hash: str,
@@ -1865,10 +2194,19 @@ def create_student(
             created_by, created_at, updated_at
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            sid, institution_id, student_id_hash, first_name_encrypted,
-            email_encrypted, date_of_birth_encrypted, 1 if is_minor else 0,
-            parent_email_encrypted, parent_first_name_encrypted, grade_level,
-            created_by, now, now,
+            sid,
+            institution_id,
+            student_id_hash,
+            first_name_encrypted,
+            email_encrypted,
+            date_of_birth_encrypted,
+            1 if is_minor else 0,
+            parent_email_encrypted,
+            parent_first_name_encrypted,
+            grade_level,
+            created_by,
+            now,
+            now,
         ),
     )
     conn.commit()
@@ -1896,7 +2234,9 @@ def get_student_by_student_id_hash(student_id_hash: str) -> dict | None:
     return dict(row) if row else None
 
 
-def list_students(institution_id: str | None = None, limit: int = 200, offset: int = 0) -> list:
+def list_students(
+    institution_id: str | None = None, limit: int = 200, offset: int = 0
+) -> list:
     conn = get_db()
     if institution_id:
         rows = conn.execute(
@@ -1917,10 +2257,17 @@ def list_students(institution_id: str | None = None, limit: int = 200, offset: i
 def update_student(student_id: str, **kwargs) -> dict | None:
     """Update allowed student fields. Values are already encrypted/hashed by the caller."""
     allowed_fields = {
-        "institution_id", "student_id_hash", "first_name_encrypted",
-        "email_encrypted", "date_of_birth_encrypted", "is_minor",
-        "parent_email_encrypted", "parent_first_name_encrypted", "grade_level",
-        "current_consent_id", "deleted_at",
+        "institution_id",
+        "student_id_hash",
+        "first_name_encrypted",
+        "email_encrypted",
+        "date_of_birth_encrypted",
+        "is_minor",
+        "parent_email_encrypted",
+        "parent_first_name_encrypted",
+        "grade_level",
+        "current_consent_id",
+        "deleted_at",
     }
     updates = ["updated_at = ?"]
     params = [datetime.now(timezone.utc).isoformat()]
@@ -1965,6 +2312,7 @@ def set_student_current_consent(student_id: str, consent_id: str | None) -> bool
 
 # ── Consent templates ────────────────────────────────────────────────
 
+
 def create_consent_template(
     version: str,
     language: str,
@@ -1982,8 +2330,16 @@ def create_consent_template(
             parent_email_html, consent_page_html, is_active, created_at, updated_at
         ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (
-            tid, institution_id, version, language, subject_email_html,
-            parent_email_html, consent_page_html, 1, now, now,
+            tid,
+            institution_id,
+            version,
+            language,
+            subject_email_html,
+            parent_email_html,
+            consent_page_html,
+            1,
+            now,
+            now,
         ),
     )
     conn.commit()
@@ -2041,6 +2397,7 @@ def set_consent_template_active(template_id: str, is_active: bool) -> bool:
 
 # ── Consent events (append-only audit trail) ─────────────────────────
 
+
 def create_consent_event(
     consent_id: str,
     event_type: str,
@@ -2054,8 +2411,15 @@ def create_consent_event(
     conn.execute(
         "INSERT INTO consent_events (id, consent_id, event_type, actor_type, actor_id, metadata_json, created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (eid, consent_id, event_type, actor_type, actor_id,
-         json.dumps(redact_pii(metadata)) if metadata else None, now),
+        (
+            eid,
+            consent_id,
+            event_type,
+            actor_type,
+            actor_id,
+            json.dumps(redact_pii(metadata)) if metadata else None,
+            now,
+        ),
     )
     conn.commit()
     conn.close()
@@ -2074,7 +2438,14 @@ def get_consent_events(consent_id: str, limit: int = 200) -> list:
 
 # ── Demo requests ────────────────────────────────────────────────────
 
-DEMO_REQUEST_STATUSES = {"new", "contacted", "qualified", "demo_scheduled", "closed_won", "closed_lost"}
+DEMO_REQUEST_STATUSES = {
+    "new",
+    "contacted",
+    "qualified",
+    "demo_scheduled",
+    "closed_won",
+    "closed_lost",
+}
 
 
 def create_demo_request(
@@ -2099,9 +2470,21 @@ def create_demo_request(
             status, consent_to_contact, created_at, updated_at, work_email_hash
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            rid, encrypt_pii(full_name), encrypt_pii(work_email), encrypt_pii(organisation), organisation_type,
-            role_title, country, student_count_range, message, heard_about_us,
-            "new", 1 if consent_to_contact else 0, now, now, hash_email(work_email),
+            rid,
+            encrypt_pii(full_name),
+            encrypt_pii(work_email),
+            encrypt_pii(organisation),
+            organisation_type,
+            role_title,
+            country,
+            student_count_range,
+            message,
+            heard_about_us,
+            "new",
+            1 if consent_to_contact else 0,
+            now,
+            now,
+            hash_email(work_email),
         ),
     )
     conn.commit()
@@ -2120,7 +2503,9 @@ def get_demo_request(demo_request_id: str) -> dict | None:
     return _decrypt_demo_row(dict(row)) if row else None
 
 
-def list_demo_requests(status: str | None = None, limit: int = 100, offset: int = 0) -> list:
+def list_demo_requests(
+    status: str | None = None, limit: int = 100, offset: int = 0
+) -> list:
     delivery_subquery = (
         "SELECT e.event FROM email_events e "
         "WHERE e.related_type = 'demo_request' AND e.related_id = d.id "
@@ -2178,6 +2563,7 @@ def update_demo_request(demo_request_id: str, **kwargs) -> dict | None:
 
 # ── Email events (deliverability tracking) ───────────────────────────
 
+
 def create_email_event(
     related_type: str,
     related_id: str | None,
@@ -2192,10 +2578,17 @@ def create_email_event(
     conn.execute(
         "INSERT INTO email_events (id, related_type, related_id, event, esp_message_id, recipient_email, recipient_email_hash, metadata_json, created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
-        (eid, related_type, related_id, event, esp_message_id,
-         encrypt_pii(recipient_email) if recipient_email else None,
-         hash_email(recipient_email) if recipient_email else None,
-         json.dumps(metadata) if metadata else None, now),
+        (
+            eid,
+            related_type,
+            related_id,
+            event,
+            esp_message_id,
+            encrypt_pii(recipient_email) if recipient_email else None,
+            hash_email(recipient_email) if recipient_email else None,
+            json.dumps(metadata) if metadata else None,
+            now,
+        ),
     )
     conn.commit()
     conn.close()
@@ -2238,8 +2631,17 @@ def enqueue_email(
         "INSERT INTO email_outbox (id, to_email, to_email_hash, subject, body_html, "
         "related_type, related_id, metadata_json, status, attempts, created_at) "
         "VALUES (?,?,?,?,?,?,?,?,'queued',0,?)",
-        (eid, encrypt_pii(to_email), hash_email(to_email), subject, body_html,
-         related_type, related_id, json.dumps(metadata) if metadata else None, now),
+        (
+            eid,
+            encrypt_pii(to_email),
+            hash_email(to_email),
+            subject,
+            body_html,
+            related_type,
+            related_id,
+            json.dumps(metadata) if metadata else None,
+            now,
+        ),
     )
     conn.commit()
     conn.close()
@@ -2249,7 +2651,9 @@ def enqueue_email(
 def _outbox_set(outbox_id: str, **updates) -> None:
     sets = ", ".join(f"{col} = ?" for col in updates)
     conn = get_db()
-    conn.execute(f"UPDATE email_outbox SET {sets} WHERE id = ?", (*updates.values(), outbox_id))
+    conn.execute(
+        f"UPDATE email_outbox SET {sets} WHERE id = ?", (*updates.values(), outbox_id)
+    )
     conn.commit()
     conn.close()
 
@@ -2257,11 +2661,19 @@ def _outbox_set(outbox_id: str, **updates) -> None:
 def mark_email_outbox_sent(outbox_id: str, esp_message_id: str | None = None) -> None:
     """Mark an outbox row delivered (terminal state)."""
     now = datetime.now(timezone.utc).isoformat()
-    _outbox_set(outbox_id, status="sent", esp_message_id=esp_message_id, sent_at=now,
-                error=None, next_attempt_at=None)
+    _outbox_set(
+        outbox_id,
+        status="sent",
+        esp_message_id=esp_message_id,
+        sent_at=now,
+        error=None,
+        next_attempt_at=None,
+    )
 
 
-def mark_email_outbox_failed(outbox_id: str, error: str, retry_at: str | None = None) -> None:
+def mark_email_outbox_failed(
+    outbox_id: str, error: str, retry_at: str | None = None
+) -> None:
     """Mark an outbox row failed; ``retry_at`` is when the worker may retry it."""
     _outbox_set(outbox_id, status="failed", error=error, next_attempt_at=retry_at)
 
@@ -2325,7 +2737,9 @@ def count_pending_email_outbox() -> int:
     return row["n"] if row else 0
 
 
-def get_email_events(related_type: str | None = None, related_id: str | None = None, limit: int = 200) -> list:
+def get_email_events(
+    related_type: str | None = None, related_id: str | None = None, limit: int = 200
+) -> list:
     conn = get_db()
     if related_type and related_id:
         rows = conn.execute(
@@ -2351,7 +2765,9 @@ def get_email_events(related_type: str | None = None, related_id: str | None = N
 _MASTODON_HANDLE_RE = re.compile(r"^@([^@]+)@([^@]+)$")
 
 
-def _normalize_mastodon_handle(handle: str | None) -> tuple[str | None, str | None, str | None]:
+def _normalize_mastodon_handle(
+    handle: str | None,
+) -> tuple[str | None, str | None, str | None]:
     """Parse a Mastodon handle ``@username@instance`` and return
     ``(canonical_handle, instance, profile_url)``.
 
@@ -2393,7 +2809,9 @@ def save_social_account(
     normalized_handle: str | None
     instance: str | None
     derived_profile_url: str | None
-    normalized_handle, instance, derived_profile_url = _normalize_mastodon_handle(handle)
+    normalized_handle, instance, derived_profile_url = _normalize_mastodon_handle(
+        handle
+    )
 
     # Use the derived profile_url for Mastodon if we don't already have one
     if slug == "mastodon" and not profile_url and derived_profile_url:
@@ -2402,7 +2820,10 @@ def save_social_account(
     if slug == "mastodon" and normalized_handle:
         handle = normalized_handle
 
-    if credentials in (None, {},):
+    if credentials in (
+        None,
+        {},
+    ):
         creds_blob: str | None = None
     else:
         try:
@@ -2422,8 +2843,17 @@ def save_social_account(
             "credentials_json = COALESCE(?, credentials_json), verification_status = ?, "
             "verified_handle = COALESCE(?, verified_handle), verified_profile_url = COALESCE(?, verified_profile_url) "
             "WHERE student_id = ? AND platform = ?",
-            (handle, profile_url, now, creds_blob, verification_status,
-             verified_handle, verified_profile_url, student_id, slug),
+            (
+                handle,
+                profile_url,
+                now,
+                creds_blob,
+                verification_status,
+                verified_handle,
+                verified_profile_url,
+                student_id,
+                slug,
+            ),
         )
     else:
         conn.execute(
@@ -2431,8 +2861,20 @@ def save_social_account(
             "(id, student_id, platform, handle, profile_url, credentials_json, verification_status,"
             " verified_handle, verified_profile_url, last_verified_at, analysis_status, active, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_run', 1, ?, ?)",
-            (str(uuid.uuid4()), student_id, slug, handle, profile_url, creds_blob,
-             verification_status, verified_handle, verified_profile_url, now, now, now),
+            (
+                str(uuid.uuid4()),
+                student_id,
+                slug,
+                handle,
+                profile_url,
+                creds_blob,
+                verification_status,
+                verified_handle,
+                verified_profile_url,
+                now,
+                now,
+                now,
+            ),
         )
     conn.commit()
     row = conn.execute(
@@ -2517,10 +2959,12 @@ def set_social_account_verification(
     ).fetchone()
     conn.close()
     ok = cur.rowcount > 0
-    return (_strip_credentials(dict(row)) if row and ok else None)
+    return _strip_credentials(dict(row)) if row and ok else None
 
 
-def set_social_account_analysis_status(student_id: str, platform: str, analysis_status: str) -> dict | None:
+def set_social_account_analysis_status(
+    student_id: str, platform: str, analysis_status: str
+) -> dict | None:
     slug = normalize_platform(platform) or platform.strip().lower()
     conn = get_db()
     cur = conn.execute(
@@ -2560,6 +3004,7 @@ def delete_social_account(student_id: str, platform: str) -> bool:
 
 
 # ── Counsellor-student assignments ──────────────────────────────────
+
 
 def assign_student_to_counsellor(
     counsellor_id: str,
@@ -2620,7 +3065,9 @@ def get_assignment(assignment_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def get_assignments_for_counsellor(counsellor_id: str, active_only: bool = True) -> list:
+def get_assignments_for_counsellor(
+    counsellor_id: str, active_only: bool = True
+) -> list:
     """Get all assignments for a counsellor."""
     conn = get_db()
     if active_only:
