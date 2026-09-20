@@ -160,7 +160,10 @@ class MuteGroupRequest(BaseModel):
 # ── Consent & roster schemas (Delivery Brief §3) — M1 ─────────────────────────
 
 INSTITUTION_ORGANISATION_TYPES = {"k12", "university", "clinic", "research", "other"}
-DEMO_REQUEST_STATUSES = {"new", "contacted", "qualified", "demo_scheduled", "closed_won", "closed_lost"}
+DEMO_REQUEST_STATUSES = {
+    "new", "contacted", "qualified", "demo_scheduled",
+    "institution_provisioning", "onboarding", "closed_won", "closed_lost",
+}
 
 
 class InstitutionConsentSettings(BaseModel):
@@ -240,9 +243,11 @@ class DemoRequestResponse(BaseModel):
 
 
 class DemoRequestUpdate(BaseModel):
-    status: Optional[str] = Field(default=None, pattern="^(new|contacted|qualified|demo_scheduled|closed_won|closed_lost)$")
+    status: Optional[str] = Field(default=None, pattern="^(new|contacted|qualified|demo_scheduled|institution_provisioning|onboarding|closed_won|closed_lost)$")
     assigned_to: Optional[str] = None
     notes: Optional[str] = None
+    meeting_at: Optional[str] = Field(default=None, max_length=64)
+    meeting_url: Optional[str] = Field(default=None, max_length=2048)
 
 
 class EmailEventResponse(BaseModel):

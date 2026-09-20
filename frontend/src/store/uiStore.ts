@@ -9,6 +9,7 @@ export type PageKey =
   | 'appointments'
   | 'alert-queue' | 'consent-tracker' | 'audit-log'
   | 'admin' | 'counsellors' | 'institutions' | 'assignments' | 'my-accounts'
+  | 'institution'
   | 'notification-preferences'
   | 'self-history' | 'self-session'
 

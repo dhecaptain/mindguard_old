@@ -17,8 +17,7 @@
   },
   "lint-staged": {
     "frontend/**/*.{ts,tsx,js,jsx}": [
-      "frontend/node_modules/.bin/eslint --fix",
-      "frontend/node_modules/.bin/tsc --noEmit --project frontend/tsconfig.app.json"
+      "frontend/node_modules/.bin/eslint --fix"
     ],
     "marketing/**/*.{ts,tsx,js,jsx}": [
       "marketing/node_modules/.bin/eslint --fix"

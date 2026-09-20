@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { DEMO_STATUSES, getDemoRequests, updateDemoRequest } from '../../api/admin'
+import { DEMO_STATUSES, convertDemoRequest, getDemoRequests, updateDemoRequest } from '../../api/admin'
 import api from '../../api/client'
 import type { DemoRequest } from '../../types'
 
@@ -15,6 +15,8 @@ const STATUS_STYLE: Record<string, string> = {
   contacted: 'bg-[#fef3c7] text-[#92400e]',
   qualified: 'bg-[#ede9fe] text-[#5b21b6]',
   demo_scheduled: 'bg-[#ccfbf1] text-[#115e59]',
+  institution_provisioning: 'bg-[#fef3c7] text-[#92400e]',
+  onboarding: 'bg-[#ffedd5] text-[#9a3412]',
   closed_won: 'bg-[#d1fae5] text-[#065f46]',
   closed_lost: 'bg-[#fee2e2] text-[#991b1b]',
 }
@@ -25,6 +27,7 @@ export default function DemoRequestsPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [assignees, setAssignees] = useState<AssignableUser[]>([])
+  const [converting, setConverting] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -73,6 +76,18 @@ export default function DemoRequestsPanel() {
       setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, ...updated } : r)))
     } catch (e: any) {
       setError(e.message)
+    }
+  }
+
+  const handleConvert = async (id: string) => {
+    setConverting(id)
+    try {
+      const result = await convertDemoRequest(id)
+      setRequests((rs) => rs.map((r) => r.id === id ? result.demo_request : r))
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setConverting(null)
     }
   }
 
@@ -137,6 +152,8 @@ export default function DemoRequestsPanel() {
                 <th className="text-left py-[10px] px-[20px]">Type</th>
                 <th className="text-left py-[10px] px-[20px]">Status</th>
                 <th className="text-left py-[10px] px-[20px]">Assigned to</th>
+                <th className="text-left py-[10px] px-[20px]">Meeting</th>
+                <th className="text-left py-[10px] px-[20px]">Onboarding</th>
                 <th className="text-left py-[10px] px-[20px]">Notes</th>
                 <th className="text-left py-[10px] px-[20px]">Submitted</th>
               </tr>
@@ -149,6 +166,38 @@ export default function DemoRequestsPanel() {
                     <div className="text-[0.7rem] text-[#9ca3af]">{r.work_email}</div>
                     {r.role_title && (
                       <div className="text-[0.7rem] text-[#6b7280]">{r.role_title}</div>
+                    )}
+                  </td>
+                  <td className="py-[12px] px-[20px]">
+                    <input
+                      type="datetime-local"
+                      defaultValue={r.meeting_at ? r.meeting_at.slice(0, 16) : ''}
+                      onBlur={(e) => {
+                        const value = e.target.value ? new Date(e.target.value).toISOString() : null
+                        if (value !== (r.meeting_at || null)) updateDemoRequest(r.id, { meeting_at: value }).then((updated) => setRequests((rs) => rs.map((x) => x.id === r.id ? { ...x, ...updated } : x))).catch((e) => setError(e.message))
+                      }}
+                      className="w-[170px] rounded-[7px] border border-[#e5e7eb] px-[8px] py-[4px] text-[0.72rem] text-[#374151]"
+                    />
+                    <input
+                      defaultValue={r.meeting_url || ''}
+                      onBlur={(e) => {
+                        if (e.target.value !== (r.meeting_url || '')) updateDemoRequest(r.id, { meeting_url: e.target.value || null }).then((updated) => setRequests((rs) => rs.map((x) => x.id === r.id ? { ...x, ...updated } : x))).catch((err) => setError(err.message))
+                      }}
+                      placeholder="Meeting link"
+                      className="w-[170px] mt-[5px] rounded-[7px] border border-[#e5e7eb] px-[8px] py-[4px] text-[0.72rem] text-[#374151]"
+                    />
+                  </td>
+                  <td className="py-[12px] px-[20px]">
+                    {r.institution_id ? (
+                      <div className="text-[0.72rem] text-[#047857] font-semibold">Institution provisioned</div>
+                    ) : (
+                      <button
+                        onClick={() => handleConvert(r.id)}
+                        disabled={converting === r.id || !['qualified', 'demo_scheduled'].includes(r.status)}
+                        className="rounded-[7px] bg-[#0F766E] px-[9px] py-[5px] text-[0.7rem] font-semibold text-white disabled:opacity-40"
+                      >
+                        {converting === r.id ? 'Setting up…' : 'Set up institution'}
+                      </button>
                     )}
                   </td>
                   <td className="py-[12px] px-[20px] text-[#374151]">
