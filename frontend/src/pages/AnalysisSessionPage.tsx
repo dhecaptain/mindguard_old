@@ -35,9 +35,16 @@ function ProgressRows({ progress }: { progress: AnalysisSession['progress'] }) {
           const display = platformLabelByKey(slug, platformMap)
           const status = info.status || 'ok'
           return (
-            <div key={slug} className="flex items-center gap-[10px] py-[8px]">
-              <span className="text-[0.82rem] text-[#1f2937] font-medium flex-1">{display}</span>
-              <SelfStatusBadge tone={PER_PLATFORM_TONE[status] || 'neutral'}>{status}</SelfStatusBadge>
+            <div key={slug} className="flex items-start gap-[10px] py-[8px]">
+              <div className="flex-1 min-w-0">
+                <div className="text-[0.82rem] text-[#1f2937] font-medium">{display}</div>
+                {info.message ? (
+                  <div className="text-[0.72rem] text-[#6b7280] leading-relaxed mt-[2px]">{info.message}</div>
+                ) : null}
+              </div>
+              <SelfStatusBadge tone={PER_PLATFORM_TONE[status] || 'neutral'}>
+                {status === 'ok' ? 'Completed' : status === 'no_data' ? 'No data' : status === 'error' ? 'Failed' : status}
+              </SelfStatusBadge>
             </div>
           )
         })}

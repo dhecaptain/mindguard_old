@@ -21,14 +21,8 @@ export interface RunState {
   phase: string
   platforms: PlatformRunState[]
   startedAt: number
-  status: 'complete' | 'failed'
+  status: 'complete' | 'partial' | 'failed'
   final: Record<string, { status?: string; message?: string }> | null
-}
-
-const STAGE_MS = 750
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function messageFromError(e: unknown): string {
@@ -196,25 +190,10 @@ export const useSelfStore = create<SelfState>((set, get) => {
         const current = get().run
         if (current?.id === runId) set({ run: { ...current, phase } })
       }
-      const setPlatformStatus = (index: number, status: PlatformRunState['status']): void => {
-        const current = get().run
-        if (current?.id === runId) {
-          const platforms = current.platforms.map((p, i) => (i === index ? { ...p, status } : p))
-          set({ run: { ...current, platforms } })
-        }
-      }
-
-      await sleep(STAGE_MS)
-      for (let i = 0; i < runPlatforms.length; i++) {
-        setPlatformStatus(i, 'running')
-        setPhase(runPlatforms[i].stepLabel)
-        await sleep(STAGE_MS)
-        setPlatformStatus(i, 'done')
-      }
-      setPhase('Generating insights…')
-      await sleep(STAGE_MS)
-      setPhase('Finalising results…')
-      await sleep(500)
+      // The API currently returns one completed session and does not expose
+      // streaming progress. Keep the UI honest instead of simulating stages
+      // that have not happened yet.
+      setPhase('Fetching and analysing your connected platforms…')
 
       try {
         const res =
@@ -225,12 +204,21 @@ export const useSelfStore = create<SelfState>((set, get) => {
         await Promise.all([refreshAccounts(), refreshSessions()])
         const current = get().run
         if (current?.id === runId) {
+          const terminalStatus = session.status === 'failed'
+            ? 'failed'
+            : session.status === 'partial'
+              ? 'partial'
+              : 'complete'
           set({
             run: {
               ...current,
               running: false,
-              status: 'complete',
-              phase: 'Analysis complete',
+              status: terminalStatus,
+              phase: terminalStatus === 'failed'
+                ? 'Analysis failed'
+                : terminalStatus === 'partial'
+                  ? 'Analysis partially complete'
+                  : 'Analysis complete',
               platforms: current.platforms.map((p) => ({ ...p, status: 'done' })),
               final: session.progress?.platforms ?? null,
             },

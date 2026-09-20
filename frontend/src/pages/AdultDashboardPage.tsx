@@ -35,7 +35,10 @@ export default function AdultDashboardPage() {
   }, [catalogLoaded, loadCatalog])
 
   const latestSession = useMemo(
-    () => sessions.find((s) => s.findings) || sessions.find((s) => s.status === 'no_data') || sessions[0] || null,
+    // The API orders durable sessions newest first. Always show the latest
+    // run, including no_data/partial/failed outcomes, rather than hiding a
+    // recent unsuccessful run behind an older successful report.
+    () => sessions[0] || null,
     [sessions],
   )
 

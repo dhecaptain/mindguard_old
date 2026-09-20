@@ -176,6 +176,53 @@ def test_analyze_only_uses_own_connected_accounts(db, client, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_mixed_platform_results_are_recorded_as_partial(db, client, monkeypatch):
+    adult = _make_adult(db, "partial@self.test")
+    _connect(db, adult["id"], "reddit", "partial-reddit")
+    _connect(db, adult["id"], "bluesky", "partial.bsky.social", {"app_password": "abcd"})
+
+    async def fake_reddit(user_id):
+        return {
+            "platform": "reddit",
+            "status": "ok",
+            "message": "OK",
+            "posts": [{
+                "platform": "reddit",
+                "text": "I am having a difficult week but I am reaching out for support",
+                "risk_score": 0.25,
+                "level": "low",
+                "date": datetime.now(timezone.utc).isoformat(),
+                "url": "https://reddit.com/u/partial-reddit/1",
+            }],
+        }
+
+    async def fake_bluesky(user_id):
+        return {"platform": "bluesky", "status": "error", "message": "Authentication required."}
+
+    monkeypatch.setattr(self_analysis, "_ANALYZERS", {"reddit": fake_reddit, "bluesky": fake_bluesky})
+
+    token = _login(client, "partial@self.test")
+    resp = client.post("/api/self/analyze", headers={"Authorization": f"Bearer {token}"}, json={})
+    assert resp.status_code == 200, resp.text
+    session = resp.json()["session"]
+    assert session["status"] == "partial"
+    assert session["progress"]["platforms"]["bluesky"]["message"] == "Authentication required."
+
+
+def test_targeted_analysis_rejects_another_connected_platform(db, client, monkeypatch):
+    adult = _make_adult(db, "targeted@self.test")
+    _connect(db, adult["id"], "reddit", "targeted-reddit")
+    token = _login(client, "targeted@self.test")
+
+    resp = client.post(
+        "/api/self/analyze",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"platform": "bluesky"},
+    )
+    assert resp.status_code == 400
+    assert "Connect your bluesky account" in resp.text
+
+
 def test_guess_other_session_id_is_404(db, client):
     _make_adult(db, "idor@self.test")
     token = _login(client, "idor@self.test")
