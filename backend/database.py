@@ -752,6 +752,129 @@ def update_referral(referral_id: str, status: str | None = None, notes: str | No
     return dict(row) if row else None
 
 
+# ── Appointment scheduling functions ─────────────────────────────────
+
+APPOINTMENT_STATUSES = {"REQUESTED", "CONFIRMED", "DECLINED", "CANCELLED", "COMPLETED", "NO_SHOW"}
+APPOINTMENT_ACTIVE_STATUSES = ("REQUESTED", "CONFIRMED")
+
+
+def create_appointment(
+    student_id: str,
+    counsellor_id: str,
+    created_by: str,
+    title: str,
+    start_at: str,
+    end_at: str,
+    timezone_name: str = "UTC",
+    mode: str = "video",
+    location: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    aid = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        conflict = conn.execute(
+            """SELECT id FROM appointments
+               WHERE status IN ('REQUESTED', 'CONFIRMED')
+                 AND (student_id IN (?, ?) OR counsellor_id IN (?, ?))
+                 AND start_at < ? AND end_at > ? LIMIT 1""",
+            (student_id, counsellor_id, student_id, counsellor_id, end_at, start_at),
+        ).fetchone()
+        if conflict:
+            raise ValueError("The requested time conflicts with an existing appointment")
+        conn.execute(
+            """INSERT INTO appointments
+               (id, student_id, counsellor_id, created_by, title, start_at, end_at,
+                timezone, mode, location, notes, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,'REQUESTED',?,?)""",
+            (aid, student_id, counsellor_id, created_by, title, start_at, end_at,
+             timezone_name, mode, location, notes, now, now),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+    row = conn.execute(
+        """SELECT a.*, s.name AS student_name, s.email AS student_email,
+                  c.name AS counsellor_name, c.email AS counsellor_email
+           FROM appointments a
+           JOIN users s ON s.id = a.student_id
+           JOIN users c ON c.id = a.counsellor_id
+           WHERE a.id = ?""",
+        (aid,),
+    ).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_appointment(appointment_id: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute(
+        """SELECT a.*, s.name AS student_name, s.email AS student_email,
+                  c.name AS counsellor_name, c.email AS counsellor_email
+           FROM appointments a
+           JOIN users s ON s.id = a.student_id
+           JOIN users c ON c.id = a.counsellor_id
+           WHERE a.id = ?""",
+        (appointment_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def list_appointments(user_id: str | None = None, *, status: str | None = None) -> list:
+    conn = get_db()
+    clauses, params = [], []
+    if user_id:
+        clauses.append("(a.student_id = ? OR a.counsellor_id = ?)")
+        params.extend([user_id, user_id])
+    if status:
+        clauses.append("a.status = ?")
+        params.append(status)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        """SELECT a.*, s.name AS student_name, s.email AS student_email,
+                  c.name AS counsellor_name, c.email AS counsellor_email
+           FROM appointments a
+           JOIN users s ON s.id = a.student_id
+           JOIN users c ON c.id = a.counsellor_id""" + where +
+        " ORDER BY a.start_at ASC, a.created_at ASC",
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_appointment_status(
+    appointment_id: str,
+    status: str,
+    cancellation_reason: str | None = None,
+) -> dict | None:
+    if status not in APPOINTMENT_STATUSES:
+        raise ValueError("Invalid appointment status")
+    conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE appointments SET status = ?, cancellation_reason = ?, updated_at = ? WHERE id = ?",
+        (status, cancellation_reason, now, appointment_id),
+    )
+    conn.commit()
+    row = conn.execute(
+        """SELECT a.*, s.name AS student_name, s.email AS student_email,
+                  c.name AS counsellor_name, c.email AS counsellor_email
+           FROM appointments a
+           JOIN users s ON s.id = a.student_id
+           JOIN users c ON c.id = a.counsellor_id
+           WHERE a.id = ?""",
+        (appointment_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def send_message(sender_id: str, receiver_id: str, message: str) -> dict:
     mid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
