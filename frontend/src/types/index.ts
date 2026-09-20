@@ -251,6 +251,8 @@ export type DemoRequestStatus =
   | 'contacted'
   | 'qualified'
   | 'demo_scheduled'
+  | 'institution_provisioning'
+  | 'onboarding'
   | 'closed_won'
   | 'closed_lost'
 
@@ -271,6 +273,10 @@ export interface DemoRequest {
   consent_to_contact?: number
   created_at: string
   updated_at: string
+  meeting_at?: string | null
+  meeting_url?: string | null
+  institution_id?: string | null
+  converted_at?: string | null
 }
 
 export interface LinkedAccount {

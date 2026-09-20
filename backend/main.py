@@ -4270,6 +4270,90 @@ async def v1_admin_update_demo_request(
     return updated
 
 
+@app.post("/api/v1/admin/demo-requests/{demo_request_id}/convert", status_code=201)
+async def v1_admin_convert_demo_request(
+    demo_request_id: str,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Convert a qualified lead into a provisioned institution and school-admin invite."""
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can provision institutions")
+    demo = get_demo_request(demo_request_id)
+    if not demo:
+        raise HTTPException(404, "Demo request not found")
+    if demo.get("institution_id"):
+        raise HTTPException(409, "This demo request is already linked to an institution")
+    requester_email = (demo.get("work_email") or "").strip().lower()
+    existing = get_user_by_email(requester_email) if requester_email else None
+    if existing:
+        raise HTTPException(409, "The requester email already belongs to an account; provision manually")
+
+    institution = create_institution(
+        demo.get("organisation") or "New MindGuard institution",
+        demo.get("organisation_type") or "other",
+        created_by=user["id"],
+    )
+    staff = create_user(
+        requester_email,
+        demo.get("full_name") or "Institution administrator",
+        hash_password(secrets.token_urlsafe(32)),
+        role_type="school_admin",
+        institution_id=institution["id"],
+    )
+    from backend.services.crypto import hash_token
+    token = secrets.token_urlsafe(32)
+    set_user_invitation(
+        staff["id"], hash_token(token),
+        (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    )
+    base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+    invite_url = f"{base}/invite?token={token}"
+    context = {
+        "counsellor_name": staff["name"],
+        "institution_name": institution["name"],
+        "invite_url": invite_url,
+        "setup_url": invite_url,
+        "support_email": os.getenv("DEMO_NOTIFY_EMAIL", "support@mindguard.ai"),
+        "withdraw_url": f"{base}/privacy",
+        "privacy_url": f"{base}/privacy",
+        "contact_url": f"{base}/contact",
+    }
+    subject, body = counsellor_invitation_notification(context)
+    email_sent, email_error = send_html_email(
+        requester_email, subject, body,
+        related_type="institution_admin_invitation", related_id=staff["id"],
+        metadata={"institution_id": institution["id"], "demo_request_id": demo_request_id},
+    )
+    converted_at = datetime.now(timezone.utc).isoformat()
+    updated = update_demo_request(
+        demo_request_id,
+        status="institution_provisioning",
+        institution_id=institution["id"],
+        converted_by=user["id"],
+        converted_at=converted_at,
+    )
+    write_audit(
+        user["id"], user["role_type"], "DEMO_REQUEST_CONVERTED",
+        "demo_request", demo_request_id,
+        payload={"institution_id": institution["id"], "staff_id": staff["id"], "email_sent": email_sent},
+        ip=_client_ip(request),
+    )
+    write_audit(
+        user["id"], user["role_type"], "INSTITUTION_PROVISIONED_FROM_DEMO",
+        "institution", institution["id"],
+        payload={"demo_request_id": demo_request_id, "staff_id": staff["id"]},
+        ip=_client_ip(request),
+    )
+    return {
+        "demo_request": updated,
+        "institution": institution,
+        "staff": {"id": staff["id"], "email": staff["email"], "name": staff["name"], "role_type": staff["role_type"]},
+        "email_sent": email_sent,
+        "email_error": email_error or None,
+    }
+
+
 @app.get("/api/v1/admin/audit")
 async def v1_admin_audit_log(
     action: str | None = None,

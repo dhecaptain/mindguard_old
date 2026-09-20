@@ -2318,7 +2318,10 @@ def get_consent_events(consent_id: str, limit: int = 200) -> list:
 
 # ── Demo requests ────────────────────────────────────────────────────
 
-DEMO_REQUEST_STATUSES = {"new", "contacted", "qualified", "demo_scheduled", "closed_won", "closed_lost"}
+DEMO_REQUEST_STATUSES = {
+    "new", "contacted", "qualified", "demo_scheduled",
+    "institution_provisioning", "onboarding", "closed_won", "closed_lost",
+}
 
 
 def create_demo_request(
@@ -2403,7 +2406,10 @@ def list_demo_requests(status: str | None = None, limit: int = 100, offset: int 
 
 
 def update_demo_request(demo_request_id: str, **kwargs) -> dict | None:
-    allowed_fields = {"status", "assigned_to", "notes"}
+    allowed_fields = {
+        "status", "assigned_to", "notes", "meeting_at", "meeting_url",
+        "institution_id", "converted_by", "converted_at",
+    }
     updates = ["updated_at = ?"]
     params = [datetime.now(timezone.utc).isoformat()]
     for field, value in kwargs.items():

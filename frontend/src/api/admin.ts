@@ -76,9 +76,20 @@ export async function getDemoRequests(
 
 export async function updateDemoRequest(
   id: string,
-  patch: Partial<Pick<DemoRequest, 'status' | 'notes' | 'assigned_to'>>,
+  patch: Partial<Pick<DemoRequest, 'status' | 'notes' | 'assigned_to' | 'meeting_at' | 'meeting_url'>>,
 ): Promise<DemoRequest> {
   const { data } = await api.patch(`/v1/admin/demo-requests/${id}`, patch)
+  return data
+}
+
+export async function convertDemoRequest(id: string): Promise<{
+  demo_request: DemoRequest
+  institution: Institution
+  staff: { id: string; email: string; name: string; role_type: string }
+  email_sent: boolean
+  email_error?: string | null
+}> {
+  const { data } = await api.post(`/v1/admin/demo-requests/${id}/convert`)
   return data
 }
 
@@ -87,6 +98,8 @@ export const DEMO_STATUSES: DemoRequestStatus[] = [
   'contacted',
   'qualified',
   'demo_scheduled',
+  'institution_provisioning',
+  'onboarding',
   'closed_won',
   'closed_lost',
 ]

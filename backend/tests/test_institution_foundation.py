@@ -34,3 +34,16 @@ def test_archive_student_removes_it_from_active_roster_and_blocks_user(db):
     assert db.archive_student(student_id) is True
     assert db.get_student_by_id(student_id) is None
     assert db.get_user_by_id(user["id"])["status"] == "archived"
+
+
+def test_demo_request_tracks_meeting_and_institution_onboarding(db):
+    demo = db.create_demo_request(
+        "Owner", "owner@example.test", "Tenant A", "k12",
+        role_title="Principal", country="KE", student_count_range="Under 500",
+    )
+    updated = db.update_demo_request(
+        demo["id"], status="demo_scheduled", meeting_at="2026-10-01T09:00:00Z",
+        meeting_url="https://meet.example.test/demo",
+    )
+    assert updated["status"] == "demo_scheduled"
+    assert updated["meeting_url"].startswith("https://")
