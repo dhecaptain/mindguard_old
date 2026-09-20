@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { DEMO_STATUSES, convertDemoRequest, getDemoRequests, updateDemoRequest } from '../../api/admin'
+import { DEMO_STATUSES, convertDemoRequest, getDemoRequests, scheduleDemoRequest, updateDemoRequest } from '../../api/admin'
 import api from '../../api/client'
 import type { DemoRequest } from '../../types'
 
@@ -28,6 +28,7 @@ export default function DemoRequestsPanel() {
   const [error, setError] = useState<string | null>(null)
   const [assignees, setAssignees] = useState<AssignableUser[]>([])
   const [converting, setConverting] = useState<string | null>(null)
+  const [scheduling, setScheduling] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -88,6 +89,25 @@ export default function DemoRequestsPanel() {
       setError(e.message)
     } finally {
       setConverting(null)
+    }
+  }
+
+  const handleSchedule = async (request: DemoRequest, event: React.MouseEvent<HTMLButtonElement>) => {
+    const row = event.currentTarget.closest('tr')
+    const dateInput = row?.querySelector('input[type="datetime-local"]') as HTMLInputElement | null
+    const urlInput = row?.querySelector('input[placeholder="Meeting link"]') as HTMLInputElement | null
+    if (!dateInput?.value || !urlInput?.value.trim()) {
+      setError('Choose a meeting time and add the meeting link before sending the invitation.')
+      return
+    }
+    setScheduling(request.id)
+    try {
+      const result = await scheduleDemoRequest(request.id, new Date(dateInput.value).toISOString(), urlInput.value.trim())
+      setRequests((rs) => rs.map((r) => r.id === request.id ? result.demo_request : r))
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setScheduling(null)
     }
   }
 
@@ -186,6 +206,15 @@ export default function DemoRequestsPanel() {
                       placeholder="Meeting link"
                       className="w-[170px] mt-[5px] rounded-[7px] border border-[#e5e7eb] px-[8px] py-[4px] text-[0.72rem] text-[#374151]"
                     />
+                    <button
+                      onClick={(event) => handleSchedule(r, event)}
+                      disabled={scheduling === r.id}
+                      className="w-[170px] mt-[5px] rounded-[7px] bg-[#0F766E] px-[8px] py-[5px] text-[0.7rem] font-semibold text-white disabled:opacity-50"
+                    >
+                      {scheduling === r.id ? 'Sending invite…' : 'Send calendar invite'}
+                    </button>
+                    {r.meeting_response === 'ACCEPTED' && <div className="text-[0.7rem] text-[#047857] mt-[5px]">Accepted</div>}
+                    {r.meeting_response === 'RESCHEDULE_REQUESTED' && <div className="text-[0.7rem] text-[#b45309] mt-[5px]">Reschedule requested</div>}
                   </td>
                   <td className="py-[12px] px-[20px]">
                     {r.institution_id ? (

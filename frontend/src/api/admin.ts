@@ -24,6 +24,11 @@ export async function createInstitution(
   return data
 }
 
+export async function updateInstitution(id: string, patch: { status?: string; name?: string; type?: string }): Promise<Institution> {
+  const { data } = await api.patch(`/v1/admin/institutions/${id}`, patch)
+  return data
+}
+
 export async function getRosterStudents(
   institutionId?: string,
   limit = 500,
@@ -90,6 +95,16 @@ export async function convertDemoRequest(id: string): Promise<{
   email_error?: string | null
 }> {
   const { data } = await api.post(`/v1/admin/demo-requests/${id}/convert`)
+  return data
+}
+
+export async function scheduleDemoRequest(id: string, meeting_at: string, meeting_url: string): Promise<{
+  demo_request: DemoRequest
+  calendar_url: string
+  email_sent: boolean
+  email_error?: string | null
+}> {
+  const { data } = await api.post(`/v1/admin/demo-requests/${id}/schedule`, { meeting_at, meeting_url })
   return data
 }
 

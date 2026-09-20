@@ -45,6 +45,7 @@ import NotificationPreferencesPage from './pages/NotificationPreferencesPage'
 import AppointmentsPage from './pages/AppointmentsPage'
 import LandingPage from './pages/LandingPage'
 import InstitutionWorkspacePage from './pages/InstitutionWorkspacePage'
+import AdminInstitutionsPage from './pages/AdminInstitutionsPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -89,7 +90,7 @@ function PageRouter() {
     switch (currentPage) {
       case 'admin': return <AdminPage />
       case 'counsellors': return <AdminCounsellorsPage />
-      case 'institutions': return <ConsentTrackerPage />
+      case 'institutions': return <AdminInstitutionsPage />
       case 'assignments': return <AdminCounsellorsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />

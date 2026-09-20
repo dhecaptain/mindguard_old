@@ -1,5 +1,6 @@
 import asyncio
 import io
+import html as html_lib
 import ipaddress
 import json
 import logging
@@ -81,7 +82,7 @@ from backend.database import (
     get_institution_by_id, list_institutions, create_institution, update_institution, list_students,
     update_user_institution, archive_student,
     get_student_by_id, get_student_by_user_id,
-    create_demo_request, get_demo_request, list_demo_requests, update_demo_request,
+    create_demo_request, get_demo_request, get_demo_request_by_response_token, list_demo_requests, update_demo_request,
     # groups
     create_group, get_group_by_id, update_group, delete_group,
     add_group_member, remove_group_member, get_group_members,
@@ -4233,6 +4234,123 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
         "status": demo["status"],
         "warning": work_email_warning(data.work_email, data.organisation_type),
     }
+
+
+def _demo_calendar_url(demo: dict) -> str:
+    start = datetime.fromisoformat(demo["meeting_at"].replace("Z", "+00:00"))
+    end = start + timedelta(minutes=30)
+    dates = f"{start.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}/{end.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    details = f"MindGuard institution onboarding meeting. Join: {demo.get('meeting_url') or ''}"
+    return "https://calendar.google.com/calendar/render?" + urlencode({
+        "action": "TEMPLATE",
+        "text": f"MindGuard onboarding — {demo.get('organisation') or 'Institution'}",
+        "dates": dates,
+        "details": details,
+        "location": demo.get("meeting_url") or "",
+    })
+
+
+@app.post("/api/v1/admin/demo-requests/{demo_request_id}/schedule")
+async def v1_admin_schedule_demo(
+    demo_request_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can schedule demos")
+    demo = get_demo_request(demo_request_id)
+    if not demo:
+        raise HTTPException(404, "Demo request not found")
+    meeting_at = (data.get("meeting_at") or "").strip()
+    meeting_url = (data.get("meeting_url") or "").strip()
+    if not meeting_at or not meeting_url:
+        raise HTTPException(400, "Meeting date and meeting link are required")
+    try:
+        datetime.fromisoformat(meeting_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "meeting_at must be a valid ISO date")
+
+    from backend.services.crypto import hash_token
+    response_token = secrets.token_urlsafe(32)
+    updated = update_demo_request(
+        demo_request_id,
+        status="demo_scheduled",
+        meeting_at=meeting_at,
+        meeting_url=meeting_url,
+        meeting_response="PENDING",
+        meeting_response_token_hash=hash_token(response_token),
+        meeting_response_note=None,
+    )
+    updated = updated or demo
+    public_base = os.getenv("PUBLIC_SITE_URL", "https://mindguardai.me").rstrip("/")
+    accept_url = f"{public_base}/demo/respond?token={response_token}&action=accept"
+    reschedule_url = f"{public_base}/demo/respond?token={response_token}&action=reschedule"
+    calendar_url = _demo_calendar_url(updated)
+    recipient = html_lib.escape(updated.get("work_email") or "")
+    name = html_lib.escape(updated.get("full_name") or "there")
+    organisation = html_lib.escape(updated.get("organisation") or "MindGuard")
+    body = f"""
+    <p>Hello {name},</p>
+    <p>Your MindGuard onboarding meeting for <strong>{organisation}</strong> has been proposed.</p>
+    <p><strong>When:</strong> {html_lib.escape(meeting_at)}<br><strong>Join:</strong> <a href="{html_lib.escape(meeting_url)}">{html_lib.escape(meeting_url)}</a></p>
+    <p><a href="{html_lib.escape(calendar_url)}">Add to Google Calendar</a></p>
+    <p><a href="{html_lib.escape(accept_url)}">Accept this time</a> &nbsp; | &nbsp; <a href="{html_lib.escape(reschedule_url)}">Request a different time</a></p>
+    <p>If you request a change, our team will contact you to agree another slot.</p>
+    """
+    email_sent, email_error = send_html_email(
+        recipient, "MindGuard onboarding meeting invitation", body,
+        related_type="demo_meeting_invitation", related_id=demo_request_id,
+        metadata={"meeting_at": meeting_at, "meeting_url": meeting_url},
+    )
+    write_audit(
+        user["id"], user["role_type"], "DEMO_MEETING_SCHEDULED", "demo_request", demo_request_id,
+        payload={"meeting_at": meeting_at, "email_sent": email_sent}, ip=_client_ip(request),
+    )
+    return {"demo_request": updated, "calendar_url": calendar_url, "email_sent": email_sent, "email_error": email_error or None}
+
+
+@app.get("/api/v1/demo-requests/respond")
+async def demo_meeting_response_details(token: str):
+    from backend.services.crypto import hash_token
+    demo = get_demo_request_by_response_token(hash_token(token))
+    if not demo:
+        raise HTTPException(404, "This meeting invitation is no longer valid")
+    return {
+        "full_name": demo.get("full_name"),
+        "organisation": demo.get("organisation"),
+        "meeting_at": demo.get("meeting_at"),
+        "meeting_url": demo.get("meeting_url"),
+        "meeting_response": demo.get("meeting_response"),
+    }
+
+
+@app.post("/api/v1/demo-requests/respond")
+async def respond_to_demo_meeting(token: str, data: dict, request: Request):
+    from backend.services.crypto import hash_token
+    demo = get_demo_request_by_response_token(hash_token(token))
+    if not demo:
+        raise HTTPException(404, "This meeting invitation is no longer valid")
+    action = (data.get("action") or "").strip().lower()
+    if action not in ("accept", "reschedule"):
+        raise HTTPException(400, "action must be accept or reschedule")
+    response = "ACCEPTED" if action == "accept" else "RESCHEDULE_REQUESTED"
+    note = (data.get("note") or "").strip()[:2000] or None
+    updated = update_demo_request(
+        demo["id"], meeting_response=response, meeting_response_note=note,
+    )
+    write_audit(
+        None, "public", "DEMO_MEETING_RESPONSE", "demo_request", demo["id"],
+        payload={"response": response, "has_note": bool(note)}, ip=_client_ip(request),
+    )
+    if response == "RESCHEDULE_REQUESTED" and DEMO_NOTIFY_EMAIL:
+        send_html_email(
+            DEMO_NOTIFY_EMAIL,
+            "MindGuard demo reschedule requested",
+            f"The requester for {html_lib.escape(demo.get('organisation') or 'an institution')} requested a new meeting time.<br><br>{html_lib.escape(note or 'No reason provided.')}",
+            related_type="demo_meeting_reschedule", related_id=demo["id"],
+        )
+    return {"ok": True, "meeting_response": response, "demo_request": updated}
 
 
 @app.get("/api/v1/admin/demo-requests")
