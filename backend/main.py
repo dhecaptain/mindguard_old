@@ -24,6 +24,8 @@ import httpx
 import jwt
 from pathlib import Path
 
+_background_tasks: list[asyncio.Task] = []
+
 from fastapi import FastAPI, Header, Request, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -69,15 +71,16 @@ from backend.database import (
     query_consents,
     get_consent_with_student, get_audit_log_for_target, get_consent_events,
     create_linked_account, get_linked_accounts, revoke_linked_account,
-    get_alerts, dispose_alert, get_alert_by_id, has_consent_relationship,
+    get_alerts, get_alert_by_id, transition_alert, has_consent_relationship,
     write_audit, get_audit_log, get_all_audit_log,
     health_check,
     create_note, get_notes,
     get_rolling_risk, get_rolling_risk_history,
     get_user_by_referral_code, get_all_users,
     update_user_password, update_user_role,
-    get_institution_by_id, list_institutions, create_institution, list_students,
-    get_student_by_id,
+    get_institution_by_id, list_institutions, create_institution, update_institution, list_students,
+    update_user_institution, archive_student,
+    get_student_by_id, get_student_by_user_id,
     create_demo_request, get_demo_request, list_demo_requests, update_demo_request,
     # groups
     create_group, get_group_by_id, update_group, delete_group,
@@ -108,6 +111,7 @@ from backend.services.demo_service import (
     demo_email_context, work_email_warning, verify_recaptcha_token,
 )
 from backend.services.roster_service import upsert_roster
+from backend.services.retention_service import run_retention_cleanup
 from backend.permissions import (
     PERM_ANALYSIS_RUN, PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW,
     PERM_CONSENT_MANAGE, PERM_DEMO_MANAGE, PERM_AUDIT_VIEW,
@@ -431,8 +435,23 @@ async def startup():
         email_status["webhook_configured"],
         email_status["sender"],
     )
-    asyncio.create_task(_consent_maintenance_loop())
-    asyncio.create_task(_email_drain_loop())
+    _background_tasks.clear()
+    _background_tasks.extend([
+        asyncio.create_task(_consent_maintenance_loop(), name="consent-maintenance"),
+        asyncio.create_task(_retention_maintenance_loop(), name="retention-maintenance"),
+        asyncio.create_task(_email_drain_loop(), name="email-drain"),
+    ])
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    """Cancel maintenance workers so TestClient and graceful shutdown can exit."""
+    tasks = list(_background_tasks)
+    _background_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _bootstrap_admins() -> None:
@@ -503,6 +522,18 @@ async def _email_drain_loop() -> None:
         except Exception:
             logger.exception("email outbox drain failed")
         await asyncio.sleep(int(os.getenv("EMAIL_WORKER_POLL_SECONDS", "3")))
+
+
+async def _retention_maintenance_loop() -> None:
+    """Daily anonymisation of archived institution students past retention."""
+    while True:
+        try:
+            result = await asyncio.to_thread(run_retention_cleanup)
+            if result["anonymized"]:
+                logger.info("retention maintenance: eligible=%s anonymized=%s", result["eligible"], result["anonymized"])
+        except Exception:
+            logger.exception("retention maintenance run failed")
+        await asyncio.sleep(86400)
 
 
 @app.get("/api/health")
@@ -2138,7 +2169,7 @@ async def create_counsellor(data: dict, request: Request, user: dict = Depends(r
             raise HTTPException(400, "Institution not found")
 
     placeholder_hash = hash_password(secrets.token_urlsafe(32))
-    counsellor = create_user(email, name, placeholder_hash, role_type="counsellor")
+    counsellor = create_user(email, name, placeholder_hash, role_type="counsellor", institution_id=institution_id)
 
     from backend.services.crypto import hash_token
     token = secrets.token_urlsafe(32)
@@ -2372,8 +2403,7 @@ async def update_counsellor(counsellor_id: str, data: dict, request: Request, us
 @app.post("/api/admin/assignments")
 async def create_assignment(data: dict, request: Request, user: dict = Depends(require_auth)):
     """Assign a student to a counsellor (admin only)."""
-    if user["role_type"] != "admin":
-        raise HTTPException(403, "Admin access required")
+    scoped_institution = _require_institution_admin(user, data.get("institution_id"))
     counsellor_id = data.get("counsellor_id")
     student_id = data.get("student_id")
     institution_id = data.get("institution_id")
@@ -2388,8 +2418,9 @@ async def create_assignment(data: dict, request: Request, user: dict = Depends(r
         raise HTTPException(404, "Counsellor not found")
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
-    if not institution_id:
+    if not institution_id and not scoped_institution:
         raise HTTPException(400, "institution_id is required")
+    institution_id = scoped_institution or institution_id
     if counsellor.get("institution_id") != institution_id or student.get("institution_id") != institution_id:
         raise HTTPException(403, "Counsellor, student, and assignment institution must match")
     
@@ -2409,12 +2440,10 @@ async def create_assignment(data: dict, request: Request, user: dict = Depends(r
 @app.delete("/api/admin/assignments/{assignment_id}")
 async def remove_assignment(assignment_id: str, request: Request, user: dict = Depends(require_auth)):
     """Remove a student-counsellor assignment (admin only)."""
-    if user["role_type"] != "admin":
-        raise HTTPException(403, "Admin access required")
-    
     assignment = get_assignment(assignment_id)
     if not assignment:
         raise HTTPException(404, "Assignment not found")
+    _require_institution_admin(user, assignment.get("institution_id"))
     
     ok = unassign_student_from_counsellor(assignment_id)
     if not ok:
@@ -2432,9 +2461,22 @@ async def remove_assignment(assignment_id: str, request: Request, user: dict = D
 @app.get("/api/admin/assignments")
 async def list_assignments(counsellor_id: str | None = None, student_id: str | None = None, user: dict = Depends(require_auth)):
     """List assignments (admin only)."""
-    if user["role_type"] != "admin":
-        raise HTTPException(403, "Admin access required")
+    scoped = _require_institution_scope(user)
     
+    if scoped:
+        from backend.database import get_db
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT csa.*, u_c.name as counsellor_name, u_c.email as counsellor_email, "
+            "u_s.name as student_name, u_s.email as student_email, i.name as institution_name "
+            "FROM counsellor_student_assignments csa "
+            "JOIN users u_c ON csa.counsellor_id = u_c.id JOIN users u_s ON csa.student_id = u_s.id "
+            "LEFT JOIN institutions i ON csa.institution_id = i.id "
+            "WHERE csa.institution_id = ? AND csa.active = 1 ORDER BY csa.assigned_at DESC",
+            (scoped,),
+        ).fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
     if counsellor_id:
         assignments = get_assignments_for_counsellor(counsellor_id)
     elif student_id:
@@ -2913,6 +2955,39 @@ def _require_counsellor(user: dict) -> None:
         PERM_ANALYSIS_RUN, PERM_CONSENT_MANAGE,
         PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW, PERM_DEMO_MANAGE,
     })
+
+
+def _require_institution_scope(user: dict, institution_id: str | None = None) -> str | None:
+    """Resolve institution scope from the authenticated principal.
+
+    Platform admins may explicitly select a valid institution. All other
+    staff derive scope from their account; a request-supplied institution ID
+    can only narrow that scope, never broaden it.
+    """
+    if user.get("role_type") == "admin":
+        if institution_id:
+            institution = get_institution_by_id(institution_id)
+            if not institution:
+                raise HTTPException(404, "Institution not found")
+            return institution_id
+        return None
+    if user.get("role_type") not in ("school_admin", "counsellor"):
+        raise HTTPException(403, "Institution staff access required")
+    account_institution = user.get("institution_id")
+    if not account_institution:
+        raise HTTPException(403, "Your account is not linked to an institution")
+    if institution_id and institution_id != account_institution:
+        raise HTTPException(403, "You cannot access another institution")
+    institution = get_institution_by_id(account_institution)
+    if not institution or (institution.get("status") or "ACTIVE") != "ACTIVE":
+        raise HTTPException(403, "This institution is not active")
+    return account_institution
+
+
+def _require_institution_admin(user: dict, institution_id: str | None = None) -> str | None:
+    if user.get("role_type") not in ("admin", "school_admin"):
+        raise HTTPException(403, "Institution administrator access required")
+    return _require_institution_scope(user, institution_id)
 
 
 def _require_counsellor_student_access(
@@ -3470,12 +3545,18 @@ async def v1_delete_account(
 @app.get("/api/v1/alerts")
 async def v1_list_alerts(
     status: str = "OPEN",
+    institution_id: str | None = None,
     user: dict = Depends(require_auth),
 ):
     _require_counsellor(user)
-    valid_statuses = {"OPEN", "CLOSED"}
+    scoped = _require_institution_scope(user, institution_id)
+    valid_statuses = {"OPEN", "ACKNOWLEDGED", "ESCALATED", "IN_PROGRESS", "CLOSED", "FALSE_POSITIVE"}
     filter_status = status.upper() if status.upper() in valid_statuses else None
-    alerts = get_alerts(None if user["role_type"] == "admin" else user["id"], status=filter_status)
+    alerts = get_alerts(
+        None if user["role_type"] in ("admin", "school_admin") else user["id"],
+        status=filter_status,
+        institution_id=scoped,
+    )
     return {"alerts": alerts, "total": len(alerts)}
 
 
@@ -3501,18 +3582,24 @@ async def v1_dispose_alert(
     alert = get_alert_by_id(alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
-    if alert.get("counsellor_id") != user["id"] and user["role_type"] != "admin":
+    if user["role_type"] == "admin":
+        pass
+    elif user["role_type"] == "school_admin":
+        scoped = _require_institution_scope(user)
+        student = get_user_by_id(alert["student_id"])
+        if not student or student.get("institution_id") != scoped:
+            raise HTTPException(403, "Alert is outside your institution")
+    elif alert.get("counsellor_id") != user["id"]:
         raise HTTPException(403, "You do not own this alert")
 
     try:
-        result = dispose_alert(
-            alert_id=alert_id,
-            disposition=action,
-            reason_code=reason_code,
-            reason_note=reason_note,
-            dispositioned_by=user["id"],
-            supersedes_id=supersedes_id,
-        )
+        workflow_status = {
+            "DISMISS": "FALSE_POSITIVE",
+            "ESCALATE": "ESCALATED",
+            "REACH_OUT": "IN_PROGRESS",
+            "SCHEDULE_CHECKIN": "IN_PROGRESS",
+        }[action]
+        result = transition_alert(alert_id, workflow_status, user["id"], reason_note or reason_code)
     except Exception as exc:
         logger.error("dispose_alert error: %s", exc)
         raise HTTPException(500, "Failed to dispose alert")
@@ -3623,6 +3710,7 @@ async def v1_admin_roster_upload(
     user: dict = Depends(require_auth),
 ):
     require_permission(user, PERM_ROSTER_UPLOAD)
+    _require_institution_admin(user, institution_id)
     inst = get_institution_by_id(institution_id)
     if not inst:
         raise HTTPException(404, "Institution not found")
@@ -3658,6 +3746,7 @@ async def v1_admin_roster_commit(
     student; minor -> parent, plus an informational courtesy copy to the student).
     """
     require_permission(user, PERM_ROSTER_UPLOAD)
+    _require_institution_admin(user, institution_id)
     inst = get_institution_by_id(institution_id)
     if not inst:
         raise HTTPException(404, "Institution not found")
@@ -3695,6 +3784,7 @@ async def v1_admin_list_students(
     user: dict = Depends(require_auth),
 ):
     require_permission(user, PERM_STUDENTS_VIEW)
+    institution_id = _require_institution_scope(user, institution_id)
     limit = max(1, min(limit, 1000))
     offset = max(0, offset)
     rows = list_students(institution_id=institution_id, limit=limit, offset=offset)
@@ -3749,7 +3839,10 @@ async def available_students(user: dict = Depends(require_auth)):
 @app.get("/api/v1/admin/institutions")
 async def v1_admin_list_institutions(user: dict = Depends(require_auth)):
     require_any_permission(user, {PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW})
+    scoped = _require_institution_scope(user)
     insts = list_institutions()
+    if scoped:
+        insts = [i for i in insts if i["id"] == scoped]
     return {"institutions": [
         {
             "id": i["id"],
@@ -3769,14 +3862,15 @@ async def v1_admin_create_institution(
     request: Request,
     user: dict = Depends(require_auth),
 ):
-    require_any_permission(user, {PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW})
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can create institutions")
     name = (data.get("name") or "").strip()
     inst_type = (data.get("type") or "university").strip().lower()
     if not name:
         raise HTTPException(400, "Institution name is required")
     if len(name) > 200:
         raise HTTPException(400, "Institution name is too long")
-    institution = create_institution(name, inst_type)
+    institution = create_institution(name, inst_type, created_by=user["id"])
     write_audit(
         user["id"], user["role_type"], "INSTITUTION_CREATED",
         "institution", institution["id"],
@@ -3784,6 +3878,264 @@ async def v1_admin_create_institution(
         ip=_client_ip(request),
     )
     return institution
+
+
+@app.patch("/api/v1/admin/institutions/{institution_id}")
+async def v1_admin_update_institution(
+    institution_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can change institution lifecycle")
+    institution = get_institution_by_id(institution_id)
+    if not institution:
+        raise HTTPException(404, "Institution not found")
+    status = data.get("status")
+    if status and status not in ("PROVISIONING", "ACTIVE", "SUSPENDED", "ARCHIVED"):
+        raise HTTPException(400, "Invalid institution status")
+    updates = {key: data[key] for key in ("name", "type", "status") if key in data}
+    updated = update_institution(institution_id, **updates)
+    write_audit(user["id"], user["role_type"], "INSTITUTION_UPDATED", "institution", institution_id,
+                payload={"fields": sorted(updates)}, ip=_client_ip(request))
+    return updated
+
+
+@app.get("/api/institution/me")
+async def institution_workspace(user: dict = Depends(require_auth)):
+    institution_id = _require_institution_scope(user)
+    if not institution_id:
+        raise HTTPException(400, "Global admins must select an institution context")
+    institution = get_institution_by_id(institution_id)
+    students = list_students(institution_id=institution_id, limit=1000)
+    from backend.database import get_db
+    conn = get_db()
+    staff_count = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE institution_id = ? AND role_type IN ('counsellor', 'school_admin') AND status = 'approved'",
+        (institution_id,),
+    ).fetchone()[0]
+    assignment_count = conn.execute(
+        "SELECT COUNT(*) FROM counsellor_student_assignments WHERE institution_id = ? AND active = 1",
+        (institution_id,),
+    ).fetchone()[0]
+    conn.close()
+    return {
+        "institution": institution,
+        "counts": {
+            "students": len(students),
+            "staff": staff_count,
+            "active_assignments": assignment_count,
+        },
+    }
+
+
+@app.get("/api/institution/settings")
+async def get_institution_settings(user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    return get_institution_by_id(institution_id)
+
+
+@app.patch("/api/institution/settings")
+async def patch_institution_settings(data: dict, request: Request, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    allowed = {
+        "name", "type", "retention_days", "alert_threshold", "confidence_floor",
+        "minor_age_threshold", "consent_template_id", "consent_reminder_days", "consent_expiry_days",
+    }
+    updates = {key: data[key] for key in allowed if key in data}
+    if "retention_days" in updates and (not isinstance(updates["retention_days"], int) or not 1 <= updates["retention_days"] <= 3650):
+        raise HTTPException(400, "retention_days must be between 1 and 3650")
+    if "alert_threshold" in updates and (not isinstance(updates["alert_threshold"], (int, float)) or not 0 <= updates["alert_threshold"] <= 1):
+        raise HTTPException(400, "alert_threshold must be between 0 and 1")
+    if "confidence_floor" in updates and (not isinstance(updates["confidence_floor"], (int, float)) or not 0 <= updates["confidence_floor"] <= 1):
+        raise HTTPException(400, "confidence_floor must be between 0 and 1")
+    if "consent_expiry_days" in updates and (not isinstance(updates["consent_expiry_days"], int) or not 1 <= updates["consent_expiry_days"] <= 365):
+        raise HTTPException(400, "consent_expiry_days must be between 1 and 365")
+    if "consent_reminder_days" in updates:
+        reminders = updates["consent_reminder_days"]
+        if not isinstance(reminders, list) or any(not isinstance(day, int) or day < 1 for day in reminders):
+            raise HTTPException(400, "consent_reminder_days must be a list of positive integers")
+        updates["consent_reminder_days"] = json.dumps(reminders)
+    updated = update_institution(institution_id, **updates)
+    write_audit(user["id"], user["role_type"], "INSTITUTION_SETTINGS_UPDATED", "institution", institution_id,
+                payload={"fields": sorted(updates)}, ip=_client_ip(request))
+    return updated
+
+
+@app.get("/api/institution/staff")
+async def list_institution_staff(user: dict = Depends(require_auth)):
+    institution_id = _require_institution_scope(user)
+    if not institution_id:
+        raise HTTPException(400, "Global admins must select an institution context")
+    from backend.database import get_db
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, email, name, role_type, status, institution_id, created_at FROM users "
+        "WHERE institution_id = ? AND role_type IN ('counsellor', 'school_admin') ORDER BY name COLLATE NOCASE",
+        (institution_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/institution/consents")
+async def list_institution_consents(
+    status: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    user: dict = Depends(require_auth),
+):
+    institution_id = _require_institution_scope(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    if limit < 1 or limit > 1000 or offset < 0:
+        raise HTTPException(400, "Invalid pagination")
+    from backend.database import get_db
+    conn = get_db()
+    clauses = ["u.institution_id = ?"]
+    params: list[Any] = [institution_id]
+    if user.get("role_type") == "counsellor":
+        clauses.append("c.counsellor_id = ?")
+        params.append(user["id"])
+    if status:
+        clauses.append("c.status = ?")
+        params.append(status)
+    where = " AND ".join(clauses)
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM consents c JOIN users u ON u.id = c.student_id WHERE {where}",
+        params,
+    ).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT c.*, u.name AS student_name, u.email AS student_email "
+        f"FROM consents c JOIN users u ON u.id = c.student_id WHERE {where} "
+        "ORDER BY c.created_at DESC LIMIT ? OFFSET ?",
+        params + [limit, offset],
+    ).fetchall()
+    conn.close()
+    return {"consents": [dict(row) for row in rows], "total": total}
+
+
+@app.get("/api/institution/audit")
+async def list_institution_audit(limit: int = 100, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_scope(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    if limit < 1 or limit > 1000:
+        raise HTTPException(400, "limit must be between 1 and 1000")
+    from backend.database import get_db
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT a.* FROM audit_log a JOIN users u ON u.id = a.actor_id "
+        "WHERE u.institution_id = ? ORDER BY a.occurred_at DESC LIMIT ?",
+        (institution_id, limit),
+    ).fetchall()
+    conn.close()
+    return {"entries": [dict(row) for row in rows], "total": len(rows)}
+
+
+@app.post("/api/institution/students/{student_id}/archive")
+async def archive_institution_student(student_id: str, request: Request, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    student = get_student_by_id(student_id)
+    if not student:
+        student = get_student_by_user_id(student_id)
+    if not student or student.get("institution_id") != institution_id:
+        raise HTTPException(404, "Student not found")
+    if not archive_student(student["id"]):
+        raise HTTPException(404, "Student not found")
+    write_audit(
+        user["id"], user["role_type"], "STUDENT_ARCHIVED", "student", student["id"],
+        payload={"institution_id": institution_id}, ip=_client_ip(request),
+    )
+    return {"ok": True, "student_id": student["id"], "archived": True}
+
+
+@app.post("/api/institution/retention/run")
+async def run_institution_retention(request: Request, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    result = await asyncio.to_thread(run_retention_cleanup, institution_id)
+    write_audit(
+        user["id"], user["role_type"], "RETENTION_CLEANUP_RUN", "institution", institution_id,
+        payload=result, ip=_client_ip(request),
+    )
+    return result
+
+
+@app.post("/api/institution/staff", status_code=201)
+async def invite_institution_staff(data: dict, request: Request, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    role_type = (data.get("role_type") or "counsellor").strip().lower()
+    if role_type not in ("counsellor", "school_admin"):
+        raise HTTPException(400, "role_type must be counsellor or school_admin")
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    if not name or not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(400, "A valid name and email are required")
+    existing = get_user_by_email(email)
+    if existing:
+        raise HTTPException(409, "A user with this email already exists")
+    placeholder_hash = hash_password(secrets.token_urlsafe(32))
+    staff = create_user(email, name, placeholder_hash, role_type=role_type, institution_id=institution_id)
+    from backend.services.crypto import hash_token
+    token = secrets.token_urlsafe(32)
+    set_user_invitation(staff["id"], hash_token(token), (datetime.now(timezone.utc) + timedelta(days=7)).isoformat())
+    institution = get_institution_by_id(institution_id) or {}
+    base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+    invite_url = f"{base}/invite?token={token}"
+    context = {
+        "counsellor_name": name,
+        "institution_name": institution.get("name") or "MindGuard",
+        "invite_url": invite_url,
+        "setup_url": invite_url,
+        "support_email": os.getenv("DEMO_NOTIFY_EMAIL", "support@mindguard.ai"),
+        "withdraw_url": f"{base}/privacy",
+        "privacy_url": f"{base}/privacy",
+        "contact_url": f"{base}/contact",
+    }
+    subject, body = counsellor_invitation_notification(context)
+    email_sent, email_error = send_html_email(
+        email, subject, body, related_type="institution_staff_invitation", related_id=staff["id"],
+        metadata={"role_type": role_type, "institution_id": institution_id},
+    )
+    write_audit(user["id"], user["role_type"], "INSTITUTION_STAFF_INVITED", "user", staff["id"],
+                payload={"role_type": role_type, "institution_id": institution_id, "email_sent": email_sent}, ip=_client_ip(request))
+    return {"staff": {**staff, "status": "pending", "institution_id": institution_id, "role_type": role_type}, "email_sent": email_sent, "email_error": email_error or None}
+
+
+@app.patch("/api/institution/staff/{staff_id}")
+async def update_institution_staff(staff_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+    institution_id = _require_institution_admin(user)
+    if not institution_id:
+        raise HTTPException(400, "An institution context is required")
+    staff = get_user_by_id(staff_id)
+    if not staff or staff.get("institution_id") != institution_id or staff.get("role_type") not in ("counsellor", "school_admin"):
+        raise HTTPException(404, "Staff member not found")
+    new_status = data.get("status")
+    if new_status not in ("approved", "suspended", "revoked"):
+        raise HTTPException(400, "status must be approved, suspended, or revoked")
+    update_user_status(staff_id, new_status)
+    if new_status in ("suspended", "revoked"):
+        from backend.database import get_db
+        conn = get_db()
+        assignments = conn.execute("SELECT id FROM counsellor_student_assignments WHERE counsellor_id = ? AND active = 1", (staff_id,)).fetchall()
+        conn.close()
+        for assignment in assignments:
+            unassign_student_from_counsellor(assignment["id"])
+    updated = get_user_by_id(staff_id)
+    write_audit(user["id"], user["role_type"], "INSTITUTION_STAFF_STATUS_CHANGED", "user", staff_id,
+                payload={"status": new_status, "institution_id": institution_id}, ip=_client_ip(request))
+    return updated
 
 
 # ── Consent maintenance (manual trigger) ──────────────────────────────

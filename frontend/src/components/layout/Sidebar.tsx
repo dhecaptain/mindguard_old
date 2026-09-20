@@ -25,6 +25,7 @@ const ADULT_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = 
 
 const COUNSELLOR_NAV_BASE = [
   { key: 'counsellor-dashboard', icon: 'ti ti-layout-dashboard', label: 'Dashboard' },
+  { key: 'institution', icon: 'ti ti-building-community', label: 'Institution' },
   { key: 'students', icon: 'ti ti-users', label: 'Students' },
   { key: 'batch', icon: 'ti ti-player-play', label: 'Batch Analysis' },
   { key: 'unified', icon: 'ti ti-share', label: 'Multi-Platform' },

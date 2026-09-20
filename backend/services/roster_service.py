@@ -265,6 +265,22 @@ def upsert_roster(
             created_by=created_by,
             grade_level=item["grade_level"] or None,
         )
+        # Link an existing authenticated student explicitly. Email is used
+        # only for this reconciliation step; the durable relationship is the
+        # students.user_id foreign key.
+        account = database.get_user_by_email(item["email"])
+        if account and account.get("role_type") == "student":
+            account_institution = account.get("institution_id")
+            if account_institution and account_institution != institution_id:
+                summary["errors"].append({
+                    "row_number": item["row_number"],
+                    "row": item["row"],
+                    "error": "student account belongs to a different institution",
+                })
+                continue
+            if not account_institution:
+                database.update_user_onboarding(account["id"], "institution_managed", institution_id)
+            payload["user_id"] = account["id"]
         if item["parent_email"]:
             payload["parent_email_encrypted"] = crypto.encrypt_pii(item["parent_email"])
             payload["parent_first_name_encrypted"] = crypto.encrypt_pii(item["parent_first_name"])
@@ -285,4 +301,3 @@ def upsert_roster(
             summary["errors"].append({"row_number": item["row_number"], "row": item["row"], "error": f"database error: {exc}"})
 
     return summary
-

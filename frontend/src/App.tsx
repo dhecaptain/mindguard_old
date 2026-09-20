@@ -44,6 +44,7 @@ import AdminCounsellorsPage from './pages/AdminCounsellorsPage'
 import NotificationPreferencesPage from './pages/NotificationPreferencesPage'
 import AppointmentsPage from './pages/AppointmentsPage'
 import LandingPage from './pages/LandingPage'
+import InstitutionWorkspacePage from './pages/InstitutionWorkspacePage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -115,6 +116,7 @@ function PageRouter() {
 
   if (role === 'counsellor' || role === 'school_admin') {
     switch (currentPage) {
+      case 'institution': return <InstitutionWorkspacePage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
       case 'batch': return <BatchAnalysisPage />

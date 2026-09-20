@@ -219,6 +219,7 @@ def is_token_revoked(jti: str) -> bool:
 def create_user(
     email: str, name: str, password_hash: str, role_type: str = "student",
     dob: str | None = None, parent_email: str | None = None, referred_by: str | None = None,
+    institution_id: str | None = None,
 ) -> dict:
     uid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -230,13 +231,13 @@ def create_user(
         if not exists:
             break
     conn.execute(
-        "INSERT INTO users (id, email, name, role_type, password_hash, status, created_at, dob, parent_email, referral_code, referred_by) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (uid, email.strip().lower(), name, role_type, password_hash, "pending", now, dob, parent_email, code, referred_by),
+        "INSERT INTO users (id, email, name, role_type, password_hash, status, created_at, dob, parent_email, referral_code, referred_by, institution_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (uid, email.strip().lower(), name, role_type, password_hash, "pending", now, dob, parent_email, code, referred_by, institution_id),
     )
     conn.commit()
     conn.close()
-    return {"id": uid, "email": email, "name": name, "role_type": role_type, "status": "pending", "referral_code": code}
+    return {"id": uid, "email": email, "name": name, "role_type": role_type, "status": "pending", "referral_code": code, "institution_id": institution_id}
 
 
 def update_user_password(user_id: str, password_hash: str) -> bool:
@@ -506,6 +507,15 @@ def update_user_status(user_id: str, status: str) -> bool:
         "UPDATE users SET status = ? WHERE id = ?",
         (status, user_id),
     )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def update_user_institution(user_id: str, institution_id: str | None) -> bool:
+    conn = get_db()
+    cur = conn.execute("UPDATE users SET institution_id = ? WHERE id = ?", (institution_id, user_id))
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -1093,18 +1103,43 @@ def get_counsellor_dashboard(counsellor_id: str, is_admin: bool = False):
 
 # ── Institution functions ─────────────────────────────────────────────
 
-def create_institution(name: str, inst_type: str = "university") -> dict:
+def create_institution(name: str, inst_type: str = "university", created_by: str | None = None) -> dict:
     iid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     conn.execute(
-        "INSERT INTO institutions (id, name, type, created_at) VALUES (?,?,?,?)",
-        (iid, name, inst_type, now),
+        "INSERT INTO institutions (id, name, type, status, created_by, created_at, updated_at) VALUES (?,?,?,'PROVISIONING',?,?,?)",
+        (iid, name, inst_type, created_by, now, now),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM institutions WHERE id = ?", (iid,)).fetchone()
     conn.close()
     return dict(row)
+
+
+def update_institution(institution_id: str, **kwargs) -> dict | None:
+    allowed = {
+        "name", "type", "status", "retention_days", "alert_threshold", "confidence_floor",
+        "minor_age_threshold", "consent_template_id", "consent_reminder_days", "consent_expiry_days",
+        "settings_version",
+    }
+    updates = []
+    params = []
+    for field, value in kwargs.items():
+        if field in allowed:
+            updates.append(f"{field} = ?")
+            params.append(value)
+    if not updates:
+        return get_institution_by_id(institution_id)
+    updates.extend(["updated_at = ?", "settings_version = COALESCE(settings_version, 1) + 1"])
+    params.append(datetime.now(timezone.utc).isoformat())
+    params.append(institution_id)
+    conn = get_db()
+    conn.execute(f"UPDATE institutions SET {', '.join(updates)} WHERE id = ?", params)
+    conn.commit()
+    row = conn.execute("SELECT * FROM institutions WHERE id = ?", (institution_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def get_institution_by_id(inst_id: str) -> dict | None:
@@ -1461,34 +1496,25 @@ def create_alert(
     return dict(row) if row else None
 
 
-def get_alerts(counsellor_id: str | None, status: str | None = None) -> list:
+def get_alerts(counsellor_id: str | None, status: str | None = None, institution_id: str | None = None) -> list:
     conn = get_db()
-    if counsellor_id and status:
-        rows = conn.execute(
-            "SELECT a.*, u.name as student_name, u.email as student_email "
-            "FROM alerts a JOIN users u ON a.student_id = u.id "
-            "WHERE a.counsellor_id = ? AND a.status = ? ORDER BY a.fired_at DESC",
-            (counsellor_id, status),
-        ).fetchall()
-    elif counsellor_id:
-        rows = conn.execute(
-            "SELECT a.*, u.name as student_name, u.email as student_email "
-            "FROM alerts a JOIN users u ON a.student_id = u.id "
-            "WHERE a.counsellor_id = ? ORDER BY a.fired_at DESC",
-            (counsellor_id,),
-        ).fetchall()
-    elif status:
-        rows = conn.execute(
-            "SELECT a.*, u.name as student_name, u.email as student_email "
-            "FROM alerts a JOIN users u ON a.student_id = u.id "
-            "WHERE a.status = ? ORDER BY a.fired_at DESC",
-            (status,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT a.*, u.name as student_name, u.email as student_email "
-            "FROM alerts a JOIN users u ON a.student_id = u.id ORDER BY a.fired_at DESC",
-        ).fetchall()
+    clauses = []
+    params = []
+    if counsellor_id:
+        clauses.append("a.counsellor_id = ?")
+        params.append(counsellor_id)
+    if institution_id:
+        clauses.append("u.institution_id = ?")
+        params.append(institution_id)
+    if status:
+        clauses.append("a.status = ?")
+        params.append(status)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        "SELECT a.*, u.name as student_name, u.email as student_email "
+        "FROM alerts a JOIN users u ON a.student_id = u.id " + where + " ORDER BY a.fired_at DESC",
+        params,
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1568,6 +1594,34 @@ def dispose_alert(
         (disposition, reason_code, reason_note, dispositioned_by,
          now_iso, supersedes_id, cooldown_until, alert_id),
     )
+    conn.commit()
+    row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def transition_alert(alert_id: str, status: str, actor_id: str, reason: str | None = None) -> dict | None:
+    allowed = {"ACKNOWLEDGED", "ESCALATED", "IN_PROGRESS", "CLOSED", "FALSE_POSITIVE"}
+    if status not in allowed:
+        raise ValueError("Invalid alert workflow status")
+    now = datetime.now(timezone.utc).isoformat()
+    updates = ["status = ?"]
+    params: list = [status]
+    if status == "ACKNOWLEDGED":
+        updates.extend(["acknowledged_by = ?", "acknowledged_at = ?"])
+        params.extend([actor_id, now])
+    elif status == "ESCALATED":
+        updates.append("escalated_at = ?")
+        params.append(now)
+    elif status == "IN_PROGRESS":
+        updates.append("in_progress_at = ?")
+        params.append(now)
+    elif status in ("CLOSED", "FALSE_POSITIVE"):
+        updates.extend(["closed_reason = ?", "dispositioned_by = ?", "dispositioned_at = ?"])
+        params.extend([reason, actor_id, now])
+    params.append(alert_id)
+    conn = get_db()
+    conn.execute(f"UPDATE alerts SET {', '.join(updates)} WHERE id = ?", params)
     conn.commit()
     row = conn.execute("SELECT * FROM alerts WHERE id = ?", (alert_id,)).fetchone()
     conn.close()
@@ -2016,6 +2070,7 @@ def create_student(
     parent_email_encrypted: str | None = None,
     parent_first_name_encrypted: str | None = None,
     grade_level: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     sid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -2025,13 +2080,13 @@ def create_student(
             id, institution_id, student_id_hash, first_name_encrypted,
             email_encrypted, date_of_birth_encrypted, is_minor,
             parent_email_encrypted, parent_first_name_encrypted, grade_level,
-            created_by, created_at, updated_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            created_by, created_at, updated_at, user_id
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             sid, institution_id, student_id_hash, first_name_encrypted,
             email_encrypted, date_of_birth_encrypted, 1 if is_minor else 0,
             parent_email_encrypted, parent_first_name_encrypted, grade_level,
-            created_by, now, now,
+            created_by, now, now, user_id,
         ),
     )
     conn.commit()
@@ -2042,8 +2097,18 @@ def create_student(
 def get_student_by_id(student_id: str) -> dict | None:
     conn = get_db()
     row = conn.execute(
-        "SELECT * FROM students WHERE id = ? AND deleted_at IS NULL",
+        "SELECT * FROM students WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL",
         (student_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_student_by_user_id(user_id: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM students WHERE user_id = ? AND deleted_at IS NULL AND archived_at IS NULL LIMIT 1",
+        (user_id,),
     ).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -2052,7 +2117,7 @@ def get_student_by_id(student_id: str) -> dict | None:
 def get_student_by_student_id_hash(student_id_hash: str) -> dict | None:
     conn = get_db()
     row = conn.execute(
-        "SELECT * FROM students WHERE student_id_hash = ? AND deleted_at IS NULL",
+        "SELECT * FROM students WHERE student_id_hash = ? AND deleted_at IS NULL AND archived_at IS NULL",
         (student_id_hash,),
     ).fetchone()
     conn.close()
@@ -2063,13 +2128,13 @@ def list_students(institution_id: str | None = None, limit: int = 200, offset: i
     conn = get_db()
     if institution_id:
         rows = conn.execute(
-            "SELECT * FROM students WHERE institution_id = ? AND deleted_at IS NULL "
+            "SELECT * FROM students WHERE institution_id = ? AND deleted_at IS NULL AND archived_at IS NULL "
             "ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (institution_id, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM students WHERE deleted_at IS NULL "
+            "SELECT * FROM students WHERE deleted_at IS NULL AND archived_at IS NULL "
             "ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
@@ -2083,7 +2148,7 @@ def update_student(student_id: str, **kwargs) -> dict | None:
         "institution_id", "student_id_hash", "first_name_encrypted",
         "email_encrypted", "date_of_birth_encrypted", "is_minor",
         "parent_email_encrypted", "parent_first_name_encrypted", "grade_level",
-        "current_consent_id", "deleted_at",
+        "current_consent_id", "deleted_at", "archived_at", "user_id",
     }
     updates = ["updated_at = ?"]
     params = [datetime.now(timezone.utc).isoformat()]
@@ -2108,6 +2173,22 @@ def soft_delete_student(student_id: str) -> bool:
         "UPDATE students SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
         (now, now, student_id),
     )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def archive_student(student_id: str) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE students SET archived_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL",
+        (now, now, student_id),
+    )
+    row = conn.execute("SELECT user_id FROM students WHERE id = ?", (student_id,)).fetchone()
+    if row and row["user_id"]:
+        conn.execute("UPDATE users SET status = 'archived' WHERE id = ? AND role_type = 'student'", (row["user_id"],))
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
