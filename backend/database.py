@@ -415,15 +415,31 @@ def set_analysis_session_content(
     return ok
 
 
-def set_analysis_session_completed(session_id: str, findings: dict, risk_score: float, insights: str, recommendations: str) -> bool:
-    """Finalize a session that finished without errors (atomic, status → completed)."""
+def set_analysis_session_completed(
+    session_id: str,
+    findings: dict,
+    risk_score: float,
+    insights: str,
+    recommendations: str,
+    status: str = "completed",
+) -> bool:
+    """Finalize a session with its truthful terminal status.
+
+    ``partial`` is used when at least one requested platform produced usable
+    data but another requested platform failed or returned no data.
+    """
+    if status not in {"completed", "partial"}:
+        raise ValueError("Invalid completed analysis session status")
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     cur = conn.execute(
-        "UPDATE analysis_sessions SET status = 'completed', progress_json = NULL, error_json = NULL,"
+        "UPDATE analysis_sessions SET status = ?, progress_json = ?, error_json = ?,"
         " findings_json = ?, risk_score = ?, insights = ?, recommendations = ?, completed_at = ?, updated_at = ? "
-        "WHERE id = ? AND status != 'completed'",
+        "WHERE id = ? AND status NOT IN ('completed', 'partial')",
         (
+            status,
+            None if status == "completed" else None,
+            None,
             json.dumps(findings) if findings else None,
             risk_score,
             insights,

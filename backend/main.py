@@ -927,6 +927,10 @@ async def analyze_own_account(data: dict, request: Request, user: dict = Depends
         slug = normalize_platform(platform)
         if not slug:
             raise HTTPException(400, "Unknown platform")
+        from backend.database import get_social_accounts
+        connected_accounts = get_social_accounts(user["id"])
+        if connected_accounts and not any(a.get("platform") == slug for a in connected_accounts):
+            raise HTTPException(400, f"Connect your {slug} account before analysing it.")
         slugs = [slug]
 
     try:

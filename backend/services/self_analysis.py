@@ -316,7 +316,12 @@ async def run_self_analysis(user_id: str, platform_slugs: list[str]) -> dict[str
     Returns the created session row. Callers must write the audit event.
     """
     accounts = _connected_accounts_for(user_id)
-    requested = [s for s in platform_slugs if s in accounts] or list(accounts.keys())
+    requested = list(dict.fromkeys(platform_slugs)) if platform_slugs and accounts else list(accounts.keys())
+    missing = [slug for slug in requested if slug not in accounts]
+    if missing:
+        raise SelfAnalysisError(
+            f"These platforms are not connected to your account: {', '.join(sorted(missing))}."
+        )
 
     platform_results: dict[str, dict[str, Any]] = {}
     progress: dict[str, Any] = {"requested": requested, "platforms": {}}
@@ -379,19 +384,28 @@ def _finalize_session(
     )
     summary = insights.build_summary_text(findings)
 
+    has_platform_failures = any(
+        result.get("status") != "ok" for result in platform_results.values()
+    )
+
     if any_had_data:
+        terminal_status = "partial" if has_platform_failures else "completed"
         set_analysis_session_completed(
             sid,
             findings=findings,
             risk_score=float(findings["overall_risk"] or 0.0),
             insights=json.dumps(insight_text, ensure_ascii=False),
             recommendations=json.dumps(rec_text, ensure_ascii=False),
+            status=terminal_status,
         )
-        update_analysis_session_progress(sid, "completed", progress=progress)
+        update_analysis_session_progress(sid, terminal_status, progress=progress)
     else:
+        terminal_status = "failed" if any(
+            result.get("status") == "error" for result in platform_results.values()
+        ) else "no_data"
         update_analysis_session_progress(
             sid,
-            "no_data",
+            terminal_status,
             progress=progress,
             error={"summary": summary, "platforms": progress.get("platforms")},
         )

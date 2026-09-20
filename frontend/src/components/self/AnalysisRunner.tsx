@@ -63,7 +63,7 @@ function PlatformRow({ label, stepLabel, state, finalStatus, finalMessage }: Omi
         <div className="text-[0.84rem] font-semibold text-[#1f2937]">{label}</div>
         <div className="text-[0.72rem] text-[#6b7280] truncate">
           {state === 'pending'
-            ? 'Waiting to process'
+            ? 'Queued — the server will process this platform'
             : state === 'running'
               ? stepLabel
               : finalStatusLabel(finalStatus, finalMessage)}
@@ -101,7 +101,11 @@ export default function AnalysisRunner() {
 
   if (!run) return null
 
-  const retryTargets = run.platforms.map((p) => p.slug)
+  const retryTargets = run.status === 'partial' && run.final
+    ? run.platforms
+      .filter((p) => run.final?.[p.slug]?.status !== 'ok')
+      .map((p) => p.slug)
+    : run.platforms.map((p) => p.slug)
   const handleRetry = async () => {
     setRetrying(true)
     await runAnalysis(retryTargets)
@@ -113,7 +117,13 @@ export default function AnalysisRunner() {
       <div className="flex items-center justify-between gap-[10px] mb-[4px]">
         <div className="flex items-center gap-[8px]">
           <div className="text-[0.95rem] font-bold text-[#1f2937]">
-            {run.running ? 'Running analysis' : run.status === 'failed' ? 'Analysis failed' : 'Analysis complete'}
+            {run.running
+              ? 'Running analysis'
+              : run.status === 'failed'
+                ? 'Analysis failed'
+                : run.status === 'partial'
+                  ? 'Analysis partially complete'
+                  : 'Analysis complete'}
           </div>
           {run.running && (
             <div className="w-[16px] h-[16px] border-[2px] border-[#e5e7eb] border-t-[#0F766E] rounded-full animate-spin" />
@@ -128,7 +138,11 @@ export default function AnalysisRunner() {
 
       {run.running ? (
         <div className="text-[0.78rem] text-[#0F766E] font-medium mb-[6px]">{run.phase}</div>
-      ) : run.status === 'failed' ? null : (
+      ) : run.status === 'failed' ? null : run.status === 'partial' ? (
+        <div className="text-[0.78rem] text-[#92400e] font-medium mb-[6px]">
+          Some connected platforms could not be analysed. Review the per-platform results below.
+        </div>
+      ) : (
         <div className="text-[0.78rem] text-[#059669] font-medium mb-[6px]">
           Results are ready below.
         </div>
@@ -171,7 +185,7 @@ export default function AnalysisRunner() {
         </div>
       )}
 
-      {!run.running && run.status === 'complete' && (
+      {!run.running && (run.status === 'complete' || run.status === 'partial') && (
         <div className="mt-[14px] flex gap-[8px]">
           <button
             onClick={handleRetry}
