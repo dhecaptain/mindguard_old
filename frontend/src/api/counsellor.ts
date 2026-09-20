@@ -80,6 +80,9 @@ export interface Referral {
   urgency: string
   status: string
   notes: string
+  destination?: string | null
+  follow_up_at?: string | null
+  outcome?: string | null
   created_at: string
   updated_at: string
   student_name?: string
@@ -147,12 +150,12 @@ export async function getReferrals(): Promise<Referral[]> {
   return data
 }
 
-export async function createReferral(student_id: string, urgency: string, notes: string): Promise<Referral> {
-  const { data } = await api.post('/counsellor/referrals', { student_id, urgency, notes })
+export async function createReferral(student_id: string, urgency: string, notes: string, destination?: string, follow_up_at?: string): Promise<Referral> {
+  const { data } = await api.post('/counsellor/referrals', { student_id, urgency, notes, destination, follow_up_at })
   return data
 }
 
-export async function updateReferral(id: string, updates: { status?: string; notes?: string }): Promise<Referral> {
+export async function updateReferral(id: string, updates: { status?: string; notes?: string; outcome?: string; follow_up_at?: string; reason?: string }): Promise<Referral> {
   const { data } = await api.patch(`/counsellor/referrals/${id}`, updates)
   return data
 }

@@ -673,7 +673,10 @@ def get_analytics(user_id: str):
     }
 
 
-def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: str = "") -> dict:
+def create_referral(
+    counsellor_id: str, student_id: str, urgency: str, notes: str = "",
+    destination: str | None = None, follow_up_at: str | None = None,
+) -> dict:
     """Create a referral and student notification atomically. Returns full row including student_name."""
     rid = str(uuid.uuid4())
     nid = str(uuid.uuid4())
@@ -682,9 +685,9 @@ def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: st
     try:
         conn.execute("BEGIN")
         conn.execute(
-            "INSERT INTO referrals (id, counsellor_id, student_id, urgency, notes, status, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,'open',?,?)",
-            (rid, counsellor_id, student_id, urgency, notes, now, now),
+            "INSERT INTO referrals (id, counsellor_id, student_id, urgency, notes, destination, follow_up_at, status, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,'open',?,?)",
+            (rid, counsellor_id, student_id, urgency, notes, destination, follow_up_at, now, now),
         )
         conn.execute(
             "INSERT INTO notifications (id, user_id, title, message, type, read, created_at) VALUES (?,?,?,?,?,0,?)",
@@ -704,25 +707,39 @@ def create_referral(counsellor_id: str, student_id: str, urgency: str, notes: st
     return dict(row) if row else {"id": rid, "counsellor_id": counsellor_id, "student_id": student_id, "urgency": urgency, "notes": notes, "status": "open", "created_at": now, "updated_at": now}
 
 
-def get_referrals(counsellor_id: str | None = None):
+def get_referrals(counsellor_id: str | None = None, institution_id: str | None = None):
     conn = get_db()
+    clauses = []
+    params = []
     if counsellor_id:
-        rows = conn.execute(
-            "SELECT r.*, u.name as student_name, u.email as student_email "
-            "FROM referrals r JOIN users u ON r.student_id = u.id "
-            "WHERE r.counsellor_id = ? ORDER BY r.created_at DESC",
-            (counsellor_id,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT r.*, u.name as student_name, u.email as student_email "
-            "FROM referrals r JOIN users u ON r.student_id = u.id ORDER BY r.created_at DESC",
-        ).fetchall()
+        clauses.append("r.counsellor_id = ?")
+        params.append(counsellor_id)
+    if institution_id:
+        clauses.append("u.institution_id = ?")
+        params.append(institution_id)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    rows = conn.execute(
+        "SELECT r.*, u.name as student_name, u.email as student_email, u.institution_id as student_institution_id, "
+        "c.name as counsellor_name, c.email as counsellor_email "
+        "FROM referrals r JOIN users u ON r.student_id = u.id "
+        "JOIN users c ON r.counsellor_id = c.id" + where + " ORDER BY r.created_at DESC",
+        params,
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def update_referral(referral_id: str, status: str | None = None, notes: str | None = None) -> dict | None:
+def get_referral(referral_id: str) -> dict | None:
+    rows = get_referrals()
+    return next((row for row in rows if row["id"] == referral_id), None)
+
+
+def update_referral(
+    referral_id: str, status: str | None = None, notes: str | None = None,
+    outcome: str | None = None, follow_up_at: str | None = None,
+    actor_id: str | None = None,
+    actor_role: str | None = None, reason: str | None = None,
+) -> dict | None:
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
     updates = []
@@ -733,10 +750,16 @@ def update_referral(referral_id: str, status: str | None = None, notes: str | No
     if notes is not None:
         updates.append("notes = ?")
         params.append(notes)
+    if outcome is not None:
+        updates.append("outcome = ?")
+        params.append(outcome)
+    if follow_up_at is not None:
+        updates.append("follow_up_at = ?")
+        params.append(follow_up_at)
     if not updates:
         # Nothing to update — return current state
         row = conn.execute(
-            "SELECT r.*, u.name as student_name, u.email as student_email "
+            "SELECT r.*, u.name as student_name, u.email as student_email, u.institution_id as student_institution_id "
             "FROM referrals r JOIN users u ON r.student_id = u.id WHERE r.id = ?",
             (referral_id,),
         ).fetchone()
@@ -747,7 +770,13 @@ def update_referral(referral_id: str, status: str | None = None, notes: str | No
     params.append(referral_id)
     try:
         conn.execute("BEGIN")
+        previous = conn.execute("SELECT status FROM referrals WHERE id = ?", (referral_id,)).fetchone()
         conn.execute(f"UPDATE referrals SET {', '.join(updates)} WHERE id = ?", params)
+        if status and previous and previous["status"] != status:
+            conn.execute(
+                "INSERT INTO referral_events (id, referral_id, actor_id, actor_role, from_status, to_status, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (str(uuid.uuid4()), referral_id, actor_id, actor_role, previous["status"], status, reason, now),
+            )
         row = conn.execute(
             "SELECT r.*, u.name as student_name, u.email as student_email "
             "FROM referrals r JOIN users u ON r.student_id = u.id WHERE r.id = ?",

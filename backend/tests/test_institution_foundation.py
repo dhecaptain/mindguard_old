@@ -59,3 +59,20 @@ def test_demo_meeting_response_token_is_lookupable(db):
     )
     matched = db.get_demo_request_by_response_token(token_hash)
     assert matched["id"] == demo["id"]
+
+
+def test_referrals_are_scoped_and_status_changes_are_audited(db):
+    first = db.create_institution("Tenant A", "k12")
+    second = db.create_institution("Tenant B", "k12")
+    counsellor = db.create_user("counsellor@example.test", "Counsellor", "hash", role_type="counsellor", institution_id=first["id"])
+    student = db.create_user("student@example.test", "Student", "hash", role_type="student", institution_id=first["id"])
+    other = db.create_user("other@example.test", "Other", "hash", role_type="student", institution_id=second["id"])
+    referral = db.create_referral(counsellor["id"], student["id"], "high", "Needs follow-up", "School nurse", "2026-10-10T09:00:00Z")
+    db.create_referral(counsellor["id"], other["id"], "low")
+    assert len(db.get_referrals(institution_id=first["id"])) == 1
+    assert len(db.get_referrals(institution_id=second["id"])) == 1
+    db.update_referral(referral["id"], status="in_progress", actor_id=counsellor["id"], actor_role="counsellor", reason="Accepted by care team")
+    conn = db.get_db()
+    event = conn.execute("SELECT from_status, to_status, reason FROM referral_events WHERE referral_id = ?", (referral["id"],)).fetchone()
+    conn.close()
+    assert tuple(event) == ("open", "in_progress", "Accepted by care team")

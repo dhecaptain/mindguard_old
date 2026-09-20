@@ -62,7 +62,7 @@ from backend.database import (
     update_user_status, set_user_invitation, get_user_by_invitation_token_hash, clear_user_invitation,
     update_user_onboarding, create_analysis_session, get_analysis_sessions_for_student, get_analysis_session,
     save_analysis, get_analytics,
-    create_referral, get_referrals, update_referral,
+    create_referral, get_referrals, get_referral, update_referral, create_alert,
     create_appointment, get_appointment, list_appointments, update_appointment_status,
     send_message, get_conversation, get_conversations, mark_read, mark_all_read,
     create_notification, get_notifications, get_notification_summary, mark_notification_read,
@@ -2631,18 +2631,25 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
 # ── Referrals routes ─────────────────────────────────────────────────
 
 @app.get("/api/counsellor/referrals")
-async def get_counsellor_referrals(user: dict = Depends(require_auth)):
+async def get_counsellor_referrals(institution_id: str | None = None, user: dict = Depends(require_auth)):
     _require_counsellor(user)
-    return get_referrals(None if user["role_type"] == "admin" else user["id"])
+    scoped = _require_institution_scope(user, institution_id)
+    if user["role_type"] == "admin":
+        return get_referrals(institution_id=scoped)
+    if user["role_type"] == "school_admin":
+        return get_referrals(institution_id=scoped)
+    return get_referrals(user["id"], institution_id=scoped)
 
 
 @app.post("/api/counsellor/referrals")
 async def create_counsellor_referral(data: dict, request: Request, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
+    if user["role_type"] not in ("counsellor", "school_admin", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     student_id = data.get("student_id")
     urgency = data.get("urgency", "medium")
     notes = data.get("notes", "")
+    destination = (data.get("destination") or "").strip() or None
+    follow_up_at = (data.get("follow_up_at") or "").strip() or None
     if not student_id:
         raise HTTPException(400, "Student ID required")
     if urgency not in ("low", "medium", "high", "crisis"):
@@ -2650,13 +2657,20 @@ async def create_counsellor_referral(data: dict, request: Request, user: dict = 
     student = get_user_by_id(student_id)
     if not student or student["role_type"] != "student":
         raise HTTPException(400, "Invalid student ID")
-    _require_counsellor_student_access(user, student_id)
-    referral = create_referral(user["id"], student_id, urgency, notes)
+    scoped = _require_institution_scope(user)
+    if user["role_type"] == "school_admin":
+        if student.get("institution_id") != scoped:
+            raise HTTPException(403, "Student is outside your institution")
+    else:
+        _require_counsellor_student_access(user, student_id)
+    referral = create_referral(user["id"], student_id, urgency, notes, destination, follow_up_at)
+    if urgency == "crisis":
+        create_alert(student_id, user["id"], 1.0, 0.0, "referral")
     _safe_notify(student_id, "Referral Created", f"A counsellor has created a {urgency}-urgency referral for you.", "referral")
     write_audit(
         actor_id=user["id"], actor_role=user["role_type"],
         action="referral.create", target_type="referral", target_id=referral["id"],
-        payload={"urgency": urgency, "student_id": student_id},
+        payload={"urgency": urgency, "student_id": student_id, "destination": destination, "follow_up_at": follow_up_at},
         ip=request.client.host if request.client else None,
     )
     return referral
@@ -2664,19 +2678,25 @@ async def create_counsellor_referral(data: dict, request: Request, user: dict = 
 
 @app.patch("/api/counsellor/referrals/{referral_id}")
 async def update_counsellor_referral(referral_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
+    if user["role_type"] not in ("counsellor", "school_admin", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     status = data.get("status")
     notes = data.get("notes")
-    if status and status not in ("open", "accepted", "completed", "declined"):
+    if status and status not in ("open", "accepted", "in_progress", "completed", "declined", "cancelled"):
         raise HTTPException(400, "Invalid status")
-    existing_rows = get_referrals()
-    existing = next((r for r in existing_rows if r["id"] == referral_id), None)
+    existing = get_referral(referral_id)
     if not existing:
         raise HTTPException(404, "Referral not found")
-    if existing["counsellor_id"] != user["id"] and user["role_type"] != "admin":
+    scoped = _require_institution_scope(user)
+    if scoped and existing.get("student_institution_id", existing.get("institution_id")) not in (None, scoped):
+        raise HTTPException(403, "Referral is outside your institution")
+    if user["role_type"] == "counsellor" and existing["counsellor_id"] != user["id"]:
         raise HTTPException(403, "You do not own this referral")
-    result = update_referral(referral_id, status=status, notes=notes)
+    result = update_referral(
+        referral_id, status=status, notes=notes, outcome=data.get("outcome"),
+        follow_up_at=data.get("follow_up_at"), actor_id=user["id"], actor_role=user["role_type"],
+        reason=data.get("reason"),
+    )
     if not result:
         raise HTTPException(404, "Referral not found")
     if status and status != existing.get("status"):
