@@ -13,8 +13,52 @@ const statusStyles: Record<AppointmentStatus, string> = {
   NO_SHOW: 'bg-[#fce7f3] text-[#9d174d]',
 }
 
-function dateLabel(value: string) {
-  return new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+function isWebLink(value?: string | null) {
+  return Boolean(value && /^https?:\/\//i.test(value.trim()))
+}
+
+function icsDate(value: string) {
+  return new Date(value).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+}
+
+function icsText(value: string) {
+  return value.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
+}
+
+function downloadCalendarFile(appointment: Appointment) {
+  const details = [
+    appointment.notes,
+    appointment.location ? `Location: ${appointment.location}` : '',
+    `Format: ${appointment.mode.replace('_', ' ')}`,
+  ].filter(Boolean).join('\n')
+  const ics = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//MindGuard//Appointments//EN',
+    'BEGIN:VEVENT', `UID:${appointment.id}@mindguard`, `DTSTAMP:${icsDate(new Date().toISOString())}`,
+    `DTSTART:${icsDate(appointment.start_at)}`, `DTEND:${icsDate(appointment.end_at)}`,
+    `SUMMARY:${icsText(appointment.title)}`, `DESCRIPTION:${icsText(details)}`,
+    appointment.location ? `LOCATION:${icsText(appointment.location)}` : '',
+    'END:VEVENT', 'END:VCALENDAR',
+  ].filter(Boolean).join('\r\n')
+  const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${appointment.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'mindguard-appointment'}.ics`
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
+
+function googleCalendarUrl(appointment: Appointment) {
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: appointment.title,
+    dates: `${icsDate(appointment.start_at)}/${icsDate(appointment.end_at)}`,
+    details: appointment.notes || 'MindGuard appointment',
+    location: appointment.location || '',
+  })
+  return `https://calendar.google.com/calendar/render?${params.toString()}`
 }
 
 export default function AppointmentsPage() {
@@ -106,10 +150,26 @@ export default function AppointmentsPage() {
 
 function AppointmentCard({ appointment: a, isStaff, onTransition }: { appointment: Appointment; isStaff: boolean; onTransition: (a: Appointment, status: AppointmentStatus) => void }) {
   const canRespond = !isStaff && a.status === 'REQUESTED'
-  return <article className="rounded-[13px] border border-[#e2e8f0] bg-white p-[15px] shadow-sm flex flex-wrap items-center justify-between gap-[12px]">
-    <div><div className="flex items-center gap-[8px] flex-wrap"><h3 className="font-semibold text-[#1f2937] text-[0.9rem]">{a.title}</h3><span className={`rounded-full px-[8px] py-[3px] text-[0.66rem] font-bold ${statusStyles[a.status]}`}>{a.status.replace('_', ' ')}</span></div><div className="text-[0.8rem] text-[#475569] mt-[6px]">{dateLabel(a.start_at)} – {new Date(a.end_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</div><div className="text-[0.74rem] text-[#94a3b8] mt-[3px]">{isStaff ? a.student_name : `Counsellor: ${a.counsellor_name}`} · {a.mode.replace('_', ' ')}</div>{a.location && <div className="text-[0.74rem] text-[#64748b] mt-[3px]">{a.location}</div>}</div>
-    <div className="flex gap-[7px]">{canRespond && <><button onClick={() => onTransition(a, 'CONFIRMED')} className="px-[10px] py-[7px] rounded-[7px] bg-[#0f766e] text-white text-[0.74rem] font-semibold">Accept</button><button onClick={() => onTransition(a, 'DECLINED')} className="px-[10px] py-[7px] rounded-[7px] border border-[#cbd5e1] text-[#475569] text-[0.74rem] font-semibold">Decline</button></>}{a.status === 'CONFIRMED' && <button onClick={() => onTransition(a, 'CANCELLED')} className="px-[10px] py-[7px] rounded-[7px] border border-[#fecaca] text-[#b91c1c] text-[0.74rem] font-semibold">Cancel</button>}</div>
+  const start = new Date(a.start_at)
+  return <article className="rounded-[16px] border border-[#e2e8f0] bg-white p-[14px] shadow-sm flex flex-wrap items-center gap-[15px] hover:border-[#99d5ce] transition-colors">
+    <div className="w-[66px] h-[70px] rounded-[12px] bg-[#f0fdfa] border border-[#ccfbf1] flex flex-col items-center justify-center flex-shrink-0">
+      <span className="text-[0.64rem] uppercase tracking-[0.12em] font-bold text-[#0f766e]">{start.toLocaleDateString(undefined, { month: 'short' })}</span>
+      <span className="text-[1.55rem] leading-none font-bold text-[#134e4a] mt-[2px]">{start.getDate()}</span>
+      <span className="text-[0.62rem] text-[#5f7775] mt-[3px]">{start.toLocaleDateString(undefined, { weekday: 'short' })}</span>
+    </div>
+    <div className="min-w-[220px] flex-1">
+      <div className="flex items-center gap-[8px] flex-wrap"><h3 className="font-semibold text-[#1f2937] text-[0.92rem]">{a.title}</h3><span className={`rounded-full px-[8px] py-[3px] text-[0.66rem] font-bold ${statusStyles[a.status]}`}>{a.status.replace('_', ' ')}</span></div>
+      <div className="flex items-center gap-[6px] text-[0.8rem] text-[#475569] mt-[7px]"><i className="ti ti-clock text-[#0f766e]" />{start.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })} – {new Date(a.end_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}<span className="text-[#cbd5e1]">·</span>{a.timezone}</div>
+      <div className="text-[0.74rem] text-[#94a3b8] mt-[4px]">{isStaff ? a.student_name : `Counsellor: ${a.counsellor_name}`} · {a.mode.replace('_', ' ')}</div>
+      {a.location && (isWebLink(a.location) ? <a href={a.location} target="_blank" rel="noreferrer" className="inline-flex items-center gap-[5px] text-[0.76rem] text-[#0f766e] hover:text-[#115e59] hover:underline mt-[6px]"><i className="ti ti-video" />Join meeting <i className="ti ti-external-link text-[11px]" /></a> : <div className="inline-flex items-center gap-[5px] text-[0.76rem] text-[#64748b] mt-[6px]"><i className="ti ti-map-pin" />{a.location}</div>)}
+    </div>
+    <div className="flex flex-wrap items-center gap-[7px] ml-auto">{a.status !== 'DECLINED' && <CalendarActions appointment={a} />}{canRespond && <><button onClick={() => onTransition(a, 'CONFIRMED')} className="px-[10px] py-[7px] rounded-[7px] bg-[#0f766e] text-white text-[0.74rem] font-semibold">Accept</button><button onClick={() => onTransition(a, 'DECLINED')} className="px-[10px] py-[7px] rounded-[7px] border border-[#cbd5e1] text-[#475569] text-[0.74rem] font-semibold">Decline</button></>}{a.status === 'CONFIRMED' && <button onClick={() => onTransition(a, 'CANCELLED')} className="px-[10px] py-[7px] rounded-[7px] border border-[#fecaca] text-[#b91c1c] text-[0.74rem] font-semibold">Cancel</button>}</div>
   </article>
+}
+
+function CalendarActions({ appointment }: { appointment: Appointment }) {
+  const [open, setOpen] = useState(false)
+  return <div className="relative"><button onClick={() => setOpen((value) => !value)} className="inline-flex items-center gap-[5px] px-[10px] py-[7px] rounded-[7px] border border-[#cbd5e1] text-[#475569] text-[0.74rem] font-semibold hover:bg-[#f8fafc]"><i className="ti ti-calendar-plus" />Calendar</button>{open && <div className="absolute right-0 top-[38px] z-10 w-[170px] rounded-[9px] border border-[#e2e8f0] bg-white p-[5px] shadow-lg"><button onClick={() => { downloadCalendarFile(appointment); setOpen(false) }} className="flex items-center gap-[7px] w-full rounded-[6px] px-[9px] py-[8px] text-left text-[0.74rem] text-[#334155] hover:bg-[#f0fdfa]"><i className="ti ti-download" />Download .ics</button><a href={googleCalendarUrl(appointment)} target="_blank" rel="noreferrer" onClick={() => setOpen(false)} className="flex items-center gap-[7px] rounded-[6px] px-[9px] py-[8px] text-[0.74rem] text-[#334155] hover:bg-[#f0fdfa]"><i className="ti ti-brand-google" />Google Calendar</a></div>}</div>
 }
 
 function Empty({ message }: { message: string }) { return <div className="rounded-[12px] border border-dashed border-[#cbd5e1] bg-[#f8fafc] p-[22px] text-[0.82rem] text-[#64748b]">{message}</div> }
