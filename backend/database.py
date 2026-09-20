@@ -542,9 +542,9 @@ def accept_user_terms(user_id: str) -> bool:
 def get_students(limit: int = 200, offset: int = 0, counsellor_id: str | None = None):
     """List student accounts.
 
-    When ``counsellor_id`` is given, scope the list to students the counsellor
-    is assigned to *and* has valid ACCEPTED non-expired consent for, with
-    institution scoping. Admins pass None and see all students.
+    When ``counsellor_id`` is given, scope the list to active assignments in
+    the counsellor's institution. Detailed data endpoints apply the additional
+    active-consent gate. Admins pass None and see all students.
     """
     conn = get_db()
     if counsellor_id:
@@ -555,16 +555,19 @@ def get_students(limit: int = 200, offset: int = 0, counsellor_id: str | None = 
                 "SELECT DISTINCT u.id, u.email, u.name, u.role_type, u.status, u.created_at "
                 "FROM users u "
                 "JOIN counsellor_student_assignments a ON a.student_id = u.id AND a.counsellor_id = ? AND a.active = 1 "
-                "WHERE u.role_type = 'student' AND u.institution_id = ? "
+                "WHERE u.role_type = 'student' AND u.institution_id = ? AND a.institution_id = ? "
                 "ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
-                (counsellor_id, c_inst, limit, offset),
+                (counsellor_id, c_inst, c_inst, limit, offset),
             ).fetchall()
         else:
+            # Legacy individual accounts may have no institution. They remain
+            # assignment-scoped, while one-sided institution relationships are
+            # denied by the detail authorization helper.
             rows = conn.execute(
                 "SELECT DISTINCT u.id, u.email, u.name, u.role_type, u.status, u.created_at "
                 "FROM users u "
                 "JOIN counsellor_student_assignments a ON a.student_id = u.id AND a.counsellor_id = ? AND a.active = 1 "
-                "WHERE u.role_type = 'student' AND u.institution_id IS NULL "
+                "WHERE u.role_type = 'student' AND u.institution_id IS NULL AND a.institution_id IS NULL "
                 "ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
                 (counsellor_id, limit, offset),
             ).fetchall()
@@ -812,11 +815,18 @@ def get_conversations(user_id: str):
     return result
 
 
-def mark_read(message_id: str):
+def mark_read(message_id: str, user_id: str | None = None) -> bool:
     conn = get_db()
-    conn.execute("UPDATE communications SET read = 1 WHERE id = ?", (message_id,))
+    if user_id:
+        cur = conn.execute(
+            "UPDATE communications SET read = 1 WHERE id = ? AND (sender_id = ? OR receiver_id = ?)",
+            (message_id, user_id, user_id),
+        )
+    else:
+        cur = conn.execute("UPDATE communications SET read = 1 WHERE id = ?", (message_id,))
     conn.commit()
     conn.close()
+    return cur.rowcount > 0
 
 
 def mark_all_read(user_id: str, other_id: str):
@@ -1271,12 +1281,18 @@ def get_linked_accounts(student_id: str) -> list:
     return [dict(r) for r in rows]
 
 
-def revoke_linked_account(account_id: str) -> bool:
+def revoke_linked_account(account_id: str, student_id: str | None = None) -> bool:
     conn = get_db()
-    cur = conn.execute(
-        "UPDATE linked_accounts SET status = 'revoked' WHERE id = ?",
-        (account_id,),
-    )
+    if student_id:
+        cur = conn.execute(
+            "UPDATE linked_accounts SET status = 'revoked' WHERE id = ? AND student_id = ?",
+            (account_id, student_id),
+        )
+    else:
+        cur = conn.execute(
+            "UPDATE linked_accounts SET status = 'revoked' WHERE id = ?",
+            (account_id,),
+        )
     conn.commit()
     ok = cur.rowcount > 0
     conn.close()
@@ -1322,21 +1338,33 @@ def create_alert(
     return dict(row) if row else None
 
 
-def get_alerts(counsellor_id: str, status: str | None = None) -> list:
+def get_alerts(counsellor_id: str | None, status: str | None = None) -> list:
     conn = get_db()
-    if status:
+    if counsellor_id and status:
         rows = conn.execute(
             "SELECT a.*, u.name as student_name, u.email as student_email "
             "FROM alerts a JOIN users u ON a.student_id = u.id "
             "WHERE a.counsellor_id = ? AND a.status = ? ORDER BY a.fired_at DESC",
             (counsellor_id, status),
         ).fetchall()
-    else:
+    elif counsellor_id:
         rows = conn.execute(
             "SELECT a.*, u.name as student_name, u.email as student_email "
             "FROM alerts a JOIN users u ON a.student_id = u.id "
             "WHERE a.counsellor_id = ? ORDER BY a.fired_at DESC",
             (counsellor_id,),
+        ).fetchall()
+    elif status:
+        rows = conn.execute(
+            "SELECT a.*, u.name as student_name, u.email as student_email "
+            "FROM alerts a JOIN users u ON a.student_id = u.id "
+            "WHERE a.status = ? ORDER BY a.fired_at DESC",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT a.*, u.name as student_name, u.email as student_email "
+            "FROM alerts a JOIN users u ON a.student_id = u.id ORDER BY a.fired_at DESC",
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1361,20 +1389,29 @@ def get_alert_by_id(alert_id: str) -> dict | None:
 
 def has_consent_relationship(student_id: str, counsellor_id: str) -> bool:
     conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
     row = conn.execute(
-        "SELECT 1 FROM consents WHERE student_id = ? AND counsellor_id = ? LIMIT 1",
-        (student_id, counsellor_id),
+        "SELECT 1 FROM consents "
+        "WHERE student_id = ? AND counsellor_id = ? AND status = 'ACCEPTED' "
+        "AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?) LIMIT 1",
+        (student_id, counsellor_id, now),
     ).fetchone()
     conn.close()
     return row is not None
 
 
-def has_active_assignment(counsellor_id: str, student_id: str) -> bool:
+def has_active_assignment(counsellor_id: str, student_id: str, institution_id: str | None = None) -> bool:
     conn = get_db()
-    row = conn.execute(
-        "SELECT 1 FROM counsellor_student_assignments WHERE counsellor_id = ? AND student_id = ? AND active = 1 LIMIT 1",
-        (counsellor_id, student_id),
-    ).fetchone()
+    if institution_id:
+        row = conn.execute(
+            "SELECT 1 FROM counsellor_student_assignments WHERE counsellor_id = ? AND student_id = ? AND institution_id = ? AND active = 1 LIMIT 1",
+            (counsellor_id, student_id, institution_id),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM counsellor_student_assignments WHERE counsellor_id = ? AND student_id = ? AND active = 1 LIMIT 1",
+            (counsellor_id, student_id),
+        ).fetchone()
     conn.close()
     return row is not None
 

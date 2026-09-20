@@ -777,19 +777,34 @@ async def complete_onboarding(data: dict, request: Request, user: dict = Depends
         raise HTTPException(400, f"user_category must be one of {', '.join(sorted(allowed))}")
     institution_id = data.get("institution_id")
     parent_email = (data.get("parent_email") or "").strip().lower()
+    current_category = (user.get("user_category") or "pending").strip().lower()
+    if current_category != "pending":
+        if category != current_category or institution_id != user.get("institution_id"):
+            raise HTTPException(403, "Onboarding identity and institution links cannot be changed after completion")
     if category == "minor" and not parent_email:
         raise HTTPException(400, "parent_email is required for minors")
     if parent_email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", parent_email):
         raise HTTPException(400, "Invalid parent_email")
     parent_id = None
     if parent_email:
+        if parent_email == str(user.get("email") or "").strip().lower():
+            raise HTTPException(400, "A user cannot nominate themselves as their guardian")
         parent_user = get_user_by_email(parent_email)
         if parent_user:
+            if parent_user["id"] == user["id"] or (
+                parent_user.get("role_type") != "parent"
+                and parent_user.get("user_category") != "parent"
+            ):
+                raise HTTPException(400, "Guardian must be a separate parent account")
             parent_id = parent_user["id"]
+    if user.get("parent_guardian_id") and parent_id != user.get("parent_guardian_id"):
+        raise HTTPException(403, "Parent or guardian relationship cannot be changed")
     if institution_id:
         from backend.database import get_institution_by_id
         if not get_institution_by_id(institution_id):
             raise HTTPException(400, "Institution not found")
+        if user.get("institution_id") != institution_id:
+            raise HTTPException(403, "Institution membership must be provisioned by an administrator")
     ok = update_user_onboarding(user["id"], category, institution_id, parent_id)
     if not ok:
         raise HTTPException(500, "Failed to update onboarding")
@@ -954,10 +969,7 @@ async def list_analysis_sessions(
     elif user["role_type"] == "admin":
         pass
     else:
-        from backend.database import has_active_assignment
-
-        if not has_active_assignment(user["id"], student_id):
-            raise HTTPException(403, "Student not assigned to you")
+        _require_counsellor_student_access(user, student_id, require_consent=False)
         # history remains auditable even after consent revoked; only new analysis requires valid consent
     sessions = get_analysis_sessions_for_student(student_id, limit=limit, offset=offset)
     total = len(get_analysis_sessions_for_student(student_id, limit=1000, offset=0))
@@ -2375,6 +2387,10 @@ async def create_assignment(data: dict, request: Request, user: dict = Depends(r
         raise HTTPException(404, "Counsellor not found")
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
+    if not institution_id:
+        raise HTTPException(400, "institution_id is required")
+    if counsellor.get("institution_id") != institution_id or student.get("institution_id") != institution_id:
+        raise HTTPException(403, "Counsellor, student, and assignment institution must match")
     
     assignment = assign_student_to_counsellor(
         counsellor_id, student_id, institution_id, user["id"]
@@ -2452,14 +2468,14 @@ async def get_counsellor_students(user: dict = Depends(require_auth)):
 
 @app.post("/api/counsellor/students/approve")
 async def approve_counsellor_student(data: dict, request: Request, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
+    _require_counsellor(user)
     sid = data.get("id")
     if not sid:
         raise HTTPException(400, "Student ID required")
     student = get_user_by_id(sid)
     if not student:
         raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, sid, require_consent=False)
     # Prevent duplicate emails: only send if status actually changes
     if student.get("status") == "approved":
         return {"ok": True, "status": "approved", "email_sent": False, "email_error": None,
@@ -2492,14 +2508,14 @@ async def approve_counsellor_student(data: dict, request: Request, user: dict = 
 
 @app.post("/api/counsellor/students/revoke")
 async def revoke_counsellor_student(data: dict, request: Request, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
+    _require_counsellor(user)
     sid = data.get("id")
     if not sid:
         raise HTTPException(400, "Student ID required")
     student = get_user_by_id(sid)
     if not student:
         raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, sid, require_consent=False)
     # Prevent duplicate emails: only send if status actually changes
     if student.get("status") == "revoked":
         return {"ok": True, "status": "revoked", "email_sent": False, "email_error": None,
@@ -2534,6 +2550,7 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
     student = get_user_by_id(student_id)
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, student_id, require_consent=False)
     _require_counsellor_student_access(user, student_id)
     from backend.database import get_analyses
     analyses = get_analyses(student_id, limit=50)
@@ -2571,9 +2588,8 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
 
 @app.get("/api/counsellor/referrals")
 async def get_counsellor_referrals(user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
-    return get_referrals(user["id"])
+    _require_counsellor(user)
+    return get_referrals(None if user["role_type"] == "admin" else user["id"])
 
 
 @app.post("/api/counsellor/referrals")
@@ -2634,37 +2650,38 @@ async def update_counsellor_referral(referral_id: str, data: dict, request: Requ
 
 @app.get("/api/counsellor/conversations")
 async def get_counsellor_conversations(user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
-    return get_conversations(user["id"])
+    _require_counsellor(user)
+    conversations = get_conversations(user["id"])
+    if user["role_type"] == "admin":
+        return conversations
+    return [c for c in conversations if _communication_allowed(user, c["other_id"])]
 
 
 @app.get("/api/counsellor/conversations/{other_id}")
 async def get_counsellor_conversation(other_id: str, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
-    other = get_user_by_id(other_id)
-    if other and other["role_type"] == "student":
-        _require_counsellor_student_access(user, other_id)
+    _require_counsellor(user)
+    _require_user_communication_access(user, other_id)
     mark_all_read(user["id"], other_id)
     return get_conversation(user["id"], other_id)
 
 
 @app.post("/api/counsellor/messages")
-async def send_counsellor_message(data: dict, user: dict = Depends(require_auth)):
-    if user["role_type"] not in ("counsellor", "admin"):
-        raise HTTPException(403, "Counsellor or admin access required")
+async def send_counsellor_message(data: dict, request: Request, user: dict = Depends(require_auth)):
+    _require_counsellor(user)
     receiver_id = data.get("receiver_id")
     message = data.get("message", "").strip()
     if not receiver_id:
         raise HTTPException(400, "Receiver ID required")
     if not message:
         raise HTTPException(400, "Message cannot be empty")
-    receiver = get_user_by_id(receiver_id)
-    if receiver and receiver["role_type"] == "student":
-        _require_counsellor_student_access(user, receiver_id)
+    _require_user_communication_access(user, receiver_id)
     msg = send_message(user["id"], receiver_id, message)
-    _safe_notify(receiver_id, "New Message", f"New message from {user['name']}", "general")
+    if should_notify(receiver_id, "message"):
+        _safe_notify(receiver_id, "New Message", f"New message from {user['name']}", "message")
+    write_audit(
+        user["id"], user["role_type"], "MESSAGE_SENT", "communication", msg["id"],
+        payload={"receiver_id": receiver_id}, ip=_client_ip(request),
+    )
     return msg
 
 
@@ -2781,25 +2798,63 @@ def _require_counsellor(user: dict) -> None:
     })
 
 
-def _require_counsellor_student_access(user: dict, student_id: str) -> None:
-    """Centralized counsellor→student authz: active + assigned + consent + institution (fail-closed)."""
+def _require_counsellor_student_access(
+    user: dict, student_id: str, *, require_consent: bool = True
+) -> None:
+    """Centralized counsellor→student authorization; deny on missing scope."""
     if user.get("role_type") == "admin":
         return
     _require_counsellor(user)
     from backend.database import has_active_assignment, get_user_by_id
     if not has_active_assignment(user["id"], student_id):
         raise HTTPException(403, "Student not assigned to you")
-    if not has_consent_relationship(student_id, user["id"]):
-        raise HTTPException(403, "No valid consent for this student")
     counsellor_inst = user.get("institution_id")
     student = get_user_by_id(student_id)
     student_inst = student.get("institution_id") if student else None
-    if counsellor_inst and student_inst and counsellor_inst != student_inst:
+    if (counsellor_inst or student_inst) and (not counsellor_inst or not student_inst or counsellor_inst != student_inst):
         raise HTTPException(403, "Student not in your institution")
-    if counsellor_inst and not student_inst:
-        raise HTTPException(403, "Student not in your institution")
-    if not counsellor_inst and student_inst:
-        raise HTTPException(403, "Student not in your institution")
+    if counsellor_inst and not has_active_assignment(user["id"], student_id, counsellor_inst):
+        raise HTTPException(403, "Assignment is not in your institution")
+    if require_consent and not has_consent_relationship(student_id, user["id"]):
+        raise HTTPException(403, "No active consent for this student")
+
+
+def _require_user_communication_access(user: dict, other_id: str) -> dict:
+    """Authorize direct communication without trusting a caller-supplied ID."""
+    other = get_user_by_id(other_id)
+    if not other:
+        raise HTTPException(404, "Recipient not found")
+    if other_id == user["id"]:
+        raise HTTPException(400, "Cannot communicate with yourself")
+    if user.get("role_type") == "admin" or other.get("role_type") == "admin":
+        return other
+    user_role = user.get("role_type")
+    other_role = other.get("role_type")
+    if user_role in ("counsellor", "school_admin") and other_role == "student":
+        _require_counsellor_student_access(user, other_id)
+        return other
+    if other_role in ("counsellor", "school_admin") and user_role == "student":
+        _require_counsellor_student_access(other, user["id"])
+        return other
+    user_is_parent = user_role == "parent" or user.get("user_category") == "parent"
+    other_is_parent = other_role == "parent" or other.get("user_category") == "parent"
+    if user_is_parent and other_role == "student" and other.get("user_category") != "parent":
+        if other.get("parent_guardian_id") != user["id"]:
+            raise HTTPException(403, "Users are not permitted to communicate")
+        return other
+    if other_is_parent and user_role == "student" and user.get("user_category") != "parent":
+        if user.get("parent_guardian_id") != other["id"]:
+            raise HTTPException(403, "Users are not permitted to communicate")
+        return other
+    raise HTTPException(403, "Users are not permitted to communicate")
+
+
+def _communication_allowed(user: dict, other_id: str) -> bool:
+    try:
+        _require_user_communication_access(user, other_id)
+        return True
+    except HTTPException:
+        return False
 
 
 def _client_ip(request: Request) -> str:
@@ -2823,6 +2878,7 @@ async def v1_create_and_dispatch_consent(
     student = get_user_by_id(student_id)
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, student_id, require_consent=False)
 
     recipient_email = data.get("recipient_email", "").strip()
     if not recipient_email:
@@ -2831,6 +2887,15 @@ async def v1_create_and_dispatch_consent(
     recipient_role = data.get("recipient_role", "student")
     if recipient_role not in ("student", "parent"):
         raise HTTPException(400, "recipient_role must be 'student' or 'parent'")
+    if recipient_role == "student" and recipient_email.lower() != str(student.get("email") or "").lower():
+        raise HTTPException(403, "Student consent must be addressed to the student account")
+    if recipient_role == "parent":
+        parent_email = str(student.get("parent_email") or "").strip().lower()
+        parent = get_user_by_email(recipient_email)
+        if not parent_email or recipient_email.lower() != parent_email:
+            raise HTTPException(403, "Parent consent must be addressed to the registered guardian")
+        if student.get("parent_guardian_id") and student.get("parent_guardian_id") != parent.get("id"):
+            raise HTTPException(403, "Parent consent recipient is not the linked guardian")
 
     platforms = data.get("platforms", [])
     mode = data.get("mode", "ON_DEMAND")
@@ -2924,6 +2989,8 @@ async def v1_get_consent(
         raise HTTPException(404, "Consent not found")
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
     events = get_consent_events(consent_id)
     audit_log = get_audit_log_for_target("consent", consent_id)
     return {"consent": consent, "events": events, "audit_log": audit_log}
@@ -2941,6 +3008,8 @@ async def v1_dispatch_consent(
         raise HTTPException(404, "Consent not found")
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
     try:
         updated = dispatch_consent(consent_id, actor_id=user["id"], ip=_client_ip(request))
     except ValueError as exc:
@@ -2963,6 +3032,8 @@ async def v1_remind_consent(
         raise HTTPException(404, "Consent not found")
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
     if consent["status"] not in ("PENDING", "VIEWED"):
         raise HTTPException(400, f"Cannot send reminder for consent in status {consent['status']}")
     try:
@@ -3008,6 +3079,8 @@ async def v1_record_consent_decision(
         raise HTTPException(404, "Consent not found")
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
     decision = (data.get("decision") or "").strip().upper()
     if decision not in ("ACCEPTED", "DECLINED"):
         raise HTTPException(400, "decision must be 'ACCEPTED' or 'DECLINED'")
@@ -3045,6 +3118,8 @@ async def v1_cancel_consent(
         raise HTTPException(404, "Consent not found")
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
     if consent["status"] != "PENDING":
         raise HTTPException(400, f"Only PENDING consents can be cancelled (current: {consent['status']})")
     try:
@@ -3224,6 +3299,14 @@ async def v1_create_account(
 
     handle = (data.get("handle") or "").strip() or None
     consent_id = data.get("consent_id")
+    if consent_id:
+        linked_consent = get_consent_by_id(consent_id)
+        if (
+            not linked_consent
+            or linked_consent.get("student_id") != student_id
+            or (user["role_type"] != "admin" and linked_consent.get("counsellor_id") != user["id"])
+        ):
+            raise HTTPException(403, "Consent does not belong to this student and counsellor")
 
     try:
         account = create_linked_account(student_id, consent_id, platform, mode, handle)
@@ -3252,7 +3335,7 @@ async def v1_delete_account(
         raise HTTPException(404, "Student not found")
     _require_counsellor_student_access(user, student_id)
 
-    ok = revoke_linked_account(account_id)
+    ok = revoke_linked_account(account_id, student_id=student_id)
     if not ok:
         raise HTTPException(404, "Linked account not found")
 
@@ -3275,7 +3358,7 @@ async def v1_list_alerts(
     _require_counsellor(user)
     valid_statuses = {"OPEN", "CLOSED"}
     filter_status = status.upper() if status.upper() in valid_statuses else None
-    alerts = get_alerts(user["id"], status=filter_status)
+    alerts = get_alerts(None if user["role_type"] == "admin" else user["id"], status=filter_status)
     return {"alerts": alerts, "total": len(alerts)}
 
 
@@ -3301,7 +3384,7 @@ async def v1_dispose_alert(
     alert = get_alert_by_id(alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
-    if alert.get("counsellor_id") != user["id"]:
+    if alert.get("counsellor_id") != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "You do not own this alert")
 
     try:
@@ -3864,6 +3947,8 @@ async def v1_create_group(req: CreateGroupRequest, user: dict = Depends(require_
         for mid in req.member_ids:
             member_user = get_user_by_id(mid)
             if member_user and member_user["role_type"] == "student":
+                if user["role_type"] != "admin":
+                    _require_counsellor_student_access(user, mid)
                 add_group_member(group["id"], mid, role="member")
                 _safe_notify(mid, "Group Invitation",
                              f"You have been added to the group '{req.name}' by {user['name']}.",
@@ -3879,6 +3964,8 @@ async def v1_create_group(req: CreateGroupRequest, user: dict = Depends(require_
                 "role": m["role"], "joined_at": m["joined_at"],
             } for m in members],
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("create_group error: %s", exc)
         raise HTTPException(500, "Failed to create group")
@@ -3952,6 +4039,8 @@ async def v1_add_group_members(group_id: str, data: dict, user: dict = Depends(r
     for uid in user_ids:
         member_user = get_user_by_id(uid)
         if member_user and member_user["role_type"] == "student":
+            if user["role_type"] != "admin":
+                _require_counsellor_student_access(user, uid)
             result = add_group_member(group_id, uid, role="member")
             if result:
                 added.append(result)
@@ -4034,6 +4123,8 @@ async def v1_mark_group_read(group_id: str, user: dict = Depends(require_auth)):
 @app.get("/api/messages/conversations")
 async def get_my_conversations(user: dict = Depends(require_auth)):
     conversations = get_conversations(user["id"])
+    if user.get("role_type") != "admin":
+        conversations = [c for c in conversations if _communication_allowed(user, c["other_id"])]
     # Also fetch group previews
     groups = get_groups_for_user(user["id"])
     group_previews = []
@@ -4056,24 +4147,27 @@ async def get_my_conversations(user: dict = Depends(require_auth)):
 
 
 @app.post("/api/messages/send")
-async def send_message_any(data: dict, user: dict = Depends(require_auth)):
+async def send_message_any(data: dict, request: Request, user: dict = Depends(require_auth)):
     receiver_id = data.get("receiver_id")
     message = data.get("message", "").strip()
     if not receiver_id:
         raise HTTPException(400, "Receiver ID required")
     if not message:
         raise HTTPException(400, "Message cannot be empty")
-    receiver = get_user_by_id(receiver_id)
-    if not receiver:
-        raise HTTPException(404, "Recipient not found")
+    _require_user_communication_access(user, receiver_id)
     msg = send_message(user["id"], receiver_id, message)
     if should_notify(receiver_id, "message"):
         _safe_notify(receiver_id, "New Message", f"New message from {user['name']}", "message")
+    write_audit(
+        user["id"], user["role_type"], "MESSAGE_SENT", "communication", msg["id"],
+        payload={"receiver_id": receiver_id}, ip=_client_ip(request),
+    )
     return msg
 
 
 @app.get("/api/messages/conversations/{other_id}")
 async def get_conversation_any(other_id: str, user: dict = Depends(require_auth)):
+    _require_user_communication_access(user, other_id)
     mark_all_read(user["id"], other_id)
     return get_conversation(user["id"], other_id)
 
@@ -4082,12 +4176,14 @@ async def get_conversation_any(other_id: str, user: dict = Depends(require_auth)
 async def mark_message_read(data: dict, user: dict = Depends(require_auth)):
     message_id = data.get("message_id")
     if message_id:
-        mark_read(message_id)
+        if not mark_read(message_id, user["id"]):
+            raise HTTPException(404, "Message not found")
     return {"ok": True}
 
 
 @app.post("/api/messages/read-all/{other_id}")
 async def mark_all_read_with(other_id: str, user: dict = Depends(require_auth)):
+    _require_user_communication_access(user, other_id)
     mark_all_read(user["id"], other_id)
     return {"ok": True}
 
