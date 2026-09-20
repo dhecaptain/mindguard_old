@@ -6,6 +6,7 @@ export type PageKey =
   | 'youtube' | 'file' | 'facebook' | 'twitter' | 'unified'
   | 'resources' | 'team'
   | 'students' | 'referrals' | 'communications' | 'counsellor-dashboard'
+  | 'appointments'
   | 'alert-queue' | 'consent-tracker' | 'audit-log'
   | 'admin' | 'counsellors' | 'institutions' | 'assignments' | 'my-accounts'
   | 'notification-preferences'

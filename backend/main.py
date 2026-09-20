@@ -60,6 +60,7 @@ from backend.database import (
     update_user_onboarding, create_analysis_session, get_analysis_sessions_for_student, get_analysis_session,
     save_analysis, get_analytics,
     create_referral, get_referrals, update_referral,
+    create_appointment, get_appointment, list_appointments, update_appointment_status,
     send_message, get_conversation, get_conversations, mark_read, mark_all_read,
     create_notification, get_notifications, get_notification_summary, mark_notification_read,
     get_counsellor_dashboard, accept_user_terms,
@@ -2686,6 +2687,122 @@ async def send_counsellor_message(data: dict, request: Request, user: dict = Dep
 
 
 # ── Dashboard ────────────────────────────────────────────────────────
+
+# ── Appointment scheduling routes ────────────────────────────────────
+
+def _appointment_actor_can_access(user: dict, appointment: dict) -> None:
+    """Require an appointment participant or an administrator."""
+    if user["role_type"] == "admin":
+        return
+    if user["id"] == appointment["student_id"]:
+        return
+    if user["id"] == appointment["counsellor_id"]:
+        _require_counsellor_student_access(user, appointment["student_id"], require_consent=False)
+        return
+    raise HTTPException(403, "You do not have access to this appointment")
+
+
+@app.get("/api/appointments")
+async def get_my_appointments(status: str | None = None, user: dict = Depends(require_auth)):
+    if status and status not in {"REQUESTED", "CONFIRMED", "DECLINED", "CANCELLED", "COMPLETED", "NO_SHOW"}:
+        raise HTTPException(400, "Invalid appointment status")
+    if user["role_type"] == "admin":
+        return list_appointments(None, status=status)
+    return list_appointments(user["id"], status=status)
+
+
+@app.post("/api/appointments", status_code=201)
+async def create_new_appointment(data: dict, request: Request, user: dict = Depends(require_auth)):
+    if user["role_type"] not in ("counsellor", "school_admin", "admin"):
+        raise HTTPException(403, "Only counsellors can schedule appointments")
+    student_id = data.get("student_id")
+    title = (data.get("title") or "Wellbeing check-in").strip()
+    start_at = data.get("start_at")
+    end_at = data.get("end_at")
+    if not student_id or not start_at or not end_at:
+        raise HTTPException(400, "student_id, start_at, and end_at are required")
+    if not title or len(title) > 160:
+        raise HTTPException(400, "Title must be between 1 and 160 characters")
+    try:
+        start = datetime.fromisoformat(start_at.replace("Z", "+00:00"))
+        end = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid appointment date/time") from exc
+    if start.tzinfo is None or end.tzinfo is None or end <= start:
+        raise HTTPException(400, "Appointment end must be after its start and include a timezone")
+    if start <= datetime.now(timezone.utc):
+        raise HTTPException(400, "Appointments must be scheduled in the future")
+    student = get_user_by_id(student_id)
+    if not student or student.get("role_type") != "student":
+        raise HTTPException(404, "Student not found")
+    counsellor_id = user["id"] if user["role_type"] != "admin" else data.get("counsellor_id")
+    if not counsellor_id:
+        raise HTTPException(400, "counsellor_id is required for admin scheduling")
+    counsellor = get_user_by_id(counsellor_id)
+    if not counsellor or counsellor.get("role_type") not in ("counsellor", "school_admin"):
+        raise HTTPException(404, "Counsellor not found")
+    if user["role_type"] != "admin":
+        _require_counsellor_student_access(user, student_id)
+    else:
+        _require_counsellor_student_access(counsellor, student_id, require_consent=False)
+    try:
+        appointment = create_appointment(
+            student_id=student_id,
+            counsellor_id=counsellor_id,
+            created_by=user["id"],
+            title=title,
+            start_at=start.isoformat(),
+            end_at=end.isoformat(),
+            timezone_name=(data.get("timezone") or "UTC").strip(),
+            mode=(data.get("mode") or "video").strip(),
+            location=(data.get("location") or "").strip() or None,
+            notes=(data.get("notes") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _safe_notify(student_id, "Appointment requested", f"{counsellor.get('name', 'Your counsellor')} proposed a wellbeing appointment.", "appointment")
+    write_audit(user["id"], user["role_type"], "APPOINTMENT_CREATED", "appointment", appointment["id"],
+                payload={"student_id": student_id, "start_at": appointment["start_at"]}, ip=_client_ip(request))
+    return appointment
+
+
+@app.patch("/api/appointments/{appointment_id}/status")
+async def change_appointment_status(appointment_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+    appointment = get_appointment(appointment_id)
+    if not appointment:
+        raise HTTPException(404, "Appointment not found")
+    _appointment_actor_can_access(user, appointment)
+    status = data.get("status")
+    current = appointment["status"]
+    allowed = {
+        "REQUESTED": {"CONFIRMED", "DECLINED", "CANCELLED"},
+        "CONFIRMED": {"CANCELLED", "COMPLETED", "NO_SHOW"},
+        "DECLINED": set(), "CANCELLED": set(), "COMPLETED": set(), "NO_SHOW": set(),
+    }
+    if status not in allowed.get(current, set()):
+        raise HTTPException(409, f"Cannot change {current} appointment to {status}")
+    if user["role_type"] != "admin":
+        if user["id"] == appointment["student_id"] and status not in {"CONFIRMED", "DECLINED", "CANCELLED"}:
+            raise HTTPException(403, "Students may only confirm, decline, or cancel appointments")
+        if user["id"] == appointment["counsellor_id"] and status not in {"CONFIRMED", "DECLINED", "CANCELLED", "COMPLETED", "NO_SHOW"}:
+            raise HTTPException(403, "Counsellors may not use this appointment transition")
+    updated = update_appointment_status(appointment_id, status, (data.get("reason") or "").strip() or None)
+    if not updated:
+        raise HTTPException(404, "Appointment not found")
+    recipient = updated["student_id"] if user["id"] == updated["counsellor_id"] else updated["counsellor_id"]
+    _safe_notify(recipient, "Appointment updated", f"Appointment status: {status.lower().replace('_', ' ')}.", "appointment")
+    write_audit(user["id"], user["role_type"], "APPOINTMENT_STATUS_CHANGED", "appointment", appointment_id,
+                payload={"from": current, "to": status, "reason": data.get("reason")}, ip=_client_ip(request))
+    return updated
+
+
+@app.get("/api/appointments/{appointment_id}")
+async def get_one_appointment(appointment_id: str, user: dict = Depends(require_auth)):
+    appointment = get_appointment(appointment_id)
+    if not appointment:
+        raise HTTPException(404, "Appointment not found")
+    _appointment_actor_can_access(user, appointment)
+    return appointment
 
 @app.get("/api/counsellor/dashboard")
 async def counsellor_dashboard(user: dict = Depends(require_auth)):

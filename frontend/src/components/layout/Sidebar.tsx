@@ -12,6 +12,7 @@ const STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   { key: 'my-accounts', icon: 'ti ti-link', label: 'My Accounts' },
   { key: 'text-image', icon: 'ti ti-photo-scan', label: 'Text / Image' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
+  { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'resources', icon: 'ti ti-ambulance', label: 'Crisis Resources' },
   { key: 'team', icon: 'ti ti-users', label: 'Team' },
 ]
@@ -37,6 +38,7 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'file', icon: 'ti ti-folder-open', label: 'File Upload' },
   { key: 'referrals', icon: 'ti ti-link', label: 'Referrals' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },
+  { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'alert-queue', icon: 'ti ti-bell-ringing', label: 'Alert Queue' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit Log' },

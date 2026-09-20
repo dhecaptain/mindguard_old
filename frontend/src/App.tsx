@@ -42,6 +42,7 @@ import AuditLogPage from './pages/AuditLogPage'
 import AdminPage from './pages/AdminPage'
 import AdminCounsellorsPage from './pages/AdminCounsellorsPage'
 import NotificationPreferencesPage from './pages/NotificationPreferencesPage'
+import AppointmentsPage from './pages/AppointmentsPage'
 import LandingPage from './pages/LandingPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
@@ -103,6 +104,7 @@ function PageRouter() {
       case 'unified': return <MultiPlatformPage />
       case 'referrals': return <ReferralsPage />
       case 'communications': return <CommunicationsPage />
+      case 'appointments': return <AppointmentsPage />
       case 'alert-queue': return <AlertQueuePage />
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />
@@ -127,6 +129,7 @@ function PageRouter() {
       case 'unified': return <MultiPlatformPage />
       case 'referrals': return <ReferralsPage />
       case 'communications': return <CommunicationsPage />
+      case 'appointments': return <AppointmentsPage />
       case 'alert-queue': return <AlertQueuePage />
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />
@@ -145,6 +148,7 @@ function PageRouter() {
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />
     case 'communications': return <StudentCommunicationsPage />
+    case 'appointments': return <AppointmentsPage />
     case 'my-accounts': return <MyAccountsPage />
     case 'notification-preferences': return <NotificationPreferencesPage />
     default: return <DashboardPage />
@@ -163,6 +167,7 @@ function AdultPageRouter() {
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />
     case 'communications': return <StudentCommunicationsPage />
+    case 'appointments': return <AppointmentsPage />
     case 'notification-preferences': return <NotificationPreferencesPage />
     default: return <AdultDashboardPage />
   }
