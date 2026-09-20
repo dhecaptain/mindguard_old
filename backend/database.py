@@ -2408,7 +2408,8 @@ def list_demo_requests(status: str | None = None, limit: int = 100, offset: int 
 def update_demo_request(demo_request_id: str, **kwargs) -> dict | None:
     allowed_fields = {
         "status", "assigned_to", "notes", "meeting_at", "meeting_url",
-        "institution_id", "converted_by", "converted_at",
+        "institution_id", "converted_by", "converted_at", "meeting_response",
+        "meeting_response_token_hash", "meeting_response_note",
     }
     updates = ["updated_at = ?"]
     params = [datetime.now(timezone.utc).isoformat()]
@@ -2424,6 +2425,16 @@ def update_demo_request(demo_request_id: str, **kwargs) -> dict | None:
     conn.commit()
     conn.close()
     return get_demo_request(demo_request_id)
+
+
+def get_demo_request_by_response_token(token_hash: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM demo_requests WHERE meeting_response_token_hash = ?",
+        (token_hash,),
+    ).fetchone()
+    conn.close()
+    return _decrypt_demo_row(dict(row)) if row else None
 
 
 # ── Email events (deliverability tracking) ───────────────────────────

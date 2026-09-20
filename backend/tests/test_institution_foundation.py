@@ -47,3 +47,15 @@ def test_demo_request_tracks_meeting_and_institution_onboarding(db):
     )
     assert updated["status"] == "demo_scheduled"
     assert updated["meeting_url"].startswith("https://")
+
+
+def test_demo_meeting_response_token_is_lookupable(db):
+    from backend.services.crypto import hash_token
+
+    demo = db.create_demo_request("Owner", "owner@example.test", "Tenant A", "k12")
+    token_hash = hash_token("one-time-demo-token")
+    db.update_demo_request(
+        demo["id"], meeting_response="PENDING", meeting_response_token_hash=token_hash,
+    )
+    matched = db.get_demo_request_by_response_token(token_hash)
+    assert matched["id"] == demo["id"]

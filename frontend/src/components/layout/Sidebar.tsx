@@ -47,6 +47,7 @@ const COUNSELLOR_NAV_BASE = [
 
 const ADMIN_NAV_ITEMS = [
   { key: 'admin', icon: 'ti ti-shield-check', label: 'Dashboard' },
+  { key: 'institutions', icon: 'ti ti-building-community', label: 'Institutions' },
   { key: 'counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'students', icon: 'ti ti-users', label: 'Students' },
