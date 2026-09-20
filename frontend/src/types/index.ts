@@ -275,6 +275,8 @@ export interface DemoRequest {
   updated_at: string
   meeting_at?: string | null
   meeting_url?: string | null
+  meeting_response?: 'PENDING' | 'ACCEPTED' | 'RESCHEDULE_REQUESTED' | null
+  meeting_response_note?: string | null
   institution_id?: string | null
   converted_at?: string | null
 }
