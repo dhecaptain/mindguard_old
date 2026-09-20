@@ -2664,7 +2664,7 @@ async def create_counsellor_referral(data: dict, request: Request, user: dict = 
     else:
         _require_counsellor_student_access(user, student_id)
     referral = create_referral(user["id"], student_id, urgency, notes, destination, follow_up_at)
-    if urgency == "crisis" and user["role_type"] != "school_admin":
+    if urgency == "crisis":
         create_alert(student_id, user["id"], 1.0, 0.0, "referral")
     _safe_notify(student_id, "Referral Created", f"A counsellor has created a {urgency}-urgency referral for you.", "referral")
     write_audit(
