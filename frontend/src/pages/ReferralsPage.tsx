@@ -13,8 +13,10 @@ const URGENCY_STYLES: Record<string, string> = {
 const STATUS_STYLES: Record<string, string> = {
   open: 'bg-[#dbeafe] text-[#1e40af]',
   accepted: 'bg-[#d1fae5] text-[#065f46]',
+  in_progress: 'bg-[#ccfbf1] text-[#115e59]',
   completed: 'bg-[#e0e7ff] text-[#4338ca]',
   declined: 'bg-[#f1f5f9] text-[#6b7280]',
+  cancelled: 'bg-[#f1f5f9] text-[#475569]',
 }
 
 function formatDate(d: string) {
@@ -33,7 +35,7 @@ export default function ReferralsPage() {
   const { referrals, setReferrals, addReferral, updateReferralStatus, loading, setLoading, error, setError } = useCounsellorStore()
   const [showModal, setShowModal] = useState(false)
   const [students, setStudents] = useState<StudentDTO[]>([])
-  const [formData, setFormData] = useState({ student_id: '', urgency: 'medium', notes: '' })
+  const [formData, setFormData] = useState({ student_id: '', urgency: 'medium', notes: '', destination: '', follow_up_at: '' })
   const [submitting, setSubmitting] = useState(false)
   const [filter, setFilter] = useState<string>('all')
   const [formError, setFormError] = useState<string | null>(null)
@@ -60,10 +62,10 @@ export default function ReferralsPage() {
     setSubmitting(true)
     setFormError(null)
     try {
-      const ref = await createReferral(formData.student_id, formData.urgency, formData.notes)
+      const ref = await createReferral(formData.student_id, formData.urgency, formData.notes, formData.destination, formData.follow_up_at ? new Date(formData.follow_up_at).toISOString() : undefined)
       addReferral(ref)
       setShowModal(false)
-      setFormData({ student_id: '', urgency: 'medium', notes: '' })
+      setFormData({ student_id: '', urgency: 'medium', notes: '', destination: '', follow_up_at: '' })
     } catch (e: any) {
       setFormError(e?.response?.data?.detail ?? 'Failed to create referral')
     }
@@ -108,7 +110,7 @@ export default function ReferralsPage() {
 
       {/* Filters */}
       <div className="flex gap-[8px]">
-        {['all', 'open', 'accepted', 'completed', 'declined'].map((f) => (
+        {['all', 'open', 'accepted', 'in_progress', 'completed', 'declined', 'cancelled'].map((f) => (
           <button
             key={f}
             onClick={() => setFilter(f)}
@@ -155,6 +157,7 @@ export default function ReferralsPage() {
                   <span className="text-[0.7rem] text-[#9ca3af] ml-auto">{formatDate(r.created_at)}</span>
                 </div>
                 {r.notes && <p className="text-[0.78rem] text-[#6b7280] mt-[6px]">{r.notes}</p>}
+                {(r.destination || r.follow_up_at || r.outcome) && <div className="flex flex-wrap gap-3 mt-[6px] text-[0.72rem] text-[#64748b]"><span>{r.destination || 'No destination'}</span>{r.follow_up_at && <span>Follow up: {new Date(r.follow_up_at).toLocaleString()}</span>}{r.outcome && <span>Outcome: {r.outcome}</span>}</div>}
                 <div className="flex gap-[8px] mt-[8px]">
                   {r.status === 'open' && (
                     <>
@@ -162,7 +165,7 @@ export default function ReferralsPage() {
                       <button onClick={() => handleStatusChange(r.id, 'declined')} className="text-[0.72rem] text-[#ef4444] font-semibold cursor-pointer bg-transparent border-none hover:underline">Decline</button>
                     </>
                   )}
-                  {r.status === 'accepted' && (
+                  {r.status === 'accepted' || r.status === 'in_progress' ? (
                     <button onClick={() => handleStatusChange(r.id, 'completed')} className="text-[0.72rem] text-[#0F766E] font-semibold cursor-pointer bg-transparent border-none hover:underline">Mark Complete</button>
                   )}
                 </div>
@@ -178,6 +181,14 @@ export default function ReferralsPage() {
           <div className="bg-white rounded-xl p-[24px] w-[440px] max-w-[90vw]" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-[1.05rem] font-bold text-[#1f2937] mb-[16px]">New Referral</h3>
             <div className="flex flex-col gap-[12px]">
+              <div>
+                <label className="text-[0.78rem] font-semibold text-[#374151] mb-[4px] block">Receiving service / destination</label>
+                <input value={formData.destination} onChange={(e) => setFormData({ ...formData, destination: e.target.value })} placeholder="School nurse, clinic, safeguarding team..." className="w-full px-[12px] py-[9px] rounded-[8px] border border-[#d1d5db] text-[0.82rem]" />
+              </div>
+              <div>
+                <label className="text-[0.78rem] font-semibold text-[#374151] mb-[4px] block">Follow-up date</label>
+                <input type="datetime-local" value={formData.follow_up_at} onChange={(e) => setFormData({ ...formData, follow_up_at: e.target.value })} className="w-full px-[12px] py-[9px] rounded-[8px] border border-[#d1d5db] text-[0.82rem]" />
+              </div>
               <div>
                 <label className="text-[0.78rem] font-semibold text-[#374151] mb-[4px] block">Student</label>
                 <select
