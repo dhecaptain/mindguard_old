@@ -41,6 +41,26 @@ def _headers(user):
     }
 
 
+def test_admin_created_accepted_consent_authorizes_assigned_counsellor(db):
+    institution = database.create_institution("Phase 1 Admin Consent School", "school")
+    admin = _user(db, "phase1-admin-consent@example.com", "admin")
+    counsellor = _user(
+        db, "phase1-admin-consent-c@example.com", "counsellor", institution["id"]
+    )
+    student = _user(
+        db, "phase1-admin-consent-s@example.com", "student", institution["id"]
+    )
+    database.assign_student_to_counsellor(
+        counsellor["id"], student["id"], institution["id"], admin["id"]
+    )
+    consent = database.create_consent(
+        student["id"], admin["id"], student["email"], "student", ["reddit"]
+    )
+    database.update_consent_status(consent["id"], "ACCEPTED")
+
+    assert database.has_consent_relationship(student["id"], counsellor["id"])
+
+
 def test_general_message_idor_is_denied(db):
     institution = database.create_institution("Phase 1 School", "school")
     c1 = _user(db, "phase1-c1@example.com", "counsellor", institution["id"])

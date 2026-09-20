@@ -1514,9 +1514,12 @@ def has_consent_relationship(student_id: str, counsellor_id: str) -> bool:
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
     row = conn.execute(
-        "SELECT 1 FROM consents "
-        "WHERE student_id = ? AND counsellor_id = ? AND status = 'ACCEPTED' "
-        "AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?) LIMIT 1",
+        "SELECT 1 FROM consents c "
+        "LEFT JOIN users consent_owner ON consent_owner.id = c.counsellor_id "
+        "WHERE c.student_id = ? "
+        "AND (c.counsellor_id = ? OR consent_owner.role_type = 'admin') "
+        "AND c.status = 'ACCEPTED' "
+        "AND (c.expires_at IS NULL OR c.expires_at = '' OR c.expires_at > ?) LIMIT 1",
         (student_id, counsellor_id, now),
     ).fetchone()
     conn.close()
