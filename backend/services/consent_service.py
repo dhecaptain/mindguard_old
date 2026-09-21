@@ -544,6 +544,8 @@ def _csv_cell(value) -> str:
     if value is None:
         return ""
     text = str(value)
+    if text[:1] in {"=", "+", "-", "@"}:
+        text = "'" + text
     return f'"{text.replace(chr(34), chr(34) + chr(34))}"'
 
 

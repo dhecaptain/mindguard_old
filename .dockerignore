@@ -14,3 +14,7 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+.cache/
+.venv313/
+logs/
+*.env.local

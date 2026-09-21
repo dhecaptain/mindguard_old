@@ -165,7 +165,7 @@ export default function ReferralsPage() {
                       <button onClick={() => handleStatusChange(r.id, 'declined')} className="text-[0.72rem] text-[#ef4444] font-semibold cursor-pointer bg-transparent border-none hover:underline">Decline</button>
                     </>
                   )}
-                  {r.status === 'accepted' || r.status === 'in_progress' ? (
+                  {(r.status === 'accepted' || r.status === 'in_progress') && (
                     <button onClick={() => handleStatusChange(r.id, 'completed')} className="text-[0.72rem] text-[#0F766E] font-semibold cursor-pointer bg-transparent border-none hover:underline">Mark Complete</button>
                   )}
                 </div>

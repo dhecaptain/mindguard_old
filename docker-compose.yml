@@ -11,8 +11,8 @@ services:
       - MINDGUARD_DB_DIR=/app/data
       - PORT=${BACKEND_PORT:-8000}
       - API_PORT=${BACKEND_PORT:-8000}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,https://app.mindguardai.me,https://www.mindguardai.me}
-      - APP_BASE_URL=${APP_BASE_URL:-https://app.mindguardai.me}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:5188,http://localhost:3000}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:5173}
       - MINDGUARD_ENV=${MINDGUARD_ENV:-development}
     volumes:
       - mindguard_data:/app/data
