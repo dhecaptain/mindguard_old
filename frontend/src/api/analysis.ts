@@ -8,6 +8,9 @@ export interface TextAnalysisPayload {
 export interface TextAnalysisResponse {
   prob: number
   latency_ms: number
+  risk_tier: 'low' | 'moderate' | 'high' | 'critical'
+  alert_eligible: boolean
+  crisis_escalation_eligible: boolean
   analytics: {
     total_analyses: number
     positive_count: number

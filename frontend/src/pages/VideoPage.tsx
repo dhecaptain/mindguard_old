@@ -18,8 +18,9 @@ export default function VideoPage() {
       setPlatformResult('video', null)
       const result = await analyzeVideo(videoUrl)
       setPlatformResult('video', result)
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Video analysis failed')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } }; message?: string }
+      setError(error.response?.data?.detail || error.message || 'Video analysis failed')
     } finally {
       usePlatformStore.getState().setLoading(false)
     }
@@ -151,7 +152,7 @@ export default function VideoPage() {
                     color: videoResult.risk >= 0.55 ? '#991b1b' : videoResult.risk >= 0.35 ? '#92400e' : '#166534',
                   }}
                 >
-                  {videoResult.risk >= 0.55 ? 'Crisis alert - high-risk content detected.' : videoResult.risk >= 0.35 ? 'Moderate risk detected.' : 'Low risk detected.'}
+                  {videoResult.risk >= 0.75 ? 'Critical signal - human review recommended.' : videoResult.risk >= 0.55 ? 'High-risk signal - review recommended.' : videoResult.risk >= 0.35 ? 'Moderate risk detected.' : 'Low risk detected.'}
                 </div>
 
                 <button

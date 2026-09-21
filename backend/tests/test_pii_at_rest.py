@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-from backend import database
 from backend.services import crypto
 from backend.services.crypto import hash_email, redact_pii
 
@@ -16,14 +15,16 @@ def test_hash_email_normalises_and_is_deterministic():
 
 
 def test_redact_pii_emails_urls_and_keys():
-    blob = redact_pii({
-        "to": "Jane Doe <jane@school.edu>",
-        "url": "https://app.mindguard.org/consent/v1.abc.def.ghi",
-        "recipient": "jane@school.edu",
-        "signature": "Jane Doe",
-        "nested": {"parent_email": "mom@school.edu"},
-        "tags": ["jane@school.edu", "keep-me"],
-    })
+    blob = redact_pii(
+        {
+            "to": "Jane Doe <jane@school.edu>",
+            "url": "https://app.mindguard.org/consent/v1.abc.def.ghi",
+            "recipient": "jane@school.edu",
+            "signature": "Jane Doe",
+            "nested": {"parent_email": "mom@school.edu"},
+            "tags": ["jane@school.edu", "keep-me"],
+        }
+    )
     dumped = json.dumps(blob)
     assert "jane@school.edu" not in dumped
     assert "mom@school.edu" not in dumped
@@ -33,16 +34,24 @@ def test_redact_pii_emails_urls_and_keys():
     assert blob["nested"]["parent_email"].endswith("@redacted")
     assert "mom@school.edu" not in blob["nested"]["parent_email"]
     assert blob["signature"] == "[redacted]"
-    assert blob["tags"] == [f"redacted-{hash_email('jane@school.edu')[:12]}@redacted", "keep-me"]
+    assert blob["tags"] == [
+        f"redacted-{hash_email('jane@school.edu')[:12]}@redacted",
+        "keep-me",
+    ]
 
 
 def test_consent_recipient_email_encrypted_at_rest(db):
-    counsellor = db.create_user("counsellor@school.edu", "Counsellor", "x", role_type="counsellor")
+    counsellor = db.create_user(
+        "counsellor@school.edu", "Counsellor", "x", role_type="counsellor"
+    )
     alex = db.create_user("alex@uni.edu", "Alex Roe", "x", role_type="student")
-    cons = db.create_consent(alex["id"], counsellor["id"], "jane@school.edu", "student", ["Reddit"])
+    cons = db.create_consent(
+        alex["id"], counsellor["id"], "jane@school.edu", "student", ["Reddit"]
+    )
     conn = db.get_db()
     raw = conn.execute(
-        "SELECT recipient_email, recipient_email_hash FROM consents WHERE id = ?", (cons["id"],)
+        "SELECT recipient_email, recipient_email_hash FROM consents WHERE id = ?",
+        (cons["id"],),
     ).fetchone()
     conn.close()
     assert raw["recipient_email"].startswith("gcm1:")
@@ -53,11 +62,18 @@ def test_consent_recipient_email_encrypted_at_rest(db):
 
 def test_email_event_recipient_encrypted_at_rest(db):
     eid = db.create_email_event(
-        "consent", "c-1", "delivered", esp_message_id="esp-9",
-        recipient_email="jane@school.edu", metadata={"tag": "consent"},
+        "consent",
+        "c-1",
+        "delivered",
+        esp_message_id="esp-9",
+        recipient_email="jane@school.edu",
+        metadata={"tag": "consent"},
     )
     conn = db.get_db()
-    raw = conn.execute("SELECT recipient_email, recipient_email_hash FROM email_events WHERE id = ?", (eid,)).fetchone()
+    raw = conn.execute(
+        "SELECT recipient_email, recipient_email_hash FROM email_events WHERE id = ?",
+        (eid,),
+    ).fetchone()
     conn.close()
     assert raw["recipient_email"].startswith("gcm1:")
     assert raw["recipient_email_hash"] == hash_email("jane@school.edu")
@@ -67,11 +83,19 @@ def test_email_event_recipient_encrypted_at_rest(db):
 
 
 def test_delivery_status_join_works_through_hashes(db):
-    counsellor = db.create_user("counsellor@school.edu", "Counsellor", "x", role_type="counsellor")
+    counsellor = db.create_user(
+        "counsellor@school.edu", "Counsellor", "x", role_type="counsellor"
+    )
     alex = db.create_user("alex@uni.edu", "Alex Roe", "x", role_type="student")
-    cons = db.create_consent(alex["id"], counsellor["id"], "ALEX@uni.edu", "student", ["Reddit"])
+    cons = db.create_consent(
+        alex["id"], counsellor["id"], "ALEX@uni.edu", "student", ["Reddit"]
+    )
     db.create_email_event(
-        "consent", cons["id"], "delivered", esp_message_id="esp-1", recipient_email="alex@uni.edu"
+        "consent",
+        cons["id"],
+        "delivered",
+        esp_message_id="esp-1",
+        recipient_email="alex@uni.edu",
     )
     joined = db.get_consent_with_student(cons["id"])
     assert joined["recipient_email"] == "ALEX@uni.edu"
@@ -100,7 +124,11 @@ def test_demo_request_pii_encrypted_at_rest(db):
 def test_demo_request_delivery_status_join_through_hash(db):
     demo = db.create_demo_request("Jane Doe", "jane@corp.com", "Acme Inc")
     db.create_email_event(
-        "demo_request", demo["id"], "bounced", esp_message_id="esp-2", recipient_email="JANE@corp.com"
+        "demo_request",
+        demo["id"],
+        "bounced",
+        esp_message_id="esp-2",
+        recipient_email="JANE@corp.com",
     )
     rows = db.list_demo_requests(status="new")
     assert rows[0]["id"] == demo["id"]
@@ -109,9 +137,13 @@ def test_demo_request_delivery_status_join_through_hash(db):
 
 
 def test_legacy_plaintext_consent_reads_transparently(db):
-    counsellor = db.create_user("counsellor@school.edu", "Counsellor", "x", role_type="counsellor")
+    counsellor = db.create_user(
+        "counsellor@school.edu", "Counsellor", "x", role_type="counsellor"
+    )
     alex = db.create_user("alex@uni.edu", "Alex Roe", "x", role_type="student")
-    cons = db.create_consent(alex["id"], counsellor["id"], "alex@uni.edu", "student", ["Reddit"])
+    cons = db.create_consent(
+        alex["id"], counsellor["id"], "alex@uni.edu", "student", ["Reddit"]
+    )
     conn = db.get_db()
     conn.execute(
         "UPDATE consents SET recipient_email = ?, recipient_email_hash = NULL WHERE id = ?",
@@ -125,13 +157,26 @@ def test_legacy_plaintext_consent_reads_transparently(db):
 
 
 def test_audit_and_consent_event_json_redacted_at_write(db):
-    from backend.database import create_consent_event, get_audit_log_for_target, get_consent_events, write_audit
+    from backend.database import (
+        create_consent_event,
+        get_audit_log_for_target,
+        get_consent_events,
+        write_audit,
+    )
 
-    counsellor = db.create_user("counsellor@school.edu", "Counsellor", "x", role_type="counsellor")
+    counsellor = db.create_user(
+        "counsellor@school.edu", "Counsellor", "x", role_type="counsellor"
+    )
     alex = db.create_user("alex@uni.edu", "Alex Roe", "x", role_type="student")
-    cons = db.create_consent(alex["id"], counsellor["id"], "alex@uni.edu", "student", ["Reddit"])
-    aid = write_audit(
-        "actor-1", "counsellor", "CONSENT_DISPATCHED", "consent", cons["id"],
+    cons = db.create_consent(
+        alex["id"], counsellor["id"], "alex@uni.edu", "student", ["Reddit"]
+    )
+    write_audit(
+        "actor-1",
+        "counsellor",
+        "CONSENT_DISPATCHED",
+        "consent",
+        cons["id"],
         payload={
             "recipient": "jane@school.edu",
             "url": "https://app.mindguard.org/consent/v1.token123.mac",
@@ -139,7 +184,10 @@ def test_audit_and_consent_event_json_redacted_at_write(db):
         },
     )
     create_consent_event(
-        cons["id"], "CONSENT_ACCEPTED", "student", "alex@uni.edu",
+        cons["id"],
+        "CONSENT_ACCEPTED",
+        "student",
+        "alex@uni.edu",
         metadata={"recipient_email": "jane@school.edu", "signature": "Jane Doe"},
     )
     audit = get_audit_log_for_target("consent", cons["id"])

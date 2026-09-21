@@ -1,7 +1,5 @@
 """Tests for the ENCRYPTION_KEY rotation script (Remediation P2-6)."""
 
-import os
-
 import pytest
 
 import backend.scripts.reencrypt_db as reencrypt
@@ -29,12 +27,20 @@ def _seed_pii(db):
         is_minor=0,
         created_by=u["id"],
     )
-    db.create_consent(u["id"], u["id"], "alex@school.edu", "student", ["text"],
-                      mode="ON_DEMAND")
+    db.create_consent(
+        u["id"], u["id"], "alex@school.edu", "student", ["text"], mode="ON_DEMAND"
+    )
     db.create_demo_request(
-        "Jane Doe", "jane@company.com", "ACME", "school",
-        role_title="Counsellor", country="KE", student_count_range="1-500",
-        message="hi", heard_about_us="web", consent_to_contact=1,
+        "Jane Doe",
+        "jane@company.com",
+        "ACME",
+        "school",
+        role_title="Counsellor",
+        country="KE",
+        student_count_range="1-500",
+        message="hi",
+        heard_about_us="web",
+        consent_to_contact=1,
     )
 
 
@@ -54,9 +60,11 @@ def test_reencrypt_rotates_all_blobs(tmp_path, monkeypatch):
         blob_count = 0
         for table, columns in reencrypt.PII_COLUMNS.items():
             for column in columns:
-                for row in database.get_db().execute(
-                    f"SELECT {column} FROM {table}"
-                ).fetchall():
+                for row in (
+                    database.get_db()
+                    .execute(f"SELECT {column} FROM {table}")
+                    .fetchall()
+                ):
                     if row[0] and row[0].startswith("gcm1:"):
                         blob_count += 1
         assert blob_count >= 4  # student PII + consent + demo fields
@@ -70,9 +78,11 @@ def test_reencrypt_rotates_all_blobs(tmp_path, monkeypatch):
         crypto._ENCRYPTION_KEY_HEX = _new_key()
         for table, columns in reencrypt.PII_COLUMNS.items():
             for column in columns:
-                for row in database.get_db().execute(
-                    f"SELECT {column} FROM {table}"
-                ).fetchall():
+                for row in (
+                    database.get_db()
+                    .execute(f"SELECT {column} FROM {table}")
+                    .fetchall()
+                ):
                     if row[0] and row[0].startswith("gcm1:"):
                         crypto.decrypt_pii(row[0])  # must not raise under new key
     finally:

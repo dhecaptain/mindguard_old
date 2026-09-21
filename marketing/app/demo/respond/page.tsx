@@ -1,11 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
 
 type Details = { full_name: string; organisation: string; meeting_at: string; meeting_url: string; meeting_response?: string }
 
-export default function DemoMeetingResponsePage() {
+function DemoMeetingResponseContent() {
   const params = useSearchParams()
   const token = params.get('token') || ''
   const requestedAction = params.get('action') || ''
@@ -60,5 +60,13 @@ export default function DemoMeetingResponsePage() {
         {message && details.meeting_response !== 'ACCEPTED' && details.meeting_response !== 'RESCHEDULE_REQUESTED' && <p className="mt-4 text-sm text-red-700">{message}</p>}
       </section>
     </main>
+  )
+}
+
+export default function DemoMeetingResponsePage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen flex items-center justify-center text-ink-soft">Loading invitation…</main>}>
+      <DemoMeetingResponseContent />
+    </Suspense>
   )
 }

@@ -3,7 +3,7 @@ import type {
   Consent, ConsentListResponse, ConsentDetail, LinkedAccount, Alert, AlertDisposition,
   AuditEvent, Note, TimelineEntry,
   Group, GroupDetail, GroupMessage,
-  ConversationsResponse, NotificationPreference,
+  ConversationsResponse, NotificationPreference, DirectMessage,
 } from '../types'
 
 export interface StudentDTO {
@@ -71,6 +71,9 @@ export interface StudentAnalysisResult {
     level: string
     reason_code: string
   } | null
+  risk_tier?: 'low' | 'moderate' | 'high' | 'critical'
+  alert_eligible?: boolean
+  crisis_escalation_eligible?: boolean
 }
 
 export interface Referral {
@@ -110,6 +113,7 @@ export interface Message {
 export interface DashboardData {
   total_students: number
   pending_approvals: number
+  individual_users?: number
   open_referrals: number
   crisis_flags_7d: number
   recent_referrals: Referral[]
@@ -366,7 +370,7 @@ export async function removeGroupMember(groupId: string, userId: string): Promis
 }
 
 export async function getGroupMessages(groupId: string, limit = 50, beforeId?: string): Promise<{ messages: GroupMessage[]; total: number }> {
-  const params: any = { limit }
+  const params: Record<string, string | number> = { limit }
   if (beforeId) params.before_id = beforeId
   const { data } = await api.get(`/v1/groups/${groupId}/messages`, { params })
   return data
@@ -389,12 +393,12 @@ export async function getMyConversations(): Promise<ConversationsResponse> {
   return data
 }
 
-export async function sendDirectMessage(receiverId: string, message: string): Promise<any> {
+export async function sendDirectMessage(receiverId: string, message: string): Promise<DirectMessage> {
   const { data } = await api.post('/messages/send', { receiver_id: receiverId, message })
   return data
 }
 
-export async function getDirectConversation(otherId: string): Promise<any[]> {
+export async function getDirectConversation(otherId: string): Promise<DirectMessage[]> {
   const { data } = await api.get(`/messages/conversations/${otherId}`)
   return data
 }

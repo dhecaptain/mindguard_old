@@ -26,10 +26,15 @@ import logging
 from fastapi import HTTPException
 
 from backend.database import (
-    create_notification, get_user_by_id, update_rolling_risk, write_audit,
+    create_notification,
+    get_user_by_id,
+    get_institution_by_id,
+    update_rolling_risk,
+    write_audit,
 )
 from backend.services.alert_service import compute_rolling_risk, try_create_alert
 from backend.services.consent_gate import require_consent_for_analysis
+from backend.services.risk_policy import ALERT_THRESHOLD, assess_risk
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +91,11 @@ def run_consented_student_analysis(
     )
 
     write_audit(
-        actor["id"], actor["role_type"], "ROLLING_RISK_COMPUTED",
-        "student", student_id,
+        actor["id"],
+        actor["role_type"],
+        "ROLLING_RISK_COMPUTED",
+        "student",
+        student_id,
         payload={"platform": platform, "score": rolling_score, "n_posts": n_posts},
         ip=ip,
     )
@@ -95,14 +103,29 @@ def run_consented_student_analysis(
     student = get_user_by_id(student_id)
     student_name = student["name"] if student else student_id
 
+    institution = (
+        get_institution_by_id(actor.get("institution_id"))
+        if actor.get("institution_id")
+        else None
+    )
+    configured_threshold = institution.get("alert_threshold") if institution else None
+    try:
+        alert_threshold = (
+            float(configured_threshold) if configured_threshold is not None else None
+        )
+    except (TypeError, ValueError):
+        alert_threshold = None
+    alert_threshold = alert_threshold or ALERT_THRESHOLD
+    assessment = assess_risk(rolling_score, alert_threshold=alert_threshold)
     alert = None
-    if rolling_score >= 0.65:
+    if assessment.alert_eligible:
         try:
             alert = try_create_alert(
                 student_id=student_id,
                 counsellor_id=actor["id"],
                 rolling_score=rolling_score,
                 platform=platform,
+                threshold=alert_threshold,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("try_create_alert error student=%s: %s", student_id, exc)
@@ -116,17 +139,25 @@ def run_consented_student_analysis(
                     "alert",
                 )
             except Exception as exc:  # pragma: no cover - defensive
-                logger.error("alert notification failed student=%s: %s", student_id, exc)
+                logger.error(
+                    "alert notification failed student=%s: %s", student_id, exc
+                )
             write_audit(
-                actor["id"], actor["role_type"], "ALERT_CREATED",
-                "alert", alert["id"],
+                actor["id"],
+                actor["role_type"],
+                "ALERT_CREATED",
+                "alert",
+                alert["id"],
                 payload={"student_id": student_id, "score": rolling_score},
                 ip=ip,
             )
 
             def _composio_triage_fastlane():
                 try:
-                    from backend.services.composio_fastlane import trigger_triage_fastlane
+                    from backend.services.composio_fastlane import (
+                        trigger_triage_fastlane,
+                    )
+
                     trigger_triage_fastlane(
                         student_id=student_id,
                         rolling_score=rolling_score,
@@ -134,16 +165,32 @@ def run_consented_student_analysis(
                         actor=actor,
                     )
                 except Exception as e:
-                    logger.warning("composio triage fastlane failed student=%s: %s", student_id, e)
+                    logger.warning(
+                        "composio triage fastlane failed student=%s: %s", student_id, e
+                    )
 
             try:
                 import asyncio as _asyncio
+
                 try:
-                    _asyncio.get_running_loop().create_task(_asyncio.to_thread(_composio_triage_fastlane))
+                    _asyncio.get_running_loop().create_task(
+                        _asyncio.to_thread(_composio_triage_fastlane)
+                    )
                 except RuntimeError:
                     _composio_triage_fastlane()
             except Exception:
                 pass
+
+    if assessment.crisis_escalation_eligible:
+        write_audit(
+            actor["id"],
+            actor["role_type"],
+            "CRISIS_REVIEW_REQUIRED",
+            "student",
+            student_id,
+            payload={"score": rolling_score, "human_review_required": True},
+            ip=ip,
+        )
 
     return {
         "student_id": student_id,
@@ -153,4 +200,8 @@ def run_consented_student_analysis(
         "risk_record": risk_record,
         "alert_created": alert is not None,
         "alert": alert,
+        "risk_tier": assessment.tier,
+        "alert_eligible": assessment.alert_eligible,
+        "crisis_escalation_eligible": assessment.crisis_escalation_eligible,
+        "crisis_review_required": assessment.crisis_escalation_eligible,
     }

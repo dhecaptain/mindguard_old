@@ -25,7 +25,9 @@ def client():
 
 
 def _make(db, email: str, role: str) -> dict:
-    user = database.create_user(email, email.split("@")[0].title(), hash_password("pw-12345"), role_type=role)
+    user = database.create_user(
+        email, email.split("@")[0].title(), hash_password("pw-12345"), role_type=role
+    )
     conn = db.get_db()
     conn.execute("UPDATE users SET status = 'approved' WHERE id = ?", (user["id"],))
     conn.commit()
@@ -34,7 +36,9 @@ def _make(db, email: str, role: str) -> dict:
 
 
 def _token(client, email: str) -> str:
-    return client.post("/api/auth/login", json={"email": email, "password": "pw-12345"}).json()["access_token"]
+    return client.post(
+        "/api/auth/login", json={"email": email, "password": "pw-12345"}
+    ).json()["access_token"]
 
 
 def test_counsellor_sees_only_consent_linked_students(db, client, monkeypatch):
@@ -43,7 +47,7 @@ def test_counsellor_sees_only_consent_linked_students(db, client, monkeypatch):
     b = _make(db, "scope2@school.edu", "counsellor")
     s1 = _make(db, "s1@school.edu", "student")
     s2 = _make(db, "s2@school.edu", "student")
-    s3 = _make(db, "s3@school.edu", "student")
+    _make(db, "s3@school.edu", "student")
 
     database.assign_student_to_counsellor(a["id"], s1["id"])
     database.assign_student_to_counsellor(b["id"], s2["id"])
@@ -51,7 +55,9 @@ def test_counsellor_sees_only_consent_linked_students(db, client, monkeypatch):
     database.create_consent(s2["id"], b["id"], "s2@school.edu", "student", ["reddit"])
 
     token = _token(client, "scope1@school.edu")
-    resp = client.get("/api/counsellor/students", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/counsellor/students", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200
     emails = {s["email"] for s in resp.json()}
     assert emails == {"s1@school.edu"}, f"expected only assigned student, got {emails}"
@@ -59,23 +65,35 @@ def test_counsellor_sees_only_consent_linked_students(db, client, monkeypatch):
 
 def test_counsellor_with_no_consents_sees_empty_list(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
-    a = _make(db, "scope3@school.edu", "counsellor")
+    _make(db, "scope3@school.edu", "counsellor")
     _make(db, "s4@school.edu", "student")
 
     token = _token(client, "scope3@school.edu")
-    resp = client.get("/api/counsellor/students", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/counsellor/students", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200
     assert resp.json() == []
 
 
 def test_admin_still_sees_all_students(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
-    admin = _make(db, "scopeadmin@school.edu", "admin")
+    _make(db, "scopeadmin@school.edu", "admin")
+    institution = database.create_institution("Scoped School", "k12")
     s1 = _make(db, "s5@school.edu", "student")
     s2 = _make(db, "s6@school.edu", "student")
+    conn = db.get_db()
+    conn.executemany(
+        "UPDATE users SET institution_id = ? WHERE id = ?",
+        [(institution["id"], s1["id"]), (institution["id"], s2["id"])],
+    )
+    conn.commit()
+    conn.close()
 
     token = _token(client, "scopeadmin@school.edu")
-    resp = client.get("/api/counsellor/students", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/counsellor/students", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200
     emails = {s["email"] for s in resp.json()}
     assert emails == {"s5@school.edu", "s6@school.edu"}
@@ -84,17 +102,23 @@ def test_admin_still_sees_all_students(db, client, monkeypatch):
 def test_student_detail_requires_consent_relationship(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
     a = _make(db, "scope4@school.edu", "counsellor")
-    b = _make(db, "scope5@school.edu", "counsellor")
+    _make(db, "scope5@school.edu", "counsellor")
     s = _make(db, "s7@school.edu", "student")
     database.create_consent(s["id"], a["id"], "s7@school.edu", "student", ["reddit"])
     database.assign_student_to_counsellor(a["id"], s["id"])
 
     outsider = _token(client, "scope5@school.edu")
-    resp = client.get(f"/api/counsellor/students/{s['id']}", headers={"Authorization": f"Bearer {outsider}"})
+    resp = client.get(
+        f"/api/counsellor/students/{s['id']}",
+        headers={"Authorization": f"Bearer {outsider}"},
+    )
     assert resp.status_code == 403
 
     owner = _token(client, "scope4@school.edu")
-    resp = client.get(f"/api/counsellor/students/{s['id']}", headers={"Authorization": f"Bearer {owner}"})
+    resp = client.get(
+        f"/api/counsellor/students/{s['id']}",
+        headers={"Authorization": f"Bearer {owner}"},
+    )
     assert resp.status_code == 200, resp.text
 
 
@@ -102,12 +126,23 @@ def test_unassigned_but_consented_denied(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
     a = _make(db, "unass_c1@school.edu", "counsellor")
     s = _make(db, "unass_s1@school.edu", "student")
-    database.create_consent(s["id"], a["id"], "unass_s1@school.edu", "student", ["reddit"])
+    database.create_consent(
+        s["id"], a["id"], "unass_s1@school.edu", "student", ["reddit"]
+    )
     # no assignment
     token = _token(client, "unass_c1@school.edu")
-    resp = client.get(f"/api/counsellor/students/{s['id']}", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        f"/api/counsellor/students/{s['id']}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert resp.status_code == 403
-    resp2 = client.get(f"/api/v1/students/{s['id']}/timeline", headers={"Authorization": f"Bearer {token}"})
+    resp2 = client.get(
+        f"/api/v1/students/{s['id']}/timeline",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert resp2.status_code == 403
-    resp3 = client.get(f"/api/v1/students/{s['id']}/notes", headers={"Authorization": f"Bearer {token}"})
+    resp3 = client.get(
+        f"/api/v1/students/{s['id']}/notes",
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert resp3.status_code == 403

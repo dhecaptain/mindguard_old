@@ -32,7 +32,9 @@ def client():
         yield c
 
 
-def _mock_supabase(monkeypatch, email: str | None, metadata_name: str | None = "Verified User"):
+def _mock_supabase(
+    monkeypatch, email: str | None, metadata_name: str | None = "Verified User"
+):
     """Stub the ``supabase`` package so ``/api/auth/google`` runs offline."""
 
     class _FakeUser:
@@ -48,6 +50,7 @@ def _mock_supabase(monkeypatch, email: str | None, metadata_name: str | None = "
 
 
 # ── C1: Google OAuth email trust ──────────────────────────────────────
+
 
 def test_google_auth_ignores_client_supplied_email(db, client, monkeypatch):
     """Body email must never win over the verified Supabase email."""
@@ -86,33 +89,54 @@ def test_google_auth_rejects_token_without_email(db, client, monkeypatch):
 
 # ── C2: staff registration gate + status enforcement ──────────────────
 
+
 def test_register_rejects_counsellor_and_school_admin(db, client):
     for role in ("counsellor", "counselor"):
         resp = client.post(
             "/api/auth/register",
-            json={"name": "Rogue", "email": f"rogue-{role}@x.edu", "password": "secret-pass", "role": role},
+            json={
+                "name": "Rogue",
+                "email": f"rogue-{role}@x.edu",
+                "password": "secret-pass",
+                "role": role,
+            },
         )
         assert resp.status_code == 403, resp.text
         assert database.get_user_by_email(f"rogue-{role}@x.edu") is None
 
     resp = client.post(
         "/api/auth/register",
-        json={"name": "Rogue Admin", "email": "rogue-admin@x.edu", "password": "secret-pass", "role": "school_admin"},
+        json={
+            "name": "Rogue Admin",
+            "email": "rogue-admin@x.edu",
+            "password": "secret-pass",
+            "role": "school_admin",
+        },
     )
-    assert resp.status_code in (403, 200)  # school_admin is not a registerable role either way
+    assert resp.status_code in (
+        403,
+        200,
+    )  # school_admin is not a registerable role either way
 
 
 def test_register_accepts_student(db, client):
     resp = client.post(
         "/api/auth/register",
-        json={"name": "Real Student", "email": "student-ok@x.edu", "password": "secret-pass", "role": "student"},
+        json={
+            "name": "Real Student",
+            "email": "student-ok@x.edu",
+            "password": "secret-pass",
+            "role": "student",
+        },
     )
     assert resp.status_code == 200, resp.text
     assert database.get_user_by_email("student-ok@x.edu") is not None
 
 
 def test_pending_user_cannot_use_permissions(db):
-    user = db.create_user("pending-c@school.edu", "Pending C", "x", role_type="counsellor")
+    user = db.create_user(
+        "pending-c@school.edu", "Pending C", "x", role_type="counsellor"
+    )
     assert user["status"] == "pending"
     with pytest.raises(HTTPException) as exc:
         perm.require_permission(user, perm.PERM_ANALYSIS_RUN)
@@ -120,29 +144,50 @@ def test_pending_user_cannot_use_permissions(db):
 
 
 def test_pending_user_cannot_require_any_permission(db):
-    user = db.create_user("pending-c2@school.edu", "Pending C2", "x", role_type="counsellor")
+    user = db.create_user(
+        "pending-c2@school.edu", "Pending C2", "x", role_type="counsellor"
+    )
     with pytest.raises(HTTPException) as exc:
-        perm.require_any_permission(user, {perm.PERM_ANALYSIS_RUN, perm.PERM_STUDENTS_VIEW})
+        perm.require_any_permission(
+            user, {perm.PERM_ANALYSIS_RUN, perm.PERM_STUDENTS_VIEW}
+        )
     assert exc.value.status_code == 403
 
 
 def test_revoked_user_cannot_login(db, client):
-    user = db.create_user("revoked@school.edu", "Revoked", hash_password("pw-1"), role_type="student")
+    user = db.create_user(
+        "revoked@school.edu", "Revoked", hash_password("pw-1"), role_type="student"
+    )
     database.update_student_status(user["id"], "revoked")
-    resp = client.post("/api/auth/login", json={"email": "revoked@school.edu", "password": "pw-1"})
+    resp = client.post(
+        "/api/auth/login", json={"email": "revoked@school.edu", "password": "pw-1"}
+    )
     assert resp.status_code == 401
 
 
 def test_directory_does_not_leak_emails_to_students(db, client):
-    db.create_user("target-student@school.edu", "Target Student", "x", role_type="student")
-    db.create_user("the-counsellor@school.edu", "The Counsellor", "x", role_type="counsellor")
-    register = client.post(
-        "/api/auth/register",
-        json={"name": "Me", "email": "me@student.edu", "password": "secret-pass", "role": "student"},
+    db.create_user(
+        "target-student@school.edu", "Target Student", "x", role_type="student"
     )
-    token = client.post("/api/auth/login", json={"email": "me@student.edu", "password": "secret-pass"}).json()["access_token"]
+    db.create_user(
+        "the-counsellor@school.edu", "The Counsellor", "x", role_type="counsellor"
+    )
+    client.post(
+        "/api/auth/register",
+        json={
+            "name": "Me",
+            "email": "me@student.edu",
+            "password": "secret-pass",
+            "role": "student",
+        },
+    )
+    token = client.post(
+        "/api/auth/login", json={"email": "me@student.edu", "password": "secret-pass"}
+    ).json()["access_token"]
 
-    resp = client.get("/api/users/directory", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/users/directory", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200, resp.text
     assert isinstance(resp.json(), list)
     assert all("email" not in u for u in resp.json())
@@ -155,19 +200,29 @@ def test_directory_shows_emails_to_admin(db, client):
 
     register = client.post(
         "/api/auth/register",
-        json={"name": "Boss", "email": "boss@school.edu", "password": "boss-pass-1", "role": "student"},
+        json={
+            "name": "Boss",
+            "email": "boss@school.edu",
+            "password": "boss-pass-1",
+            "role": "student",
+        },
     )
     assert register.status_code == 200, register.text
     os.environ["MINDGUARD_BOOTSTRAP_ADMIN_EMAIL"] = "boss@school.edu"
     _bootstrap_admins()
-    token = client.post("/api/auth/login", json={"email": "boss@school.edu", "password": "boss-pass-1"}).json()["access_token"]
+    token = client.post(
+        "/api/auth/login", json={"email": "boss@school.edu", "password": "boss-pass-1"}
+    ).json()["access_token"]
 
-    resp = client.get("/api/users/directory", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/users/directory", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200, resp.text
     assert any("email" in u for u in resp.json())
 
 
 # ── C3: no known-password demo accounts in production ─────────────────
+
 
 def test_seed_defaults_production_has_no_demo_accounts(db, monkeypatch):
     monkeypatch.setenv("MINDGUARD_ENV", "production")
@@ -175,8 +230,15 @@ def test_seed_defaults_production_has_no_demo_accounts(db, monkeypatch):
     database.seed_defaults()
 
     assert database.get_user_by_email("admin@mindguard.org") is not None
-    for email in ("counsellor@mindguard.org", "student@mindguard.org", "demo@mindguard.org", "diana@mindguard.org"):
-        assert database.get_user_by_email(email) is None, f"demo account {email} seeded in production"
+    for email in (
+        "counsellor@mindguard.org",
+        "student@mindguard.org",
+        "demo@mindguard.org",
+        "diana@mindguard.org",
+    ):
+        assert database.get_user_by_email(email) is None, (
+            f"demo account {email} seeded in production"
+        )
 
     admin = database.get_user_by_email("admin@mindguard.org")
     assert not verify_password("password", admin["password_hash"])

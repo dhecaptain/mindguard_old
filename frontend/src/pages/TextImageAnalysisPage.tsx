@@ -22,13 +22,15 @@ export default function TextImageAnalysisPage() {
         prob: res.prob,
         latency_ms: res.latency_ms,
         label: getClassification(res.prob),
-        risk_level: risk.level,
+        risk_level: res.risk_tier,
         risk_color: risk.color,
+        alert_eligible: res.alert_eligible,
+        crisis_escalation_eligible: res.crisis_escalation_eligible,
       }
       setLastResult(result)
       updateAnalytics(res.prob, text)
-    } catch (err: any) {
-      setError(err.message || 'Analysis failed')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Analysis failed')
     } finally {
       setLoading(false)
     }
@@ -44,13 +46,15 @@ export default function TextImageAnalysisPage() {
         prob: res.prob,
         latency_ms: res.latency_ms,
         label: getClassification(res.prob),
-        risk_level: risk.level,
+        risk_level: res.risk_tier,
         risk_color: risk.color,
+        alert_eligible: res.alert_eligible,
+        crisis_escalation_eligible: res.crisis_escalation_eligible,
       }
       setLastResult(result)
       updateAnalytics(res.prob, '[Image OCR]')
-    } catch (err: any) {
-      setError(err.message || 'Image analysis failed')
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Image analysis failed')
     } finally {
       setLoading(false)
     }

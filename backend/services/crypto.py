@@ -29,7 +29,14 @@ from backend.config import ENCRYPTION_KEY
 logger = logging.getLogger(__name__)
 
 _ENCRYPTION_KEY_HEX = ENCRYPTION_KEY
-_KEY_FILE = Path(os.getenv("MINDGUARD_DB_DIR", str(Path(__file__).resolve().parent.parent.parent))) / ".encryption_key"
+_KEY_FILE = (
+    Path(
+        os.getenv(
+            "MINDGUARD_DB_DIR", str(Path(__file__).resolve().parent.parent.parent)
+        )
+    )
+    / ".encryption_key"
+)
 
 _PII_PREFIX = "gcm1:"
 _TOKEN_VERSION = "v1"
@@ -77,6 +84,7 @@ def _key() -> bytes:
 
 # ── PII encryption (AES-256-GCM) ─────────────────────────────────────
 
+
 def encrypt_pii(plaintext: str) -> str:
     """Encrypt a PII string. Returns a base64 blob; not reversible without the key."""
     if plaintext is None:
@@ -94,7 +102,7 @@ def decrypt_pii(blob: str) -> str:
         return ""
     if not blob.startswith(_PII_PREFIX):
         raise ValueError("Not an encrypted PII blob.")
-    raw = base64.b64decode(blob[len(_PII_PREFIX):], validate=True)
+    raw = base64.b64decode(blob[len(_PII_PREFIX) :], validate=True)
     if len(raw) < 12 + 16:
         raise ValueError("Encrypted blob too short.")
     nonce, ct = raw[:12], raw[12:]
@@ -103,6 +111,7 @@ def decrypt_pii(blob: str) -> str:
 
 
 # ── One-way hashes (never reversible) ────────────────────────────────
+
 
 def hash_student_id(student_id: str) -> str:
     """SHA-256 of the school's student ID (normalised). Stored, never the raw ID."""
@@ -127,16 +136,26 @@ def hash_email(email: str) -> str:
 # ── PII redaction for semi-structured audit/event payloads ────────────
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-_CONSENT_URL_RE = re.compile(r"(/consent/)(v1\.[A-Za-z0-9._\-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+_CONSENT_URL_RE = re.compile(
+    r"(/consent/)(v1\.[A-Za-z0-9._\-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
 _REDACT_KEYS = {
-    "signature", "recipient", "recipient_email", "student_email", "parent_email",
-    "student_name", "parent_name", "recipient_name",
+    "signature",
+    "recipient",
+    "recipient_email",
+    "student_email",
+    "parent_email",
+    "student_name",
+    "parent_name",
+    "recipient_name",
 }
 
 
 def _redact_string(value: str) -> str:
     value = _EMAIL_RE.sub(
-        lambda m: f"redacted-{hashlib.sha256(m.group(0).encode('utf-8')).hexdigest()[:12]}@redacted",
+        lambda m: (
+            f"redacted-{hashlib.sha256(m.group(0).encode('utf-8')).hexdigest()[:12]}@redacted"
+        ),
         value,
     )
     return _CONSENT_URL_RE.sub(r"\1[redacted]", value)
@@ -153,7 +172,9 @@ def redact_pii(obj):
         out = {}
         for key, value in obj.items():
             if key in _REDACT_KEYS and isinstance(value, (str,)):
-                out[key] = _redact_string(value) if _EMAIL_RE.search(value) else "[redacted]"
+                out[key] = (
+                    _redact_string(value) if _EMAIL_RE.search(value) else "[redacted]"
+                )
             else:
                 out[key] = redact_pii(value)
         return out
@@ -166,6 +187,7 @@ def redact_pii(obj):
 
 # ── Signed consent tokens (HMAC-SHA256 + 32-byte nonce) ──────────────
 
+
 def create_signed_token(consent_id: str) -> str:
     """Create a single-use signed token for a consent record.
 
@@ -173,7 +195,10 @@ def create_signed_token(consent_id: str) -> str:
     """
     nonce = secrets.token_bytes(32)
     mac = hmac.new(_key(), consent_id.encode("utf-8") + nonce, hashlib.sha256).digest()
-    b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+
+    def b64(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
     return f"{_TOKEN_VERSION}.{b64(nonce)}.{b64(mac)}.{b64(consent_id.encode('utf-8'))}"
 
 
@@ -183,13 +208,18 @@ def verify_signed_token(token: str, consent_id: str) -> bool:
         version, nonce_b64, mac_b64, cid_b64 = token.split(".")
         if version != _TOKEN_VERSION:
             return False
-        pad = lambda s: s + "=" * (-len(s) % 4)
+
+        def pad(value: str) -> str:
+            return value + "=" * (-len(value) % 4)
+
         nonce = base64.urlsafe_b64decode(pad(nonce_b64))
         mac = base64.urlsafe_b64decode(pad(mac_b64))
         cid = base64.urlsafe_b64decode(pad(cid_b64)).decode("utf-8")
         if cid != consent_id or len(nonce) != 32:
             return False
-        expected = hmac.new(_key(), consent_id.encode("utf-8") + nonce, hashlib.sha256).digest()
+        expected = hmac.new(
+            _key(), consent_id.encode("utf-8") + nonce, hashlib.sha256
+        ).digest()
         return hmac.compare_digest(expected, mac)
     except (ValueError, TypeError, IndexError, UnicodeDecodeError):
         return False

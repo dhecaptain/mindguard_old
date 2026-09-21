@@ -54,7 +54,7 @@ export default function GaugeChart({ prob }: GaugeChartProps) {
           color: isRisk ? '#991b1b' : '#166534',
         }}
       >
-        {isRisk ? 'Suicidal / High Risk' : 'Non-Suicidal / Low Risk'}
+        {isRisk ? 'Suicidal signal' : 'Non-Suicidal signal'}
       </div>
     </div>
   )
