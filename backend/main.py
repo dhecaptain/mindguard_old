@@ -605,7 +605,7 @@ _PRIVATE_HOST_PATTERNS = re.compile(
 
 
 def _validate_external_host(host: str) -> None:
-    """Block SSRF by rejecting loopback and private-range hostnames."""
+    """Block SSRF by rejecting private literals and private DNS resolutions."""
     host = host.strip().lower()
     if not host or len(host) > 253:
         raise HTTPException(400, "Invalid hostname")
@@ -613,6 +613,13 @@ def _validate_external_host(host: str) -> None:
         raise HTTPException(400, "Invalid hostname")
     if not re.match(r'^[a-z0-9][a-z0-9\-\.]{0,251}[a-z0-9]$', host):
         raise HTTPException(400, "Invalid hostname")
+    try:
+        import socket
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)}
+    except OSError:
+        raise HTTPException(400, "Host could not be resolved")
+    if not addresses or any(_is_private_ip(address) for address in addresses):
+        raise HTTPException(400, "Host resolves to a private network")
 
 
 def _is_private_ip(ip: str) -> bool:
@@ -3647,7 +3654,8 @@ async def v1_student_timeline(student_id: str, user: dict = Depends(require_auth
     _require_counsellor_student_access(user, student_id)
 
     history = get_rolling_risk_history(student_id)
-    alerts = get_alerts(user["id"], status=None)
+    alerts = get_alerts(None if user.get("role_type") == "admin" else user["id"], status=None,
+                        institution_id=user.get("institution_id") if user.get("role_type") != "admin" else None)
     student_alerts = [a for a in alerts if a["student_id"] == student_id]
 
     return {

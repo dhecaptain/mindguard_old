@@ -57,7 +57,12 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    return bcrypt.checkpw(password.encode(), password_hash.encode())
+    if not password_hash or not isinstance(password_hash, str):
+        return False
+    try:
+        return bcrypt.checkpw(password.encode(), password_hash.encode())
+    except (ValueError, TypeError):
+        return False
 
 
 def create_access_token(user_id: str, role_type: str) -> str:
