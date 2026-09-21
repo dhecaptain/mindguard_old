@@ -25,106 +25,229 @@ import httpx
 import jwt
 from pathlib import Path
 
-_background_tasks: list[asyncio.Task] = []
-
 from fastapi import FastAPI, Header, Request, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import (
-    SUPABASE_URL, SUPABASE_ANON_KEY, RESEND_WEBHOOK_SECRET, WEBHOOK_TOLERANCE_SECONDS,
-    REDDIT_CLIENT_SECRET, DEMO_NOTIFY_EMAIL,
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    RESEND_WEBHOOK_SECRET,
+    WEBHOOK_TOLERANCE_SECONDS,
+    REDDIT_CLIENT_SECRET,
+    DEMO_NOTIFY_EMAIL,
 )
 from backend.models.schemas import (
-    TextAnalysisRequest, TextAnalysisResponse,
-    PlatformRequest, LoginRequest, RegisterRequest, ChangePasswordRequest, CreateGroupRequest, UpdateGroupRequest, GroupMessageRequest, UpdateNotificationPreferenceRequest,
-    MuteGroupRequest, NOTIFICATION_TYPES,
-    DemoRequestCreate, DemoRequestUpdate,
+    TextAnalysisRequest,
+    TextAnalysisResponse,
+    PlatformRequest,
+    LoginRequest,
+    RegisterRequest,
+    ChangePasswordRequest,
+    CreateGroupRequest,
+    UpdateGroupRequest,
+    GroupMessageRequest,
+    UpdateNotificationPreferenceRequest,
+    MuteGroupRequest,
+    NOTIFICATION_TYPES,
+    DemoRequestCreate,
+    DemoRequestUpdate,
 )
 from backend.services.email_sender import (
     get_email_provider_status,
     process_email_outbox,
     send_html_email,
 )
-from backend.services.predictor import predict_one, predict_batch, InferenceUnavailableError
+from backend.services.predictor import (
+    predict_one,
+    predict_batch,
+    InferenceUnavailableError,
+)
 from backend.services.webhook_service import handle_webhook
 from backend.services.email_templates import (
-    demo_request_confirmation, demo_request_notification, student_status_notification,
+    demo_request_confirmation,
+    demo_request_notification,
+    student_status_notification,
     counsellor_invitation_notification,
 )
-from backend.utils import clean_text, risk_label, detect_socioeconomic, calibrate_risk_score, RESOURCES, US_STATE_RESOURCES, TEAM_MEMBERS
+from backend.utils import (
+    clean_text,
+    risk_label,
+    detect_socioeconomic,
+    calibrate_risk_score,
+    RESOURCES,
+    US_STATE_RESOURCES,
+    TEAM_MEMBERS,
+)
 from backend.database import (
-    init_db, seed_defaults,
+    init_db,
+    seed_defaults,
     ensure_user_approved,
-    get_user_by_email, get_user_by_id, create_user,
-    get_students, update_student_status,
-    update_user_status, set_user_invitation, get_user_by_invitation_token_hash, clear_user_invitation,
-    update_user_onboarding, create_analysis_session, get_analysis_sessions_for_student, get_analysis_session,
-    save_analysis, get_analytics,
-    create_referral, get_referrals, get_referral, update_referral, create_alert,
-    create_appointment, get_appointment, list_appointments, update_appointment_status,
-    send_message, get_conversation, get_conversations, mark_read, mark_all_read,
-    create_notification, get_notifications, get_notification_summary, mark_notification_read,
-    get_counsellor_dashboard, accept_user_terms,
+    get_user_by_email,
+    get_user_by_id,
+    create_user,
+    mark_user_as_staff,
+    get_individual_users,
+    get_students,
+    update_student_status,
+    update_user_status,
+    set_user_invitation,
+    get_user_by_invitation_token_hash,
+    clear_user_invitation,
+    update_user_onboarding,
+    create_analysis_session,
+    get_analysis_sessions_for_student,
+    get_analysis_session,
+    save_analysis,
+    get_analytics,
+    create_referral,
+    get_referrals,
+    get_referral,
+    update_referral,
+    create_alert,
+    create_appointment,
+    get_appointment,
+    list_appointments,
+    update_appointment_status,
+    send_message,
+    get_conversation,
+    get_conversations,
+    mark_read,
+    mark_all_read,
+    create_notification,
+    get_notifications,
+    get_notification_summary,
+    mark_notification_read,
+    get_counsellor_dashboard,
+    accept_user_terms,
     # v1 additions
-    create_consent, get_consent_by_id, get_consent_by_token,
+    create_consent,
+    get_consent_by_id,
+    get_consent_by_token,
     query_consents,
-    get_consent_with_student, get_audit_log_for_target, get_consent_events,
-    create_linked_account, get_linked_accounts, revoke_linked_account,
-    get_alerts, get_alert_by_id, transition_alert, has_consent_relationship,
-    write_audit, get_audit_log, get_all_audit_log,
+    get_consent_with_student,
+    get_audit_log_for_target,
+    get_consent_events,
+    create_linked_account,
+    get_linked_accounts,
+    revoke_linked_account,
+    get_alerts,
+    get_alert_by_id,
+    transition_alert,
+    has_consent_relationship,
+    write_audit,
+    get_audit_log,
+    get_all_audit_log,
     health_check,
-    create_note, get_notes,
-    get_rolling_risk, get_rolling_risk_history,
-    get_user_by_referral_code, get_all_users,
-    update_user_password, update_user_role,
-    get_institution_by_id, list_institutions, create_institution, update_institution, list_students,
-    update_user_institution, archive_student,
-    get_student_by_id, get_student_by_user_id,
-    create_demo_request, get_demo_request, get_demo_request_by_response_token, list_demo_requests, update_demo_request,
+    create_note,
+    get_notes,
+    get_rolling_risk,
+    get_rolling_risk_history,
+    get_user_by_referral_code,
+    get_all_users,
+    update_user_password,
+    update_user_role,
+    get_institution_by_id,
+    list_institutions,
+    create_institution,
+    update_institution,
+    list_students,
+    archive_student,
+    get_student_by_id,
+    get_student_by_user_id,
+    create_demo_request,
+    get_demo_request,
+    get_demo_request_by_response_token,
+    list_demo_requests,
+    update_demo_request,
     # groups
-    create_group, get_group_by_id, update_group, delete_group,
-    add_group_member, remove_group_member, get_group_members,
-    get_groups_for_user, is_group_member, get_group_unread_count,
-    send_group_message, get_group_messages,
+    create_group,
+    get_group_by_id,
+    update_group,
+    delete_group,
+    add_group_member,
+    remove_group_member,
+    get_group_members,
+    get_groups_for_user,
+    is_group_member,
+    get_group_unread_count,
+    send_group_message,
+    get_group_messages,
     mark_all_group_messages_read,
     # notification preferences
-    get_notification_preferences, set_notification_preference, should_notify,
+    get_notification_preferences,
+    set_notification_preference,
+    should_notify,
     # social accounts & assignments
-    save_social_account, get_social_accounts, delete_social_account,
-    assign_student_to_counsellor, unassign_student_from_counsellor,
-    get_assignment, get_assignments_for_counsellor, get_assignments_for_student,
+    save_social_account,
+    get_social_accounts,
+    delete_social_account,
+    assign_student_to_counsellor,
+    unassign_student_from_counsellor,
+    get_assignment,
+    get_assignments_for_counsellor,
+    get_assignments_for_student,
+    consume_rate_limit,
 )
 from backend.services.consent_service import (
-    dispatch_consent, remind_consent, record_consent_decision, record_view, accept_consent, decline_consent, revoke_consent,
-    verify_consent_token, remaining_views,
-    process_consent_reminders, process_expired_consents,
-    dispatch_consents_for_students, consents_to_csv,
+    dispatch_consent,
+    remind_consent,
+    record_consent_decision,
+    record_view,
+    accept_consent,
+    decline_consent,
+    revoke_consent,
+    verify_consent_token,
+    remaining_views,
+    process_consent_reminders,
+    process_expired_consents,
+    dispatch_consents_for_students,
+    consents_to_csv,
 )
 from backend.services.analysis_service import (
-    INFERENCE_UNAVAILABLE_MESSAGE, inference_http_error,
+    INFERENCE_UNAVAILABLE_MESSAGE,
+    inference_http_error,
     run_consented_student_analysis,
 )
 from backend.services.crypto import decrypt_pii
 from backend.services.consent_gate import consent_status_for_ui
+from backend.services.risk_policy import assess_risk
 from backend.services.demo_service import (
-    demo_email_context, work_email_warning, verify_recaptcha_token,
+    demo_email_context,
+    work_email_warning,
+    verify_recaptcha_token,
 )
 from backend.services.roster_service import upsert_roster
 from backend.services.retention_service import run_retention_cleanup
 from backend.permissions import (
-    PERM_ANALYSIS_RUN, PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW,
-    PERM_CONSENT_MANAGE, PERM_DEMO_MANAGE, PERM_AUDIT_VIEW,
-    require_permission, require_any_permission,
+    PERM_ANALYSIS_RUN,
+    PERM_ROSTER_UPLOAD,
+    PERM_STUDENTS_VIEW,
+    PERM_CONSENT_MANAGE,
+    PERM_DEMO_MANAGE,
+    PERM_AUDIT_VIEW,
+    require_permission,
+    require_any_permission,
 )
-from backend.auth import hash_password, verify_password, create_access_token, require_auth, blacklist_token
+from backend.auth import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    require_auth,
+    blacklist_token,
+)
 from backend.logging_setup import (
-    generate_request_id, set_request_context, setup_logging,
+    generate_request_id,
+    set_request_context,
+    setup_logging,
 )
+
+_background_tasks: list[asyncio.Task] = []
 
 setup_logging()
 logger = logging.getLogger(__name__)
+
 
 def _sentry_before_send(event, hint):
     """Never upload PII: drop request bodies and recipient emails from reports."""
@@ -147,32 +270,42 @@ if _SENTRY_DSN:
         release=f"mindguard-backend@{os.getenv('APP_VERSION', '2.0.0')}",
         before_send=lambda event, hint: _sentry_before_send(event, hint),
     )
-    logger.info("Sentry initialised (env=%s)", os.getenv("SENTRY_ENVIRONMENT", "production"))
+    logger.info(
+        "Sentry initialised (env=%s)", os.getenv("SENTRY_ENVIRONMENT", "production")
+    )
 
 
 app = FastAPI(title="MindGuard API", version="2.0.0")
 
 
 @app.exception_handler(InferenceUnavailableError)
-async def inference_unavailable_handler(request: Request, exc: InferenceUnavailableError):
+async def inference_unavailable_handler(
+    request: Request, exc: InferenceUnavailableError
+):
     """Constrained hosts (too little RAM for torch) fail cleanly with a 503.
 
     Catches the pre-import memory guard so that every inference route —
     including the platform scrapers that re-wrap RuntimeError as 400 — returns
     "service unavailable" instead of a misleading client error or an OOM kill.
     """
-    return JSONResponse(status_code=503, content={"detail": INFERENCE_UNAVAILABLE_MESSAGE})
+    return JSONResponse(
+        status_code=503, content={"detail": INFERENCE_UNAVAILABLE_MESSAGE}
+    )
 
 
 class SPAStaticFiles(StaticFiles):
     _PUBLIC = {
-        "/robots.txt": ("text/plain", b"User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /dashboard\nDisallow: /auth\n"),
+        "/robots.txt": (
+            "text/plain",
+            b"User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /dashboard\nDisallow: /auth\n",
+        ),
     }
 
     async def get_response(self, path: str, scope):
         if path in self._PUBLIC:
             ct, body = self._PUBLIC[path]
             from starlette.responses import Response
+
             return Response(content=body, media_type=ct)
         try:
             return await super().get_response(path, scope)
@@ -188,8 +321,19 @@ def _require_analysis_staff(user: dict) -> None:
 
 def _require_self_adult(user: dict) -> None:
     """Self-analysis workspace is adult-gated (user declared adult on onboarding)."""
-    if (user.get("user_category") or "pending") != "adult":
-        raise HTTPException(403, "Complete onboarding as an adult to use the self-analysis workspace.")
+    if (
+        user.get("role_type") in {"admin", "school_admin", "counsellor"}
+        or (user.get("user_category") or "pending") != "adult"
+    ):
+        raise HTTPException(
+            403, "Complete onboarding as an adult to use the self-analysis workspace."
+        )
+
+
+def _auth_user_category(user: dict) -> str:
+    if user.get("role_type") in {"admin", "school_admin", "counsellor"}:
+        return "staff"
+    return user.get("user_category") or "pending"
 
 
 def _decode_json_field(value: Any) -> Any:
@@ -223,7 +367,14 @@ def _decode_session_json(session: dict) -> dict:
     return out
 
 
-_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5188,http://127.0.0.1:5188").split(",") if o.strip()]
+_cors_origins = [
+    o.strip()
+    for o in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000,http://localhost:5188,http://127.0.0.1:5188",
+    ).split(",")
+    if o.strip()
+]
 _ORIGIN_RE = re.compile(r"^https?://[a-zA-Z0-9\-\.]+(?::\d{1,5})?$")
 for _origin in _cors_origins:
     if _origin == "*":
@@ -248,8 +399,7 @@ app.add_middleware(
 # webhooks, mobile clients) pass, and same-site (Sec-Fetch-Site: same-site) calls
 # to an untrusted host still require an explicit trusted origin.
 _TRUSTED_ORIGINS = {
-    o.rstrip("/")
-    for o in os.getenv("TRUSTED_ORIGINS", "").split(",") if o.strip()
+    o.rstrip("/") for o in os.getenv("TRUSTED_ORIGINS", "").split(",") if o.strip()
 } | set(_cors_origins)
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -284,18 +434,27 @@ async def csrf_origin_middleware(request: Request, call_next):
     origin = request.headers.get("origin", "")
     site = (request.headers.get("sec-fetch-site", "") or "").strip().lower()
     if site == "cross-site":
-        logger.warning("csrf: blocking cross-site %s %s", request.method, request.url.path)
+        logger.warning(
+            "csrf: blocking cross-site %s %s", request.method, request.url.path
+        )
         return Response("Forbidden", status_code=403)
     if origin:
         if origin in _TRUSTED_ORIGINS or _origin_matches_host(origin, request):
             return await call_next(request)
         logger.warning(
             "csrf: blocking %s %s from untrusted origin %s",
-            request.method, request.url.path, origin,
+            request.method,
+            request.url.path,
+            origin,
         )
         return Response("Forbidden", status_code=403)
     if site and site not in ("same-origin", "same-site", "none"):
-        logger.warning("csrf: blocking %s %s (sec-fetch-site=%s)", request.method, request.url.path, site)
+        logger.warning(
+            "csrf: blocking %s %s (sec-fetch-site=%s)",
+            request.method,
+            request.url.path,
+            site,
+        )
         return Response("Forbidden", status_code=403)
     return await call_next(request)
 
@@ -363,7 +522,9 @@ _HSTS = "max-age=31536000; includeSubDomains"
 @app.middleware("http")
 async def security_headers_middleware(request: Request, call_next):
     response = await call_next(request)
-    headers = _build_security_headers(response.headers.get("content-type", ""), request.url.path)
+    headers = _build_security_headers(
+        response.headers.get("content-type", ""), request.url.path
+    )
     if _request_is_secure(request):
         headers.setdefault("Strict-Transport-Security", _HSTS)
     for name, value in headers.items():
@@ -437,11 +598,22 @@ async def startup():
         email_status["sender"],
     )
     _background_tasks.clear()
-    _background_tasks.extend([
-        asyncio.create_task(_consent_maintenance_loop(), name="consent-maintenance"),
-        asyncio.create_task(_retention_maintenance_loop(), name="retention-maintenance"),
-        asyncio.create_task(_email_drain_loop(), name="email-drain"),
-    ])
+    if os.getenv("MINDGUARD_DISABLE_BACKGROUND_TASKS", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }:
+        _background_tasks.extend(
+            [
+                asyncio.create_task(
+                    _consent_maintenance_loop(), name="consent-maintenance"
+                ),
+                asyncio.create_task(
+                    _retention_maintenance_loop(), name="retention-maintenance"
+                ),
+                asyncio.create_task(_email_drain_loop(), name="email-drain"),
+            ]
+        )
 
 
 @app.on_event("shutdown")
@@ -482,8 +654,11 @@ def _bootstrap_admins() -> None:
         update_user_role(user["id"], "admin")
         ensure_user_approved(user["id"])
         write_audit(
-            user["id"], "admin", "USER_PROMOTED",
-            "user", user["id"],
+            user["id"],
+            "admin",
+            "USER_PROMOTED",
+            "user",
+            user["id"],
             payload={"bootstrap": True, "previous_role": user["role_type"]},
         )
         logger.info("bootstrap admin: promoted %s to admin", email)
@@ -498,7 +673,9 @@ async def _consent_maintenance_loop() -> None:
             if expired or reminders["sent"] or reminders["failed"]:
                 logger.info(
                     "consent maintenance: expired=%s reminder_sent=%s reminder_failed=%s",
-                    expired, reminders["sent"], reminders["failed"],
+                    expired,
+                    reminders["sent"],
+                    reminders["failed"],
                 )
         except Exception:
             logger.exception("consent maintenance run failed")
@@ -531,7 +708,11 @@ async def _retention_maintenance_loop() -> None:
         try:
             result = await asyncio.to_thread(run_retention_cleanup)
             if result["anonymized"]:
-                logger.info("retention maintenance: eligible=%s anonymized=%s", result["eligible"], result["anonymized"])
+                logger.info(
+                    "retention maintenance: eligible=%s anonymized=%s",
+                    result["eligible"],
+                    result["anonymized"],
+                )
         except Exception:
             logger.exception("retention maintenance run failed")
         await asyncio.sleep(86400)
@@ -551,25 +732,21 @@ async def healthz():
     }
 
 
-
 # ── Rate limiting ─────────────────────────────────────────────────────
 
+# Kept as a compatibility handle for older tests and integrations. Rate state
+# itself is persisted in SQLite by ``consume_rate_limit``.
 _rate_store: dict[str, list[float]] = defaultdict(list)
-_RATE_WINDOW = 60   # seconds
+_RATE_WINDOW = 60  # seconds
 _AUTH_RATE_MAX = 10  # max auth attempts per window per IP
 _ANALYSIS_RATE_MAX = 30  # max analysis/platform inferences per window per user
 
 
-def _check_rate_limit(key: str, max_requests: int = _AUTH_RATE_MAX, window: int = _RATE_WINDOW):
-    now = time.time()
-    _rate_store[key] = [t for t in _rate_store[key] if now - t < window]
-    if len(_rate_store[key]) >= max_requests:
+def _check_rate_limit(
+    key: str, max_requests: int = _AUTH_RATE_MAX, window: int = _RATE_WINDOW
+):
+    if not consume_rate_limit(key, max_requests, window):
         raise HTTPException(429, "Too many requests. Please try again later.")
-    _rate_store[key].append(now)
-    if len(_rate_store) > 10000:
-        oldest = sorted(_rate_store, key=lambda k: _rate_store[k][-1] if _rate_store[k] else 0)[:1000]
-        for k in oldest:
-            del _rate_store[k]
 
 
 def _check_analysis_rate_limit(user_id: str):
@@ -584,6 +761,7 @@ def _check_analysis_rate_limit(user_id: str):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
+
 
 def _generate_referral_code() -> str:
     alphabet = string.ascii_uppercase + string.digits
@@ -611,11 +789,15 @@ def _validate_external_host(host: str) -> None:
         raise HTTPException(400, "Invalid hostname")
     if _PRIVATE_HOST_PATTERNS.match(host):
         raise HTTPException(400, "Invalid hostname")
-    if not re.match(r'^[a-z0-9][a-z0-9\-\.]{0,251}[a-z0-9]$', host):
+    if not re.match(r"^[a-z0-9][a-z0-9\-\.]{0,251}[a-z0-9]$", host):
         raise HTTPException(400, "Invalid hostname")
     try:
         import socket
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)}
+
+        addresses = {
+            info[4][0]
+            for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        }
     except OSError:
         raise HTTPException(400, "Host could not be resolved")
     if not addresses or any(_is_private_ip(address) for address in addresses):
@@ -647,6 +829,7 @@ def _validate_public_video_url(video_url: str) -> None:
     _validate_external_host(host)
     try:
         import socket
+
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError:
         raise HTTPException(400, "Invalid video URL")
@@ -657,9 +840,10 @@ def _validate_public_video_url(video_url: str) -> None:
 
 # ── Auth routes ──────────────────────────────────────────────────────
 
+
 @app.post("/api/auth/login")
 async def login(req: LoginRequest, request: Request):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     _check_rate_limit(f"login:{client_ip}")
 
     # reCAPTCHA is enforced only when RECAPTCHA_SECRET is configured; local/dev
@@ -682,14 +866,14 @@ async def login(req: LoginRequest, request: Request):
         "role_type": user["role_type"],
         "referral_code": _generate_referral_code(),
         "terms_accepted": bool(user.get("terms_accepted_at")),
-        "user_category": user.get("user_category") or "pending",
+        "user_category": _auth_user_category(user),
         "access_token": token,
     }
 
 
 @app.post("/api/auth/register")
 async def register(req: RegisterRequest, request: Request):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     _check_rate_limit(f"register:{client_ip}")
 
     if not await verify_recaptcha_token(req.recaptcha_token):
@@ -699,7 +883,11 @@ async def register(req: RegisterRequest, request: Request):
     if existing:
         raise HTTPException(400, "Email already registered")
 
-    _role_map = {"student": "student", "counsellor": "counsellor", "counselor": "counsellor"}
+    _role_map = {
+        "student": "student",
+        "counsellor": "counsellor",
+        "counselor": "counsellor",
+    }
     role_type = _role_map.get(req.role.lower(), "student") if req.role else "student"
 
     # Staff roles carry access to every student's personal data and consent
@@ -718,12 +906,16 @@ async def register(req: RegisterRequest, request: Request):
     if role_type == "student" and req.dob:
         try:
             birth = datetime.fromisoformat(req.dob)
-            age = (datetime.now(timezone.utc) - birth.replace(tzinfo=timezone.utc)).days // 365
+            age = (
+                datetime.now(timezone.utc) - birth.replace(tzinfo=timezone.utc)
+            ).days // 365
             is_minor = age < 18
         except ValueError:
             pass
     if is_minor and not req.parent_email:
-        raise HTTPException(400, "Parent or guardian email is required for students under 18")
+        raise HTTPException(
+            400, "Parent or guardian email is required for students under 18"
+        )
 
     # Validate referral code if provided
     referred_by_id: str | None = None
@@ -734,8 +926,12 @@ async def register(req: RegisterRequest, request: Request):
 
     pw_hash = hash_password(req.password)
     user = create_user(
-        req.email, req.name, pw_hash, role_type=role_type,
-        dob=req.dob, parent_email=req.parent_email if is_minor else None,
+        req.email,
+        req.name,
+        pw_hash,
+        role_type=role_type,
+        dob=req.dob,
+        parent_email=req.parent_email if is_minor else None,
         referred_by=referred_by_id,
     )
 
@@ -743,21 +939,38 @@ async def register(req: RegisterRequest, request: Request):
     if is_minor:
         counsellors = [u for u in get_all_users() if u["role_type"] == "counsellor"]
         for c in counsellors:
-            _safe_notify(c["id"], "Minor Registration", f"Student {req.name} ({req.email}) registered and is under 18. Parental consent link sent to {req.parent_email}.", "system")
+            _safe_notify(
+                c["id"],
+                "Minor Registration",
+                f"Student {req.name} ({req.email}) registered and is under 18. Parental consent link sent to {req.parent_email}.",
+                "system",
+            )
 
     write_audit(
-        user["id"], role_type, "USER_REGISTERED",
-        "user", user["id"], payload={"minor": is_minor},
+        user["id"],
+        role_type,
+        "USER_REGISTERED",
+        "user",
+        user["id"],
+        payload={"minor": is_minor},
         ip=client_ip,
     )
 
-    logger.info("Register: user=%s role=%s minor=%s ip=%s", user["id"], role_type, is_minor, client_ip)
+    logger.info(
+        "Register: user=%s role=%s minor=%s ip=%s",
+        user["id"],
+        role_type,
+        is_minor,
+        client_ip,
+    )
     return {"ok": True, "user": user}
 
 
 @app.post("/api/auth/change-password")
-async def change_password(req: ChangePasswordRequest, request: Request, user: dict = Depends(require_auth)):
-    client_ip = request.client.host if request.client else "unknown"
+async def change_password(
+    req: ChangePasswordRequest, request: Request, user: dict = Depends(require_auth)
+):
+    client_ip = _client_ip(request)
     _check_rate_limit(f"change-password:{client_ip}")
 
     fresh = get_user_by_id(user["id"])
@@ -765,15 +978,21 @@ async def change_password(req: ChangePasswordRequest, request: Request, user: di
         raise HTTPException(401, "Current password is incorrect")
 
     if req.new_password == req.current_password:
-        raise HTTPException(400, "New password must be different from the current password")
+        raise HTTPException(
+            400, "New password must be different from the current password"
+        )
 
     update_user_password(user["id"], hash_password(req.new_password))
     exp = user.get("_token_exp")
     expires_at = datetime.fromtimestamp(exp, timezone.utc).isoformat() if exp else None
     blacklist_token(user.get("_token_jti", ""), expires_at=expires_at)
     write_audit(
-        user["id"], user["role_type"], "PASSWORD_CHANGED",
-        "user", user["id"], ip=client_ip,
+        user["id"],
+        user["role_type"],
+        "PASSWORD_CHANGED",
+        "user",
+        user["id"],
+        ip=client_ip,
     )
     logger.info("Password changed: user=%s ip=%s", user["id"], client_ip)
     return {"ok": True}
@@ -788,7 +1007,7 @@ async def get_me(user: dict = Depends(require_auth)):
         "role_type": user["role_type"],
         "referral_code": user.get("referral_code") or _generate_referral_code(),
         "terms_accepted": bool(user.get("terms_accepted_at")),
-        "user_category": user.get("user_category") or "pending",
+        "user_category": _auth_user_category(user),
         "institution_id": user.get("institution_id"),
         "onboarding_completed": bool(user.get("onboarding_completed_at")),
         "id": user["id"],
@@ -801,26 +1020,42 @@ async def accept_terms(request: Request, user: dict = Depends(require_auth)):
     newly = accept_user_terms(user["id"])
     if newly:
         write_audit(
-            user["id"], user["role_type"], "TERMS_ACCEPTED",
-            "user", user["id"], ip=_client_ip(request),
+            user["id"],
+            user["role_type"],
+            "TERMS_ACCEPTED",
+            "user",
+            user["id"],
+            ip=_client_ip(request),
         )
         logger.info("Terms accepted: user=%s", user["id"])
     return {"ok": True}
 
 
 @app.post("/api/auth/onboarding")
-async def complete_onboarding(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def complete_onboarding(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     """Explicit age/status declaration for individual vs institution-managed flow."""
+    if user.get("role_type") in {"admin", "school_admin", "counsellor"}:
+        raise HTTPException(
+            403,
+            "Staff accounts use the operational workspace and cannot complete consumer onboarding",
+        )
     category = (data.get("user_category") or data.get("category") or "").strip().lower()
     allowed = {"adult", "minor", "parent", "institution_managed", "pending"}
     if category not in allowed:
-        raise HTTPException(400, f"user_category must be one of {', '.join(sorted(allowed))}")
+        raise HTTPException(
+            400, f"user_category must be one of {', '.join(sorted(allowed))}"
+        )
     institution_id = data.get("institution_id")
     parent_email = (data.get("parent_email") or "").strip().lower()
     current_category = (user.get("user_category") or "pending").strip().lower()
     if current_category != "pending":
         if category != current_category or institution_id != user.get("institution_id"):
-            raise HTTPException(403, "Onboarding identity and institution links cannot be changed after completion")
+            raise HTTPException(
+                403,
+                "Onboarding identity and institution links cannot be changed after completion",
+            )
     if category == "minor" and not parent_email:
         raise HTTPException(400, "parent_email is required for minors")
     if parent_email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", parent_email):
@@ -828,7 +1063,9 @@ async def complete_onboarding(data: dict, request: Request, user: dict = Depends
     parent_id = None
     if parent_email:
         if parent_email == str(user.get("email") or "").strip().lower():
-            raise HTTPException(400, "A user cannot nominate themselves as their guardian")
+            raise HTTPException(
+                400, "A user cannot nominate themselves as their guardian"
+            )
         parent_user = get_user_by_email(parent_email)
         if parent_user:
             if parent_user["id"] == user["id"] or (
@@ -841,15 +1078,25 @@ async def complete_onboarding(data: dict, request: Request, user: dict = Depends
         raise HTTPException(403, "Parent or guardian relationship cannot be changed")
     if institution_id:
         from backend.database import get_institution_by_id
+
         if not get_institution_by_id(institution_id):
             raise HTTPException(400, "Institution not found")
         if user.get("institution_id") != institution_id:
-            raise HTTPException(403, "Institution membership must be provisioned by an administrator")
+            raise HTTPException(
+                403, "Institution membership must be provisioned by an administrator"
+            )
     ok = update_user_onboarding(user["id"], category, institution_id, parent_id)
     if not ok:
         raise HTTPException(500, "Failed to update onboarding")
-    write_audit(user["id"], user["role_type"], "ONBOARDING_COMPLETED", "user", user["id"],
-                payload={"category": category, "institution_id": institution_id}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "ONBOARDING_COMPLETED",
+        "user",
+        user["id"],
+        payload={"category": category, "institution_id": institution_id},
+        ip=_client_ip(request),
+    )
     fresh = get_user_by_id(user["id"])
     return {"ok": True, "user": fresh}
 
@@ -868,7 +1115,8 @@ async def self_platform_catalog(user: dict = Depends(require_auth)):
             {
                 **spec,
                 "connected": acc is not None,
-                "verification_status": (acc or {}).get("verification_status") or "not_connected",
+                "verification_status": (acc or {}).get("verification_status")
+                or "not_connected",
                 "verified_handle": (acc or {}).get("verified_handle"),
                 "verified_profile_url": (acc or {}).get("verified_profile_url"),
                 "analysis_status": (acc or {}).get("analysis_status") or "not_run",
@@ -886,7 +1134,9 @@ async def get_own_social_accounts(user: dict = Depends(require_auth)):
 
 
 @app.post("/api/self/social-accounts")
-async def add_own_social_account(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def add_own_social_account(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     _require_self_adult(user)
     from backend.services.platform_registry import get_platform, normalize_platform
 
@@ -900,7 +1150,11 @@ async def add_own_social_account(data: dict, request: Request, user: dict = Depe
     raw_creds = raw_creds if isinstance(raw_creds, dict) else {}
 
     # Accept a URL pasted into the handle field.
-    if (handle and not profile_url and handle.lower().startswith(("http://", "https://"))):
+    if (
+        handle
+        and not profile_url
+        and handle.lower().startswith(("http://", "https://"))
+    ):
         profile_url, handle = handle, ""
     if not handle and not profile_url:
         raise HTTPException(400, "handle or profile_url required")
@@ -909,7 +1163,9 @@ async def add_own_social_account(data: dict, request: Request, user: dict = Depe
 
     # Build the secret bag from the platform's declared fields only — anything
     # else (attacker-injected keys) is discarded before it reaches the DB.
-    allowed_fields = set((spec.get("credentials") or {}).get("secret_fields", []) or []) | {"handle", "channel", "profile_url"}
+    allowed_fields = set(
+        (spec.get("credentials") or {}).get("secret_fields", []) or []
+    ) | {"handle", "channel", "profile_url"}
     creds: dict = {}
     if handle:
         creds["handle"] = handle
@@ -919,7 +1175,9 @@ async def add_own_social_account(data: dict, request: Request, user: dict = Depe
         if key in allowed_fields and isinstance(value, str) and value.strip():
             creds[key] = value.strip()[:256]
     if platform == "youtube":
-        creds["channel"] = (data.get("channel") or profile_url or handle or "").strip()[:512]
+        creds["channel"] = (data.get("channel") or profile_url or handle or "").strip()[
+            :512
+        ]
 
     acc = save_social_account(
         user["id"],
@@ -928,13 +1186,22 @@ async def add_own_social_account(data: dict, request: Request, user: dict = Depe
         profile_url or None,
         credentials=creds or None,
     )
-    write_audit(user["id"], user["role_type"], "SOCIAL_ACCOUNT_UPSERT", "user", user["id"],
-                payload={"platform": platform}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "SOCIAL_ACCOUNT_UPSERT",
+        "user",
+        user["id"],
+        payload={"platform": platform},
+        ip=_client_ip(request),
+    )
     return {"ok": True, "platform": platform, "account": acc}
 
 
 @app.post("/api/self/social-accounts/{platform}/verify")
-async def verify_own_social_account(platform: str, request: Request, user: dict = Depends(require_auth)):
+async def verify_own_social_account(
+    platform: str, request: Request, user: dict = Depends(require_auth)
+):
     _require_self_adult(user)
     from backend.services.platform_registry import normalize_platform
     from backend.services.self_analysis import verify_platform_connection
@@ -943,13 +1210,22 @@ async def verify_own_social_account(platform: str, request: Request, user: dict 
     if not slug:
         raise HTTPException(400, "Unknown platform")
     result = await verify_platform_connection(user["id"], slug)
-    write_audit(user["id"], user["role_type"], "PLATFORM_VERIFY", "social_account", slug,
-                payload={"platform": slug, "verified": result.get("verified")}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "PLATFORM_VERIFY",
+        "social_account",
+        slug,
+        payload={"platform": slug, "verified": result.get("verified")},
+        ip=_client_ip(request),
+    )
     return result
 
 
 @app.delete("/api/self/social-accounts/{platform}")
-async def delete_own_social_account(platform: str, request: Request, user: dict = Depends(require_auth)):
+async def delete_own_social_account(
+    platform: str, request: Request, user: dict = Depends(require_auth)
+):
     _require_self_adult(user)
     from backend.services.platform_registry import normalize_platform
 
@@ -959,13 +1235,22 @@ async def delete_own_social_account(platform: str, request: Request, user: dict 
     ok = delete_social_account(user["id"], slug)
     if not ok:
         raise HTTPException(404, "Account not found")
-    write_audit(user["id"], user["role_type"], "SOCIAL_ACCOUNT_DELETED", "user", user["id"],
-                payload={"platform": slug}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "SOCIAL_ACCOUNT_DELETED",
+        "user",
+        user["id"],
+        payload={"platform": slug},
+        ip=_client_ip(request),
+    )
     return {"ok": True}
 
 
 @app.post("/api/self/analyze")
-async def analyze_own_account(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def analyze_own_account(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     """Adult analyzes only own connected accounts (ownership enforced).
 
     Runs real per-platform retrieval and model scoring. If nothing could be
@@ -983,9 +1268,14 @@ async def analyze_own_account(data: dict, request: Request, user: dict = Depends
         if not slug:
             raise HTTPException(400, "Unknown platform")
         from backend.database import get_social_accounts
+
         connected_accounts = get_social_accounts(user["id"])
-        if connected_accounts and not any(a.get("platform") == slug for a in connected_accounts):
-            raise HTTPException(400, f"Connect your {slug} account before analysing it.")
+        if connected_accounts and not any(
+            a.get("platform") == slug for a in connected_accounts
+        ):
+            raise HTTPException(
+                400, f"Connect your {slug} account before analysing it."
+            )
         slugs = [slug]
 
     try:
@@ -993,14 +1283,24 @@ async def analyze_own_account(data: dict, request: Request, user: dict = Depends
     except Exception as exc:  # noqa: BLE001
         raise inference_http_error(exc)
 
-    write_audit(user["id"], user["role_type"], "SELF_ANALYSIS", "analysis_session", session["id"],
-                payload={"platforms": slugs, "status": session.get("status")}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "SELF_ANALYSIS",
+        "analysis_session",
+        session["id"],
+        payload={"platforms": slugs, "status": session.get("status")},
+        ip=_client_ip(request),
+    )
     return {"session": _decode_session_json(session)}
 
 
 @app.get("/api/v1/students/{student_id}/analysis-sessions")
 async def list_analysis_sessions(
-    student_id: str, user: dict = Depends(require_auth), limit: int = 50, offset: int = 0
+    student_id: str,
+    user: dict = Depends(require_auth),
+    limit: int = 50,
+    offset: int = 0,
 ):
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
@@ -1017,14 +1317,26 @@ async def list_analysis_sessions(
 
 
 @app.get("/api/self/analysis-sessions")
-async def list_own_analysis_sessions(user: dict = Depends(require_auth), limit: int = 50, offset: int = 0):
+async def list_own_analysis_sessions(
+    user: dict = Depends(require_auth), limit: int = 50, offset: int = 0
+):
     _require_self_adult(user)
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
-    sessions = get_analysis_sessions_for_student(user["id"], limit=limit, offset=offset, analysis_type="self")
+    sessions = get_analysis_sessions_for_student(
+        user["id"], limit=limit, offset=offset, analysis_type="self"
+    )
     decoded = [_decode_session_json(s) for s in sessions]
-    return {"sessions": decoded, "total": len(get_analysis_sessions_for_student(user["id"], limit=1000, offset=0, analysis_type="self")),
-            "limit": limit, "offset": offset}
+    return {
+        "sessions": decoded,
+        "total": len(
+            get_analysis_sessions_for_student(
+                user["id"], limit=1000, offset=0, analysis_type="self"
+            )
+        ),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/api/self/analysis-sessions/{session_id}")
@@ -1032,21 +1344,29 @@ async def get_own_analysis_session(session_id: str, user: dict = Depends(require
     _require_self_adult(user)
     from backend.database import get_analysis_session_for_student
 
-    sess = get_analysis_session_for_student(session_id, user["id"], analysis_type="self")
+    sess = get_analysis_session_for_student(
+        session_id, user["id"], analysis_type="self"
+    )
     if not sess:
         raise HTTPException(404, "Session not found")
     return {"session": _decode_session_json(sess)}
 
 
 @app.get("/api/v1/analysis-sessions/{session_id}")
-async def get_single_analysis_session(session_id: str, user: dict = Depends(require_auth)):
+async def get_single_analysis_session(
+    session_id: str, user: dict = Depends(require_auth)
+):
     sess = get_analysis_session(session_id)
     if not sess:
         raise HTTPException(404, "Session not found")
     student_id = sess["student_id"]
     if user["id"] == student_id or user["role_type"] == "admin":
         return {"session": sess}
-    if user.get("institution_id") and sess.get("institution_id") and user["institution_id"] != sess["institution_id"]:
+    if (
+        user.get("institution_id")
+        and sess.get("institution_id")
+        and user["institution_id"] != sess["institution_id"]
+    ):
         raise HTTPException(403, "Session not in your institution")
     _require_counsellor_student_access(user, student_id)
     return {"session": sess}
@@ -1057,7 +1377,9 @@ async def logout(authorization: str = Header(...), user: dict = Depends(require_
     jti = user.get("_token_jti", "")
     if jti:
         exp = user.get("_token_exp")
-        expires_at = datetime.fromtimestamp(exp, timezone.utc).isoformat() if exp else None
+        expires_at = (
+            datetime.fromtimestamp(exp, timezone.utc).isoformat() if exp else None
+        )
         blacklist_token(jti, expires_at=expires_at)
     logger.info("Logout: user=%s", user["id"])
     return {"ok": True}
@@ -1065,7 +1387,7 @@ async def logout(authorization: str = Header(...), user: dict = Depends(require_
 
 @app.post("/api/auth/google")
 async def google_auth(data: dict, request: Request):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     _check_rate_limit(f"google:{client_ip}")
 
     if not await verify_recaptcha_token(data.get("recaptcha_token")):
@@ -1077,6 +1399,7 @@ async def google_auth(data: dict, request: Request):
 
     try:
         from supabase import create_client
+
         supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
         user_resp = supabase.auth.get_user(access_token)
         sb_user = user_resp.user
@@ -1099,8 +1422,14 @@ async def google_auth(data: dict, request: Request):
         # Display name only for brand-new accounts, sanitised and length-capped.
         # Existing accounts keep their stored name.
         client_name = (data.get("name") or "").strip()
-        verified_name = (sb_user.user_metadata.get("full_name") if sb_user.user_metadata else None) or ""
-        name = (verified_name or client_name or email.split("@")[0].replace(".", " ").title())
+        verified_name = (
+            sb_user.user_metadata.get("full_name") if sb_user.user_metadata else None
+        ) or ""
+        name = (
+            verified_name
+            or client_name
+            or email.split("@")[0].replace(".", " ").title()
+        )
         name = str(name).strip()[:80] or email.split("@")[0].replace(".", " ").title()
         create_user(email, name, "", role_type="student")
         user = get_user_by_email(email)
@@ -1124,7 +1453,9 @@ async def google_auth(data: dict, request: Request):
 _MASTODON_HANDLE_RE = re.compile(r"^@([^@]+)@([^@]+)$")
 
 
-def _normalize_mastodon_handle(handle: str | None) -> tuple[str | None, str | None, str | None]:
+def _normalize_mastodon_handle(
+    handle: str | None,
+) -> tuple[str | None, str | None, str | None]:
     """Return (canonical_handle, instance, profile_url) for a Mastodon handle.
 
     If the handle is not a Mastodon handle, returns (handle, None, None).
@@ -1142,6 +1473,7 @@ def _normalize_mastodon_handle(handle: str | None) -> tuple[str | None, str | No
 
 # ── Analysis routes ──────────────────────────────────────────────────
 
+
 @app.post("/api/analysis/text")
 async def analyze_text(req: TextAnalysisRequest, user: dict = Depends(require_auth)):
     _check_analysis_rate_limit(user["id"])
@@ -1149,22 +1481,36 @@ async def analyze_text(req: TextAnalysisRequest, user: dict = Depends(require_au
         prob, ms = await predict_one(req.text)
     except Exception as exc:
         logger.error("ML inference error: %s", exc)
-        raise HTTPException(503, "Analysis service temporarily unavailable. Please try again in a moment.")
+        raise HTTPException(
+            503,
+            "Analysis service temporarily unavailable. Please try again in a moment.",
+        )
 
     cls = "Suicidal" if prob >= 0.5 else "Non-Suicidal"
     save_analysis(user["id"], "text", req.text, prob, cls)
     analytics = get_analytics(user["id"])
+    assessment = assess_risk(prob)
 
-    return TextAnalysisResponse(prob=prob, latency_ms=ms, analytics=analytics)
+    return TextAnalysisResponse(
+        prob=prob,
+        latency_ms=ms,
+        analytics=analytics,
+        risk_tier=assessment.tier,
+        alert_eligible=assessment.alert_eligible,
+        crisis_escalation_eligible=assessment.crisis_escalation_eligible,
+    )
 
 
 @app.post("/api/analysis/image")
-async def analyze_image(file: UploadFile = File(...), user: dict = Depends(require_auth)):
+async def analyze_image(
+    file: UploadFile = File(...), user: dict = Depends(require_auth)
+):
     _check_analysis_rate_limit(user["id"])
     MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
     try:
         import pytesseract
         from PIL import Image, UnidentifiedImageError
+
         contents = await file.read()
         if len(contents) > MAX_IMAGE_SIZE:
             raise HTTPException(413, "Image file too large (max 10 MB)")
@@ -1180,12 +1526,23 @@ async def analyze_image(file: UploadFile = File(...), user: dict = Depends(requi
             prob, ms = await predict_one(text)
         except Exception as exc:
             logger.error("ML inference error: %s", exc)
-            raise HTTPException(503, "Analysis service temporarily unavailable. Please try again in a moment.")
+            raise HTTPException(
+                503,
+                "Analysis service temporarily unavailable. Please try again in a moment.",
+            )
         cls = "Suicidal" if prob >= 0.5 else "Non-Suicidal"
         save_analysis(user["id"], "image", "[Image OCR] " + text, prob, cls)
         analytics = get_analytics(user["id"])
+        assessment = assess_risk(prob)
 
-        return TextAnalysisResponse(prob=prob, latency_ms=ms, analytics=analytics)
+        return TextAnalysisResponse(
+            prob=prob,
+            latency_ms=ms,
+            analytics=analytics,
+            risk_tier=assessment.tier,
+            alert_eligible=assessment.alert_eligible,
+            crisis_escalation_eligible=assessment.crisis_escalation_eligible,
+        )
     except HTTPException:
         raise
     except ImportError:
@@ -1197,10 +1554,26 @@ async def analyze_image(file: UploadFile = File(...), user: dict = Depends(requi
 
 # ── Platform routes ──────────────────────────────────────────────────
 
+
 def _build_platform_result(posts: list, platform_key: str) -> dict:
     scores = np.array([p["risk_score"] for p in posts])
     df = [
-        {k: p.get(k) for k in ["text", "date", "url", "risk_score", "raw_risk_score", "low_context", "adjustment_reason", "word_count", "char_count", "subreddit", "type"]}
+        {
+            k: p.get(k)
+            for k in [
+                "text",
+                "date",
+                "url",
+                "risk_score",
+                "raw_risk_score",
+                "low_context",
+                "adjustment_reason",
+                "word_count",
+                "char_count",
+                "subreddit",
+                "type",
+            ]
+        }
         for p in posts
     ]
     return {
@@ -1231,10 +1604,16 @@ def _run_scraper_worker(platform: str, url: str, months: int = 3) -> list:
             timeout=300,
         )
     except subprocess.TimeoutExpired:
-        raise HTTPException(408, "Scraping timed out. Try again or use File Upload with an archive.")
+        raise HTTPException(
+            408, "Scraping timed out. Try again or use File Upload with an archive."
+        )
 
     if result.returncode != 0:
-        err = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "Scraper failed"
+        err = (
+            result.stderr.strip().splitlines()[-1]
+            if result.stderr.strip()
+            else "Scraper failed"
+        )
         raise HTTPException(400, err)
 
     try:
@@ -1257,17 +1636,22 @@ def _run_scraper_worker(platform: str, url: str, months: int = 3) -> list:
             date = datetime.now(timezone.utc)
         if date.tzinfo is None:
             date = date.replace(tzinfo=timezone.utc)
-        posts.append({
-            "text": text,
-            "date": date.isoformat(),
-            "url": p.get("url") or ("" if platform in {"facebook", "twitter"} else url),
-        })
+        posts.append(
+            {
+                "text": text,
+                "date": date.isoformat(),
+                "url": p.get("url")
+                or ("" if platform in {"facebook", "twitter"} else url),
+            }
+        )
     return posts
 
 
 def _login_bluesky(identifier: str, password: str) -> str:
     url = "https://bsky.social/xrpc/com.atproto.server.createSession"
-    payload = json.dumps({"identifier": identifier, "password": password}).encode("utf-8")
+    payload = json.dumps({"identifier": identifier, "password": password}).encode(
+        "utf-8"
+    )
     req = urllib.request.Request(
         url,
         data=payload,
@@ -1288,7 +1672,10 @@ def _login_bluesky(identifier: str, password: str) -> str:
 def _fetch_bluesky_posts(handle: str, access_token: str) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=90)
     headers = {"User-Agent": "MindGuard/3.0", "Authorization": f"Bearer {access_token}"}
-    resolve_url = "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?" + urlencode({"handle": handle})
+    resolve_url = (
+        "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?"
+        + urlencode({"handle": handle})
+    )
     try:
         req = urllib.request.Request(resolve_url, headers=headers)
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -1296,7 +1683,9 @@ def _fetch_bluesky_posts(handle: str, access_token: str) -> list[dict]:
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise HTTPException(404, f"Handle not found: {handle}.")
-        raise HTTPException(exc.code, f"Could not resolve Bluesky handle (HTTP {exc.code}).")
+        raise HTTPException(
+            exc.code, f"Could not resolve Bluesky handle (HTTP {exc.code})."
+        )
     except Exception as exc:
         raise HTTPException(502, f"Could not reach Bluesky API: {exc}")
 
@@ -1309,7 +1698,9 @@ def _fetch_bluesky_posts(handle: str, access_token: str) -> list[dict]:
             if parsed.scheme not in {"http", "https"} or not parsed.hostname:
                 return False
             _validate_external_host(parsed.hostname)
-            req = urllib.request.Request(post_url, headers={"User-Agent": "MindGuard/3.0"})
+            req = urllib.request.Request(
+                post_url, headers={"User-Agent": "MindGuard/3.0"}
+            )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 html = resp.read(300_000).decode("utf-8", errors="ignore").lower()
                 return resp.status < 400 and "post not found" not in html
@@ -1320,13 +1711,17 @@ def _fetch_bluesky_posts(handle: str, access_token: str) -> list[dict]:
         params = {"actor": did, "limit": 100}
         if cursor:
             params["cursor"] = cursor
-        feed_url = "https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?" + urlencode(params)
+        feed_url = "https://bsky.social/xrpc/app.bsky.feed.getAuthorFeed?" + urlencode(
+            params
+        )
         try:
             req = urllib.request.Request(feed_url, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            raise HTTPException(exc.code, f"Could not fetch Bluesky posts (HTTP {exc.code}).")
+            raise HTTPException(
+                exc.code, f"Could not fetch Bluesky posts (HTTP {exc.code})."
+            )
         except Exception as exc:
             raise HTTPException(502, f"Could not fetch Bluesky posts: {exc}")
 
@@ -1353,11 +1748,13 @@ def _fetch_bluesky_posts(handle: str, access_token: str) -> list[dict]:
             post_url = f"https://bsky.app/profile/{handle}/post/{rkey}"
             if not public_bluesky_url_available(post_url):
                 continue
-            posts.append({
-                "text": text,
-                "date": created.isoformat(),
-                "url": post_url,
-            })
+            posts.append(
+                {
+                    "text": text,
+                    "date": created.isoformat(),
+                    "url": post_url,
+                }
+            )
         cursor = data.get("cursor")
         if not cursor:
             break
@@ -1393,7 +1790,9 @@ def _fetch_reddit_rss_posts(username: str) -> list[dict]:
         try:
             req = urllib.request.Request(
                 feed_url,
-                headers={"User-Agent": "Mozilla/5.0 (MindGuard local research prototype; Reddit RSS mode)"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (MindGuard local research prototype; Reddit RSS mode)"
+                },
             )
             with urllib.request.urlopen(req, timeout=20) as resp:
                 xml_text = resp.read().decode("utf-8", errors="ignore")
@@ -1412,12 +1811,21 @@ def _fetch_reddit_rss_posts(username: str) -> list[dict]:
             continue
 
         for entry in root.findall("atom:entry", namespaces):
-            title = (entry.findtext("atom:title", default="", namespaces=namespaces) or "").strip()
-            content = (entry.findtext("atom:content", default="", namespaces=namespaces) or "").strip()
+            title = (
+                entry.findtext("atom:title", default="", namespaces=namespaces) or ""
+            ).strip()
+            content = (
+                entry.findtext("atom:content", default="", namespaces=namespaces) or ""
+            ).strip()
             content = re.sub(r"<[^>]+>", " ", content)
             content = re.sub(r"\s+", " ", content).strip()
-            published = entry.findtext("atom:published", default="", namespaces=namespaces) or ""
-            updated = entry.findtext("atom:updated", default="", namespaces=namespaces) or ""
+            published = (
+                entry.findtext("atom:published", default="", namespaces=namespaces)
+                or ""
+            )
+            updated = (
+                entry.findtext("atom:updated", default="", namespaces=namespaces) or ""
+            )
             date_text = published or updated
             try:
                 created = datetime.fromisoformat(date_text.replace("Z", "+00:00"))
@@ -1436,22 +1844,30 @@ def _fetch_reddit_rss_posts(username: str) -> list[dict]:
                 continue
             seen_urls.add(link)
 
-            text = f"{title} {content}".strip() if source_type == "Post" else content or title
+            text = (
+                f"{title} {content}".strip()
+                if source_type == "Post"
+                else content or title
+            )
             text = re.sub(r"\s+", " ", text).strip()
             if len(text) <= 10 or text.lower() in {"[deleted]", "[removed]"}:
                 continue
 
             subreddit_match = re.search(r"/r/([^/]+)/", link)
-            raw_posts.append({
-                "text": text,
-                "date": created.isoformat(),
-                "url": link,
-                "subreddit": subreddit_match.group(1) if subreddit_match else "",
-                "type": source_type,
-            })
+            raw_posts.append(
+                {
+                    "text": text,
+                    "date": created.isoformat(),
+                    "url": link,
+                    "subreddit": subreddit_match.group(1) if subreddit_match else "",
+                    "type": source_type,
+                }
+            )
 
     if not raw_posts and feed_errors:
-        raise HTTPException(502, "Could not fetch Reddit RSS feeds: " + "; ".join(feed_errors))
+        raise HTTPException(
+            502, "Could not fetch Reddit RSS feeds: " + "; ".join(feed_errors)
+        )
 
     raw_posts.sort(key=lambda p: p["date"])
     return raw_posts
@@ -1471,7 +1887,9 @@ async def analyze_reddit(req: PlatformRequest, user: dict = Depends(require_auth
         if not client_id or not client_secret:
             raw_posts = _fetch_reddit_rss_posts(username)
             if not raw_posts:
-                raise HTTPException(404, f"No RSS posts found for u/{username} in the last 6 months.")
+                raise HTTPException(
+                    404, f"No RSS posts found for u/{username} in the last 6 months."
+                )
 
             text_col = [clean_text(p["text"]) for p in raw_posts]
             scores = await predict_batch(text_col)
@@ -1488,6 +1906,7 @@ async def analyze_reddit(req: PlatformRequest, user: dict = Depends(require_auth
 
         import praw
         import prawcore
+
         reddit = praw.Reddit(
             client_id=client_id,
             client_secret=client_secret,
@@ -1504,13 +1923,15 @@ async def analyze_reddit(req: PlatformRequest, user: dict = Depends(require_auth
             text = f"{submission.title} {submission.selftext or ''}".strip()
             if len(text) <= 10:
                 continue
-            raw_posts.append({
-                "text": text,
-                "date": created.isoformat(),
-                "url": f"https://reddit.com{submission.permalink}",
-                "subreddit": submission.subreddit.display_name,
-                "type": "post",
-            })
+            raw_posts.append(
+                {
+                    "text": text,
+                    "date": created.isoformat(),
+                    "url": f"https://reddit.com{submission.permalink}",
+                    "subreddit": submission.subreddit.display_name,
+                    "type": "post",
+                }
+            )
         for comment in redditor.comments.new(limit=500):
             created = datetime.fromtimestamp(comment.created_utc, tz=timezone.utc)
             if created < cutoff:
@@ -1518,17 +1939,21 @@ async def analyze_reddit(req: PlatformRequest, user: dict = Depends(require_auth
             text = (comment.body or "").strip()
             if len(text) <= 10 or text in ("[deleted]", "[removed]"):
                 continue
-            raw_posts.append({
-                "text": text,
-                "date": created.isoformat(),
-                "url": f"https://reddit.com{comment.permalink}",
-                "subreddit": comment.subreddit.display_name,
-                "type": "comment",
-            })
+            raw_posts.append(
+                {
+                    "text": text,
+                    "date": created.isoformat(),
+                    "url": f"https://reddit.com{comment.permalink}",
+                    "subreddit": comment.subreddit.display_name,
+                    "type": "comment",
+                }
+            )
         raw_posts.sort(key=lambda p: p["date"])
 
         if not raw_posts:
-            raise HTTPException(404, f"No posts found for u/{username} in the last 6 months.")
+            raise HTTPException(
+                404, f"No posts found for u/{username} in the last 6 months."
+            )
 
         text_col = [clean_text(p["text"]) for p in raw_posts]
         scores = await predict_batch(text_col)
@@ -1575,11 +2000,17 @@ async def analyze_bluesky(req: PlatformRequest, user: dict = Depends(require_aut
     if not login_handle or not req.password:
         raise HTTPException(400, "Enter your Bluesky handle and App Password.")
     try:
-        access_token = await asyncio.to_thread(_login_bluesky, login_handle, req.password)
-        raw_posts = await asyncio.to_thread(_fetch_bluesky_posts, target_handle, access_token)
+        access_token = await asyncio.to_thread(
+            _login_bluesky, login_handle, req.password
+        )
+        raw_posts = await asyncio.to_thread(
+            _fetch_bluesky_posts, target_handle, access_token
+        )
 
         if not raw_posts:
-            raise HTTPException(404, f"No posts found for '{target_handle}' in the last 3 months.")
+            raise HTTPException(
+                404, f"No posts found for '{target_handle}' in the last 3 months."
+            )
 
         texts = [clean_text(p["text"]) for p in raw_posts]
         scores = await predict_batch(texts)
@@ -1610,10 +2041,14 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
         raise HTTPException(400, "Handle required")
     handle_input = req.handle.strip().lstrip("@")
     if "@" not in handle_input:
-        raise HTTPException(400, "Mastodon handle must be in format: username@instance.social")
+        raise HTTPException(
+            400, "Mastodon handle must be in format: username@instance.social"
+        )
     parts = handle_input.split("@")
     if len(parts) != 2 or not parts[0] or not parts[1]:
-        raise HTTPException(400, "Mastodon handle must be in format: username@instance.social")
+        raise HTTPException(
+            400, "Mastodon handle must be in format: username@instance.social"
+        )
     username, instance = parts
     _validate_external_host(instance)
     try:
@@ -1623,7 +2058,9 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
                 params={"acct": username},
             )
             if r.status_code == 404:
-                raise HTTPException(404, f"Could not find Mastodon account: {username}@{instance}")
+                raise HTTPException(
+                    404, f"Could not find Mastodon account: {username}@{instance}"
+                )
             r.raise_for_status()
             acct = r.json()
 
@@ -1635,13 +2072,20 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
                 if not status_url:
                     return False
                 parsed_url = urlparse(status_url)
-                if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+                if (
+                    parsed_url.scheme not in {"http", "https"}
+                    or not parsed_url.hostname
+                ):
                     return False
                 _validate_external_host(parsed_url.hostname)
                 try:
-                    check = await client.head(status_url, follow_redirects=True, timeout=8.0)
+                    check = await client.head(
+                        status_url, follow_redirects=True, timeout=8.0
+                    )
                     if check.status_code in {405, 501}:
-                        check = await client.get(status_url, follow_redirects=True, timeout=8.0)
+                        check = await client.get(
+                            status_url, follow_redirects=True, timeout=8.0
+                        )
                     return 200 <= check.status_code < 400
                 except Exception:
                     return False
@@ -1655,7 +2099,10 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
                     params=params,
                 )
                 if r.status_code in {401, 403, 404}:
-                    raise HTTPException(r.status_code, "Could not fetch Mastodon posts. The account may be private, restricted, or unavailable.")
+                    raise HTTPException(
+                        r.status_code,
+                        "Could not fetch Mastodon posts. The account may be private, restricted, or unavailable.",
+                    )
                 r.raise_for_status()
                 statuses = r.json()
                 if not statuses:
@@ -1663,7 +2110,9 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
 
                 for s in statuses:
                     try:
-                        created = datetime.fromisoformat(s["created_at"].replace("Z", "+00:00"))
+                        created = datetime.fromisoformat(
+                            s["created_at"].replace("Z", "+00:00")
+                        )
                     except (ValueError, KeyError):
                         created = datetime.now(timezone.utc)
                     if created < cutoff:
@@ -1674,13 +2123,21 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
                     status_url = s.get("url", "")
                     if not await public_status_url_available(status_url):
                         continue
-                    raw_posts.append({
-                        "text": text,
-                        "date": s.get("created_at", ""),
-                        "url": status_url,
-                    })
+                    raw_posts.append(
+                        {
+                            "text": text,
+                            "date": s.get("created_at", ""),
+                            "url": status_url,
+                        }
+                    )
                 max_id = statuses[-1]["id"]
-                if raw_posts and datetime.fromisoformat(str(raw_posts[-1]["date"]).replace("Z", "+00:00")) < cutoff:
+                if (
+                    raw_posts
+                    and datetime.fromisoformat(
+                        str(raw_posts[-1]["date"]).replace("Z", "+00:00")
+                    )
+                    < cutoff
+                ):
                     break
 
         if not raw_posts:
@@ -1704,7 +2161,9 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
         raise
     except httpx.HTTPStatusError as e:
         logger.error("Mastodon HTTP status error: %s", e)
-        raise HTTPException(400, f"Mastodon API returned an error: HTTP {e.response.status_code}")
+        raise HTTPException(
+            400, f"Mastodon API returned an error: HTTP {e.response.status_code}"
+        )
     except httpx.RequestError as e:
         logger.error("Mastodon network error: %s", e)
         raise HTTPException(400, f"Could not reach Mastodon API: {e}")
@@ -1713,7 +2172,9 @@ async def analyze_mastodon(req: PlatformRequest, user: dict = Depends(require_au
         raise HTTPException(400, f"Mastodon analysis failed: {e}")
 
 
-def _download_and_transcribe_video(video_url: str, max_seconds: int = 600) -> tuple[str, str]:
+def _download_and_transcribe_video(
+    video_url: str, max_seconds: int = 600
+) -> tuple[str, str]:
     _validate_public_video_url(video_url)
     import yt_dlp
     from faster_whisper import WhisperModel
@@ -1773,18 +2234,24 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
         )
 
         if is_video_url:
-            transcript, _ = await asyncio.to_thread(_download_and_transcribe_video, channel_input, 600)
+            transcript, _ = await asyncio.to_thread(
+                _download_and_transcribe_video, channel_input, 600
+            )
             if not transcript.strip():
-                raise HTTPException(422, "No speech transcript was returned, so no prediction was made.")
+                raise HTTPException(
+                    422, "No speech transcript was returned, so no prediction was made."
+                )
 
             prob, _ = await predict_one(transcript)
-            raw_posts = [{
-                "text": transcript,
-                "date": datetime.now(timezone.utc).isoformat(),
-                "url": channel_input,
-                "type": "Transcript",
-                **calibrate_risk_score(transcript, float(prob)),
-            }]
+            raw_posts = [
+                {
+                    "text": transcript,
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "url": channel_input,
+                    "type": "Transcript",
+                    **calibrate_risk_score(transcript, float(prob)),
+                }
+            ]
 
             result = _build_platform_result(raw_posts, "youtube")
             result["min_risk"] = req.min_risk
@@ -1795,13 +2262,22 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
             return result
 
         if not api_key:
-            raise HTTPException(400, "YouTube API key required for channel analysis. Direct video URLs can be analysed without an API key.")
+            raise HTTPException(
+                400,
+                "YouTube API key required for channel analysis. Direct video URLs can be analysed without an API key.",
+            )
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             if "youtube.com/channel/" in channel_input:
-                channel_id = channel_input.split("youtube.com/channel/")[-1].split("/")[0].split("?")[0]
+                channel_id = (
+                    channel_input.split("youtube.com/channel/")[-1]
+                    .split("/")[0]
+                    .split("?")[0]
+                )
             elif "youtube.com/@" in channel_input:
-                handle = channel_input.split("youtube.com/@")[-1].split("/")[0].split("?")[0]
+                handle = (
+                    channel_input.split("youtube.com/@")[-1].split("/")[0].split("?")[0]
+                )
                 r = await client.get(
                     "https://www.googleapis.com/youtube/v3/channels",
                     params={"part": "id", "forHandle": handle, "key": api_key},
@@ -1822,10 +2298,15 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
                     channel_id = items[0]["id"]
 
             if not channel_id:
-                raise HTTPException(400, "Could not resolve YouTube channel. Use a channel URL or @handle.")
+                raise HTTPException(
+                    400,
+                    "Could not resolve YouTube channel. Use a channel URL or @handle.",
+                )
 
             raw_posts = []
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             r = await client.get(
                 "https://www.googleapis.com/youtube/v3/search",
                 params={
@@ -1847,13 +2328,17 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
                 published = snippet.get("publishedAt", "")
                 text = f"{title} {desc}".strip()
                 if len(text) > 5:
-                    raw_posts.append({
-                        "text": text,
-                        "date": published,
-                        "url": f"https://youtube.com/watch?v={vid_id}" if vid_id else "",
-                        "type": "Title/Description",
-                        "video_id": vid_id,
-                    })
+                    raw_posts.append(
+                        {
+                            "text": text,
+                            "date": published,
+                            "url": f"https://youtube.com/watch?v={vid_id}"
+                            if vid_id
+                            else "",
+                            "type": "Title/Description",
+                            "video_id": vid_id,
+                        }
+                    )
                 if not vid_id:
                     continue
                 try:
@@ -1869,16 +2354,20 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
                     )
                     cr.raise_for_status()
                     for c in cr.json().get("items", []):
-                        comment_text = c["snippet"]["topLevelComment"]["snippet"].get("textDisplay", "")
+                        comment_text = c["snippet"]["topLevelComment"]["snippet"].get(
+                            "textDisplay", ""
+                        )
                         comment_text = re.sub(r"<[^>]+>", "", comment_text).strip()
                         if len(comment_text) > 5:
-                            raw_posts.append({
-                                "text": comment_text,
-                                "date": published,
-                                "url": f"https://youtube.com/watch?v={vid_id}",
-                                "type": "Comment",
-                                "video_id": vid_id,
-                            })
+                            raw_posts.append(
+                                {
+                                    "text": comment_text,
+                                    "date": published,
+                                    "url": f"https://youtube.com/watch?v={vid_id}",
+                                    "type": "Comment",
+                                    "video_id": vid_id,
+                                }
+                            )
                 except Exception:
                     pass
 
@@ -1891,28 +2380,38 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
                     vid_id = post.get("video_id")
                     if vid_id and vid_id not in seen_video_ids:
                         seen_video_ids.add(vid_id)
-                        videos_to_transcribe.append({
-                            "video_id": vid_id,
-                            "date": post.get("date", ""),
-                            "url": post.get("url", ""),
-                        })
+                        videos_to_transcribe.append(
+                            {
+                                "video_id": vid_id,
+                                "date": post.get("date", ""),
+                                "url": post.get("url", ""),
+                            }
+                        )
                     if len(videos_to_transcribe) >= transcript_limit:
                         break
 
                 for video in videos_to_transcribe:
                     try:
-                        transcript, _ = await asyncio.to_thread(_download_and_transcribe_video, video["url"], 600)
+                        transcript, _ = await asyncio.to_thread(
+                            _download_and_transcribe_video, video["url"], 600
+                        )
                     except Exception as exc:
-                        logger.warning("Could not transcribe YouTube video %s: %s", video["video_id"], exc)
+                        logger.warning(
+                            "Could not transcribe YouTube video %s: %s",
+                            video["video_id"],
+                            exc,
+                        )
                         continue
                     if len(transcript.strip()) > 5:
-                        raw_posts.append({
-                            "text": transcript.strip(),
-                            "date": video["date"],
-                            "url": video["url"],
-                            "type": "Transcript",
-                            "video_id": video["video_id"],
-                        })
+                        raw_posts.append(
+                            {
+                                "text": transcript.strip(),
+                                "date": video["date"],
+                                "url": video["url"],
+                                "type": "Transcript",
+                                "video_id": video["video_id"],
+                            }
+                        )
                         transcribed += 1
 
         if not raw_posts:
@@ -1928,8 +2427,12 @@ async def analyze_youtube(req: PlatformRequest, user: dict = Depends(require_aut
         result["min_risk"] = req.min_risk
         result["n_show"] = req.n_show
         result["channel"] = channel_input
-        result["transcribed_videos"] = sum(1 for p in raw_posts if p.get("type") == "Transcript")
-        result["transcript_limit"] = min(req.transcript_limit, 3) if req.transcribe_videos else 0
+        result["transcribed_videos"] = sum(
+            1 for p in raw_posts if p.get("type") == "Transcript"
+        )
+        result["transcript_limit"] = (
+            min(req.transcript_limit, 3) if req.transcribe_videos else 0
+        )
         _platform_results[user["id"]]["youtube"] = result
         return result
 
@@ -1955,9 +2458,13 @@ async def analyze_video(req: PlatformRequest, user: dict = Depends(require_auth)
     if not req.video_url:
         raise HTTPException(400, "Video URL required")
     try:
-        transcript, _ = await asyncio.to_thread(_download_and_transcribe_video, req.video_url, 600)
+        transcript, _ = await asyncio.to_thread(
+            _download_and_transcribe_video, req.video_url, 600
+        )
         if not transcript.strip():
-            raise HTTPException(422, "No speech transcript was returned, so no prediction was made.")
+            raise HTTPException(
+                422, "No speech transcript was returned, so no prediction was made."
+            )
         prob, ms = await predict_one(transcript)
         label, color, level = risk_label(prob)
         result = {
@@ -1994,12 +2501,19 @@ async def analyze_facebook(req: PlatformRequest, user: dict = Depends(require_au
     if not req.profile_url:
         raise HTTPException(400, "Facebook profile URL is required")
     if "facebook.com" not in req.profile_url.lower():
-        raise HTTPException(400, "Enter a full Facebook URL, e.g. https://www.facebook.com/username")
+        raise HTTPException(
+            400, "Enter a full Facebook URL, e.g. https://www.facebook.com/username"
+        )
 
     try:
-        raw_posts = await asyncio.to_thread(_run_scraper_worker, "facebook", req.profile_url, req.months)
+        raw_posts = await asyncio.to_thread(
+            _run_scraper_worker, "facebook", req.profile_url, req.months
+        )
         if not raw_posts:
-            raise HTTPException(404, "No public posts found. The profile may be private or Facebook blocked the request.")
+            raise HTTPException(
+                404,
+                "No public posts found. The profile may be private or Facebook blocked the request.",
+            )
 
         texts = [clean_text(p["text"]) for p in raw_posts]
         scores = await predict_batch(texts)
@@ -2018,7 +2532,9 @@ async def analyze_facebook(req: PlatformRequest, user: dict = Depends(require_au
     except InferenceUnavailableError:
         raise
     except ImportError:
-        raise HTTPException(501, "Playwright is not installed. Install with: pip install playwright")
+        raise HTTPException(
+            501, "Playwright is not installed. Install with: pip install playwright"
+        )
     except Exception as e:
         logger.error("Facebook analysis error: %s", e)
         raise HTTPException(400, f"Facebook analysis failed: {e}")
@@ -2032,12 +2548,19 @@ async def analyze_twitter(req: PlatformRequest, user: dict = Depends(require_aut
         raise HTTPException(400, "Twitter/X profile URL is required")
     lowered = req.profile_url.lower()
     if "twitter.com" not in lowered and "x.com" not in lowered:
-        raise HTTPException(400, "Enter a valid Twitter/X URL, e.g. https://x.com/username")
+        raise HTTPException(
+            400, "Enter a valid Twitter/X URL, e.g. https://x.com/username"
+        )
 
     try:
-        raw_posts = await asyncio.to_thread(_run_scraper_worker, "twitter", req.profile_url, 3)
+        raw_posts = await asyncio.to_thread(
+            _run_scraper_worker, "twitter", req.profile_url, 3
+        )
         if not raw_posts:
-            raise HTTPException(404, "No tweets found. The profile may be private or Twitter/X may require login.")
+            raise HTTPException(
+                404,
+                "No tweets found. The profile may be private or Twitter/X may require login.",
+            )
 
         texts = [clean_text(p["text"]) for p in raw_posts]
         scores = await predict_batch(texts)
@@ -2056,7 +2579,9 @@ async def analyze_twitter(req: PlatformRequest, user: dict = Depends(require_aut
     except InferenceUnavailableError:
         raise
     except ImportError:
-        raise HTTPException(501, "Playwright is not installed. Install with: pip install playwright")
+        raise HTTPException(
+            501, "Playwright is not installed. Install with: pip install playwright"
+        )
     except Exception as e:
         logger.error("Twitter/X analysis error: %s", e)
         raise HTTPException(400, f"Twitter/X analysis failed: {e}")
@@ -2093,7 +2618,9 @@ async def analyze_file(
                 m = re.match(r"\[(.*?)\] (.*?): (.*)", line)
                 if m:
                     if current_text.strip():
-                        raw_posts.append({"text": current_text.strip(), "date": "", "url": ""})
+                        raw_posts.append(
+                            {"text": current_text.strip(), "date": "", "url": ""}
+                        )
                     current_text = m.group(3)
                 else:
                     current_text += " " + line
@@ -2144,7 +2671,11 @@ async def get_unified(user: dict = Depends(require_auth)):
             }
     if user_results.get("video"):
         v = user_results["video"]
-        platforms["Video"] = {"overall": v["risk"], "n_posts": 1, "n_high": 1 if v["risk"] >= 0.55 else 0}
+        platforms["Video"] = {
+            "overall": v["risk"],
+            "n_posts": 1,
+            "n_high": 1 if v["risk"] >= 0.55 else 0,
+        }
 
     scores = [p["overall"] for p in platforms.values()]
     unified = float(np.mean(scores)) if scores else 0.0
@@ -2153,8 +2684,11 @@ async def get_unified(user: dict = Depends(require_auth)):
 
 # ── Counsellor management routes (admin only) ───────────────────────────────
 
+
 @app.post("/api/admin/counsellors")
-async def create_counsellor(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def create_counsellor(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     """Create a new counsellor account via magic-link invitation (admin only)."""
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
@@ -2173,21 +2707,37 @@ async def create_counsellor(data: dict, request: Request, user: dict = Depends(r
 
     if institution_id:
         from backend.database import get_institution_by_id
+
         if not get_institution_by_id(institution_id):
             raise HTTPException(400, "Institution not found")
 
     placeholder_hash = hash_password(secrets.token_urlsafe(32))
-    counsellor = create_user(email, name, placeholder_hash, role_type="counsellor", institution_id=institution_id)
+    counsellor = create_user(
+        email,
+        name,
+        placeholder_hash,
+        role_type="counsellor",
+        institution_id=institution_id,
+    )
 
     from backend.services.crypto import hash_token
+
     token = secrets.token_urlsafe(32)
     token_hash = hash_token(token)
     expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     set_user_invitation(counsellor["id"], token_hash, expires_at)
 
     write_audit(
-        user["id"], "admin", "COUNSELLOR_CREATED", "user", counsellor["id"],
-        payload={"counsellor_name": name, "counsellor_email": email, "institution_id": institution_id},
+        user["id"],
+        "admin",
+        "COUNSELLOR_CREATED",
+        "user",
+        counsellor["id"],
+        payload={
+            "counsellor_name": name,
+            "counsellor_email": email,
+            "institution_id": institution_id,
+        },
         ip=_client_ip(request),
     )
 
@@ -2201,7 +2751,10 @@ async def create_counsellor(data: dict, request: Request, user: dict = Depends(r
                     institution_name = inst.get("name") or institution_name
             except Exception:
                 pass
-        base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/") or "https://app.mindguardai.me"
+        base = (
+            os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+            or "https://app.mindguardai.me"
+        )
         invite_url = f"{base}/invite?token={token}"
         context = {
             "counsellor_name": name,
@@ -2215,12 +2768,19 @@ async def create_counsellor(data: dict, request: Request, user: dict = Depends(r
         }
         subject, body = counsellor_invitation_notification(context)
         email_sent, email_error = send_html_email(
-            email, subject, body,
-            related_type="counsellor_invitation", related_id=counsellor["id"],
+            email,
+            subject,
+            body,
+            related_type="counsellor_invitation",
+            related_id=counsellor["id"],
             metadata={"action": "create", "invite": True},
         )
         write_audit(
-            user["id"], "admin", "COUNSELLOR_INVITE_SENT", "user", counsellor["id"],
+            user["id"],
+            "admin",
+            "COUNSELLOR_INVITE_SENT",
+            "user",
+            counsellor["id"],
             payload={"email_sent": email_sent, "error": email_error or None},
             ip=_client_ip(request),
         )
@@ -2245,6 +2805,7 @@ async def verify_invite(data: dict):
     if not token:
         raise HTTPException(400, "Token is required")
     from backend.services.crypto import hash_token
+
     token_hash = hash_token(token)
     user = get_user_by_invitation_token_hash(token_hash)
     if not user:
@@ -2274,6 +2835,7 @@ async def accept_invite(data: dict, request: Request):
     if len(password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
     from backend.services.crypto import hash_token
+
     token_hash = hash_token(token)
     user = get_user_by_invitation_token_hash(token_hash)
     if not user:
@@ -2293,9 +2855,14 @@ async def accept_invite(data: dict, request: Request):
     pw_hash = hash_password(password)
     update_user_password(user["id"], pw_hash)
     update_user_status(user["id"], "approved")
+    mark_user_as_staff(user["id"])
     clear_user_invitation(user["id"])
     write_audit(
-        user["id"], user["role_type"], "COUNSELLOR_INVITE_ACCEPTED", "user", user["id"],
+        user["id"],
+        user["role_type"],
+        "COUNSELLOR_INVITE_ACCEPTED",
+        "user",
+        user["id"],
         payload={"email": user["email"]},
         ip=_client_ip(request),
     )
@@ -2303,7 +2870,9 @@ async def accept_invite(data: dict, request: Request):
 
 
 @app.post("/api/admin/counsellors/{counsellor_id}/resend-invite")
-async def resend_counsellor_invite(counsellor_id: str, request: Request, user: dict = Depends(require_auth)):
+async def resend_counsellor_invite(
+    counsellor_id: str, request: Request, user: dict = Depends(require_auth)
+):
     """Regenerate invitation token and resend email (admin only)."""
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
@@ -2313,11 +2882,15 @@ async def resend_counsellor_invite(counsellor_id: str, request: Request, user: d
     if counsellor.get("status") == "approved":
         raise HTTPException(400, "Counsellor already active; no invite needed")
     from backend.services.crypto import hash_token
+
     token = secrets.token_urlsafe(32)
     token_hash = hash_token(token)
     expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
     set_user_invitation(counsellor_id, token_hash, expires_at)
-    base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/") or "https://app.mindguardai.me"
+    base = (
+        os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+        or "https://app.mindguardai.me"
+    )
     invite_url = f"{base}/invite?token={token}"
     institution_name = "MindGuard"
     context = {
@@ -2332,12 +2905,19 @@ async def resend_counsellor_invite(counsellor_id: str, request: Request, user: d
     }
     subject, body = counsellor_invitation_notification(context)
     email_sent, email_error = send_html_email(
-        counsellor["email"], subject, body,
-        related_type="counsellor_invitation", related_id=counsellor_id,
+        counsellor["email"],
+        subject,
+        body,
+        related_type="counsellor_invitation",
+        related_id=counsellor_id,
         metadata={"action": "resend"},
     )
     write_audit(
-        user["id"], "admin", "COUNSELLOR_INVITE_RESENT", "user", counsellor_id,
+        user["id"],
+        "admin",
+        "COUNSELLOR_INVITE_RESENT",
+        "user",
+        counsellor_id,
         payload={"email_sent": email_sent},
         ip=_client_ip(request),
     )
@@ -2350,40 +2930,45 @@ async def list_counsellors(user: dict = Depends(require_auth)):
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
     from backend.database import get_db
+
     conn = get_db()
     rows = conn.execute(
         "SELECT id, email, name, role_type, status, created_at FROM users "
         "WHERE role_type = 'counsellor' ORDER BY created_at DESC"
     ).fetchall()
     conn.close()
-    
+
     result = []
     for row in rows:
         assignments = get_assignments_for_counsellor(row["id"])
-        result.append({
-            "id": row["id"],
-            "email": row["email"],
-            "name": row["name"],
-            "status": row["status"],
-            "created_at": row["created_at"],
-            "assigned_student_count": len(assignments),
-        })
+        result.append(
+            {
+                "id": row["id"],
+                "email": row["email"],
+                "name": row["name"],
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "assigned_student_count": len(assignments),
+            }
+        )
     return result
 
 
 @app.patch("/api/admin/counsellors/{counsellor_id}")
-async def update_counsellor(counsellor_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+async def update_counsellor(
+    counsellor_id: str, data: dict, request: Request, user: dict = Depends(require_auth)
+):
     """Update a counsellor's status (admin only)."""
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
     counsellor = get_user_by_id(counsellor_id)
     if not counsellor or counsellor["role_type"] != "counsellor":
         raise HTTPException(404, "Counsellor not found")
-    
+
     new_status = data.get("status")
     if new_status and new_status not in ("approved", "revoked", "suspended"):
         raise HTTPException(400, "Invalid status")
-    
+
     old_status = counsellor.get("status")
     if new_status:
         update_user_role(counsellor_id, "counsellor")  # ensure role stays counsellor
@@ -2397,82 +2982,132 @@ async def update_counsellor(counsellor_id: str, data: dict, request: Request, us
             except Exception:
                 pass
         counsellor = get_user_by_id(counsellor_id)
-        
-        action = "COUNSELLOR_DEACTIVATED" if new_status in ("revoked", "suspended") else "COUNSELLOR_ACTIVATED"
+
+        action = (
+            "COUNSELLOR_DEACTIVATED"
+            if new_status in ("revoked", "suspended")
+            else "COUNSELLOR_ACTIVATED"
+        )
         write_audit(
-            user["id"], "admin", action, "user", counsellor_id,
+            user["id"],
+            "admin",
+            action,
+            "user",
+            counsellor_id,
             payload={"previous_status": old_status, "new_status": new_status},
             ip=_client_ip(request),
         )
-    
+
     return {"ok": True, "counsellor": counsellor}
 
 
 @app.post("/api/admin/assignments")
-async def create_assignment(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def create_assignment(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     """Assign a student to a counsellor (admin only)."""
     scoped_institution = _require_institution_admin(user, data.get("institution_id"))
     counsellor_id = data.get("counsellor_id")
     student_id = data.get("student_id")
-    institution_id = data.get("institution_id")
-    
+    requested_institution_id = data.get("institution_id")
+
     if not counsellor_id or not student_id:
         raise HTTPException(400, "Counsellor ID and student ID are required")
-    
+
     counsellor = get_user_by_id(counsellor_id)
     student = get_user_by_id(student_id)
-    
+
     if not counsellor or counsellor["role_type"] != "counsellor":
         raise HTTPException(404, "Counsellor not found")
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
-    if not institution_id and not scoped_institution:
-        raise HTTPException(400, "institution_id is required")
-    institution_id = scoped_institution or institution_id
-    if counsellor.get("institution_id") != institution_id or student.get("institution_id") != institution_id:
-        raise HTTPException(403, "Counsellor, student, and assignment institution must match")
-    
+
+    # The admin UI selects a counsellor and a roster student, not a raw tenant
+    # ID. Derive the tenant from those server-owned records; request input may
+    # only narrow the authenticated admin's scope.
+    roster_student = get_student_by_user_id(student_id)
+    student_institution_id = student.get("institution_id") or (
+        roster_student.get("institution_id") if roster_student else None
+    )
+    institution_id = (
+        scoped_institution
+        or requested_institution_id
+        or counsellor.get("institution_id")
+        or student_institution_id
+    )
+    if not institution_id:
+        raise HTTPException(
+            400,
+            "The counsellor or student must be linked to an institution before assignment",
+        )
+    if requested_institution_id and requested_institution_id != institution_id:
+        raise HTTPException(
+            403, "Requested institution does not match the assignment context"
+        )
+    if (
+        counsellor.get("institution_id") != institution_id
+        or student_institution_id != institution_id
+    ):
+        raise HTTPException(
+            403, "Counsellor, student, and assignment institution must match"
+        )
+
     assignment = assign_student_to_counsellor(
         counsellor_id, student_id, institution_id, user["id"]
     )
-    
+
     write_audit(
-        user["id"], "admin", "STUDENT_ASSIGNED", "user", student_id,
+        user["id"],
+        "admin",
+        "STUDENT_ASSIGNED",
+        "user",
+        student_id,
         payload={"counsellor_id": counsellor_id, "institution_id": institution_id},
         ip=_client_ip(request),
     )
-    
+
     return {"ok": True, "assignment": assignment}
 
 
 @app.delete("/api/admin/assignments/{assignment_id}")
-async def remove_assignment(assignment_id: str, request: Request, user: dict = Depends(require_auth)):
+async def remove_assignment(
+    assignment_id: str, request: Request, user: dict = Depends(require_auth)
+):
     """Remove a student-counsellor assignment (admin only)."""
     assignment = get_assignment(assignment_id)
     if not assignment:
         raise HTTPException(404, "Assignment not found")
     _require_institution_admin(user, assignment.get("institution_id"))
-    
+
     ok = unassign_student_from_counsellor(assignment_id)
     if not ok:
         raise HTTPException(404, "Assignment not found")
-    
+
     write_audit(
-        user["id"], "admin", "STUDENT_UNASSIGNED", "user", assignment["student_id"],
+        user["id"],
+        "admin",
+        "STUDENT_UNASSIGNED",
+        "user",
+        assignment["student_id"],
         payload={"counsellor_id": assignment["counsellor_id"]},
         ip=_client_ip(request),
     )
-    
+
     return {"ok": True}
 
 
 @app.get("/api/admin/assignments")
-async def list_assignments(counsellor_id: str | None = None, student_id: str | None = None, user: dict = Depends(require_auth)):
+async def list_assignments(
+    counsellor_id: str | None = None,
+    student_id: str | None = None,
+    user: dict = Depends(require_auth),
+):
     """List assignments (admin only)."""
     scoped = _require_institution_scope(user)
-    
+
     if scoped:
         from backend.database import get_db
+
         conn = get_db()
         rows = conn.execute(
             "SELECT csa.*, u_c.name as counsellor_name, u_c.email as counsellor_email, "
@@ -2491,6 +3126,7 @@ async def list_assignments(counsellor_id: str | None = None, student_id: str | N
         assignments = get_assignments_for_student(student_id)
     else:
         from backend.database import get_db
+
         conn = get_db()
         rows = conn.execute(
             "SELECT csa.*, u_c.name as counsellor_name, u_c.email as counsellor_email, "
@@ -2504,11 +3140,12 @@ async def list_assignments(counsellor_id: str | None = None, student_id: str | N
         ).fetchall()
         conn.close()
         assignments = [dict(r) for r in rows]
-    
+
     return assignments
 
 
 # ── Counsellor routes ─────────────────────────────────────────────────
+
 
 @app.get("/api/counsellor/students")
 async def get_counsellor_students(user: dict = Depends(require_auth)):
@@ -2518,7 +3155,9 @@ async def get_counsellor_students(user: dict = Depends(require_auth)):
 
 
 @app.post("/api/counsellor/students/approve")
-async def approve_counsellor_student(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def approve_counsellor_student(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     _require_counsellor(user)
     sid = data.get("id")
     if not sid:
@@ -2529,12 +3168,22 @@ async def approve_counsellor_student(data: dict, request: Request, user: dict = 
     _require_counsellor_student_access(user, sid, require_consent=False)
     # Prevent duplicate emails: only send if status actually changes
     if student.get("status") == "approved":
-        return {"ok": True, "status": "approved", "email_sent": False, "email_error": None,
-                "note": "Student already approved"}
+        return {
+            "ok": True,
+            "status": "approved",
+            "email_sent": False,
+            "email_error": None,
+            "note": "Student already approved",
+        }
     ok = update_student_status(sid, "approved")
     if not ok:
         raise HTTPException(404, "Student not found")
-    _safe_notify(sid, "Account Approved", "Your account has been approved by a counsellor.", "approval")
+    _safe_notify(
+        sid,
+        "Account Approved",
+        "Your account has been approved by a counsellor.",
+        "approval",
+    )
     email_sent, email_error = False, ""
     if student.get("email"):
         context = {
@@ -2545,20 +3194,34 @@ async def approve_counsellor_student(data: dict, request: Request, user: dict = 
         }
         subject, body = student_status_notification(context, approved=True)
         email_sent, email_error = send_html_email(
-            student["email"], subject, body,
-            related_type="student_status", related_id=sid,
+            student["email"],
+            subject,
+            body,
+            related_type="student_status",
+            related_id=sid,
             metadata={"status": "approved"},
         )
     write_audit(
-        user["id"], user["role_type"], "STUDENT_APPROVED", "user", sid,
+        user["id"],
+        user["role_type"],
+        "STUDENT_APPROVED",
+        "user",
+        sid,
         payload={"status": "approved", "email_sent": email_sent},
         ip=_client_ip(request),
     )
-    return {"ok": True, "status": "approved", "email_sent": email_sent, "email_error": email_error or None}
+    return {
+        "ok": True,
+        "status": "approved",
+        "email_sent": email_sent,
+        "email_error": email_error or None,
+    }
 
 
 @app.post("/api/counsellor/students/revoke")
-async def revoke_counsellor_student(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def revoke_counsellor_student(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     _require_counsellor(user)
     sid = data.get("id")
     if not sid:
@@ -2569,12 +3232,19 @@ async def revoke_counsellor_student(data: dict, request: Request, user: dict = D
     _require_counsellor_student_access(user, sid, require_consent=False)
     # Prevent duplicate emails: only send if status actually changes
     if student.get("status") == "revoked":
-        return {"ok": True, "status": "revoked", "email_sent": False, "email_error": None,
-                "note": "Student already revoked"}
+        return {
+            "ok": True,
+            "status": "revoked",
+            "email_sent": False,
+            "email_error": None,
+            "note": "Student already revoked",
+        }
     ok = update_student_status(sid, "revoked")
     if not ok:
         raise HTTPException(404, "Student not found")
-    _safe_notify(sid, "Account Revoked", "Your account access has been revoked.", "general")
+    _safe_notify(
+        sid, "Account Revoked", "Your account access has been revoked.", "general"
+    )
     email_sent, email_error = False, ""
     if student.get("email"):
         context = {
@@ -2584,16 +3254,28 @@ async def revoke_counsellor_student(data: dict, request: Request, user: dict = D
         }
         subject, body = student_status_notification(context, approved=False)
         email_sent, email_error = send_html_email(
-            student["email"], subject, body,
-            related_type="student_status", related_id=sid,
+            student["email"],
+            subject,
+            body,
+            related_type="student_status",
+            related_id=sid,
             metadata={"status": "revoked"},
         )
     write_audit(
-        user["id"], user["role_type"], "STUDENT_REVOKED", "user", sid,
+        user["id"],
+        user["role_type"],
+        "STUDENT_REVOKED",
+        "user",
+        sid,
         payload={"status": "revoked", "email_sent": email_sent},
         ip=_client_ip(request),
     )
-    return {"ok": True, "status": "revoked", "email_sent": email_sent, "email_error": email_error or None}
+    return {
+        "ok": True,
+        "status": "revoked",
+        "email_sent": email_sent,
+        "email_error": email_error or None,
+    }
 
 
 @app.get("/api/counsellor/students/{student_id}")
@@ -2604,6 +3286,7 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
     _require_counsellor_student_access(user, student_id, require_consent=False)
     _require_counsellor_student_access(user, student_id)
     from backend.database import get_analyses
+
     analyses = get_analyses(student_id, limit=50)
     rolling = get_rolling_risk(student_id)
     if analyses:
@@ -2637,8 +3320,11 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
 
 # ── Referrals routes ─────────────────────────────────────────────────
 
+
 @app.get("/api/counsellor/referrals")
-async def get_counsellor_referrals(institution_id: str | None = None, user: dict = Depends(require_auth)):
+async def get_counsellor_referrals(
+    institution_id: str | None = None, user: dict = Depends(require_auth)
+):
     _require_counsellor(user)
     scoped = _require_institution_scope(user, institution_id)
     if user["role_type"] == "admin":
@@ -2649,7 +3335,9 @@ async def get_counsellor_referrals(institution_id: str | None = None, user: dict
 
 
 @app.post("/api/counsellor/referrals")
-async def create_counsellor_referral(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def create_counsellor_referral(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "school_admin", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     student_id = data.get("student_id")
@@ -2670,47 +3358,86 @@ async def create_counsellor_referral(data: dict, request: Request, user: dict = 
             raise HTTPException(403, "Student is outside your institution")
     else:
         _require_counsellor_student_access(user, student_id)
-    referral = create_referral(user["id"], student_id, urgency, notes, destination, follow_up_at)
+    referral = create_referral(
+        user["id"], student_id, urgency, notes, destination, follow_up_at
+    )
     if urgency == "crisis":
         create_alert(student_id, user["id"], 1.0, 0.0, "referral")
-    _safe_notify(student_id, "Referral Created", f"A counsellor has created a {urgency}-urgency referral for you.", "referral")
+    _safe_notify(
+        student_id,
+        "Referral Created",
+        f"A counsellor has created a {urgency}-urgency referral for you.",
+        "referral",
+    )
     write_audit(
-        actor_id=user["id"], actor_role=user["role_type"],
-        action="referral.create", target_type="referral", target_id=referral["id"],
-        payload={"urgency": urgency, "student_id": student_id, "destination": destination, "follow_up_at": follow_up_at},
+        actor_id=user["id"],
+        actor_role=user["role_type"],
+        action="referral.create",
+        target_type="referral",
+        target_id=referral["id"],
+        payload={
+            "urgency": urgency,
+            "student_id": student_id,
+            "destination": destination,
+            "follow_up_at": follow_up_at,
+        },
         ip=request.client.host if request.client else None,
     )
     return referral
 
 
 @app.patch("/api/counsellor/referrals/{referral_id}")
-async def update_counsellor_referral(referral_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+async def update_counsellor_referral(
+    referral_id: str, data: dict, request: Request, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "school_admin", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     status = data.get("status")
     notes = data.get("notes")
-    if status and status not in ("open", "accepted", "in_progress", "completed", "declined", "cancelled"):
+    if status and status not in (
+        "open",
+        "accepted",
+        "in_progress",
+        "completed",
+        "declined",
+        "cancelled",
+    ):
         raise HTTPException(400, "Invalid status")
     existing = get_referral(referral_id)
     if not existing:
         raise HTTPException(404, "Referral not found")
     scoped = _require_institution_scope(user)
-    if scoped and existing.get("student_institution_id", existing.get("institution_id")) not in (None, scoped):
+    if scoped and existing.get(
+        "student_institution_id", existing.get("institution_id")
+    ) not in (None, scoped):
         raise HTTPException(403, "Referral is outside your institution")
     if user["role_type"] == "counsellor" and existing["counsellor_id"] != user["id"]:
         raise HTTPException(403, "You do not own this referral")
     result = update_referral(
-        referral_id, status=status, notes=notes, outcome=data.get("outcome"),
-        follow_up_at=data.get("follow_up_at"), actor_id=user["id"], actor_role=user["role_type"],
+        referral_id,
+        status=status,
+        notes=notes,
+        outcome=data.get("outcome"),
+        follow_up_at=data.get("follow_up_at"),
+        actor_id=user["id"],
+        actor_role=user["role_type"],
         reason=data.get("reason"),
     )
     if not result:
         raise HTTPException(404, "Referral not found")
     if status and status != existing.get("status"):
-        _safe_notify(existing["student_id"], "Referral Update", f"Your referral status has been updated to '{status}'.", "referral")
+        _safe_notify(
+            existing["student_id"],
+            "Referral Update",
+            f"Your referral status has been updated to '{status}'.",
+            "referral",
+        )
     write_audit(
-        actor_id=user["id"], actor_role=user["role_type"],
-        action="referral.update", target_type="referral", target_id=referral_id,
+        actor_id=user["id"],
+        actor_role=user["role_type"],
+        action="referral.update",
+        target_type="referral",
+        target_id=referral_id,
         payload={"status": status, "notes": notes},
         ip=request.client.host if request.client else None,
     )
@@ -2718,6 +3445,7 @@ async def update_counsellor_referral(referral_id: str, data: dict, request: Requ
 
 
 # ── Communications routes ────────────────────────────────────────────
+
 
 @app.get("/api/counsellor/conversations")
 async def get_counsellor_conversations(user: dict = Depends(require_auth)):
@@ -2729,7 +3457,9 @@ async def get_counsellor_conversations(user: dict = Depends(require_auth)):
 
 
 @app.get("/api/counsellor/conversations/{other_id}")
-async def get_counsellor_conversation(other_id: str, user: dict = Depends(require_auth)):
+async def get_counsellor_conversation(
+    other_id: str, user: dict = Depends(require_auth)
+):
     _require_counsellor(user)
     _require_user_communication_access(user, other_id)
     mark_all_read(user["id"], other_id)
@@ -2737,7 +3467,9 @@ async def get_counsellor_conversation(other_id: str, user: dict = Depends(requir
 
 
 @app.post("/api/counsellor/messages")
-async def send_counsellor_message(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def send_counsellor_message(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     _require_counsellor(user)
     receiver_id = data.get("receiver_id")
     message = data.get("message", "").strip()
@@ -2748,10 +3480,17 @@ async def send_counsellor_message(data: dict, request: Request, user: dict = Dep
     _require_user_communication_access(user, receiver_id)
     msg = send_message(user["id"], receiver_id, message)
     if should_notify(receiver_id, "message"):
-        _safe_notify(receiver_id, "New Message", f"New message from {user['name']}", "message")
+        _safe_notify(
+            receiver_id, "New Message", f"New message from {user['name']}", "message"
+        )
     write_audit(
-        user["id"], user["role_type"], "MESSAGE_SENT", "communication", msg["id"],
-        payload={"receiver_id": receiver_id}, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "MESSAGE_SENT",
+        "communication",
+        msg["id"],
+        payload={"receiver_id": receiver_id},
+        ip=_client_ip(request),
     )
     return msg
 
@@ -2760,6 +3499,7 @@ async def send_counsellor_message(data: dict, request: Request, user: dict = Dep
 
 # ── Appointment scheduling routes ────────────────────────────────────
 
+
 def _appointment_actor_can_access(user: dict, appointment: dict) -> None:
     """Require an appointment participant or an administrator."""
     if user["role_type"] == "admin":
@@ -2767,14 +3507,25 @@ def _appointment_actor_can_access(user: dict, appointment: dict) -> None:
     if user["id"] == appointment["student_id"]:
         return
     if user["id"] == appointment["counsellor_id"]:
-        _require_counsellor_student_access(user, appointment["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, appointment["student_id"], require_consent=False
+        )
         return
     raise HTTPException(403, "You do not have access to this appointment")
 
 
 @app.get("/api/appointments")
-async def get_my_appointments(status: str | None = None, user: dict = Depends(require_auth)):
-    if status and status not in {"REQUESTED", "CONFIRMED", "DECLINED", "CANCELLED", "COMPLETED", "NO_SHOW"}:
+async def get_my_appointments(
+    status: str | None = None, user: dict = Depends(require_auth)
+):
+    if status and status not in {
+        "REQUESTED",
+        "CONFIRMED",
+        "DECLINED",
+        "CANCELLED",
+        "COMPLETED",
+        "NO_SHOW",
+    }:
         raise HTTPException(400, "Invalid appointment status")
     if user["role_type"] == "admin":
         return list_appointments(None, status=status)
@@ -2782,7 +3533,9 @@ async def get_my_appointments(status: str | None = None, user: dict = Depends(re
 
 
 @app.post("/api/appointments", status_code=201)
-async def create_new_appointment(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def create_new_appointment(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "school_admin", "admin"):
         raise HTTPException(403, "Only counsellors can schedule appointments")
     student_id = data.get("student_id")
@@ -2799,22 +3552,31 @@ async def create_new_appointment(data: dict, request: Request, user: dict = Depe
     except ValueError as exc:
         raise HTTPException(400, "Invalid appointment date/time") from exc
     if start.tzinfo is None or end.tzinfo is None or end <= start:
-        raise HTTPException(400, "Appointment end must be after its start and include a timezone")
+        raise HTTPException(
+            400, "Appointment end must be after its start and include a timezone"
+        )
     if start <= datetime.now(timezone.utc):
         raise HTTPException(400, "Appointments must be scheduled in the future")
     student = get_user_by_id(student_id)
     if not student or student.get("role_type") != "student":
         raise HTTPException(404, "Student not found")
-    counsellor_id = user["id"] if user["role_type"] != "admin" else data.get("counsellor_id")
+    counsellor_id = (
+        user["id"] if user["role_type"] != "admin" else data.get("counsellor_id")
+    )
     if not counsellor_id:
         raise HTTPException(400, "counsellor_id is required for admin scheduling")
     counsellor = get_user_by_id(counsellor_id)
-    if not counsellor or counsellor.get("role_type") not in ("counsellor", "school_admin"):
+    if not counsellor or counsellor.get("role_type") not in (
+        "counsellor",
+        "school_admin",
+    ):
         raise HTTPException(404, "Counsellor not found")
     if user["role_type"] != "admin":
         _require_counsellor_student_access(user, student_id)
     else:
-        _require_counsellor_student_access(counsellor, student_id, require_consent=False)
+        _require_counsellor_student_access(
+            counsellor, student_id, require_consent=False
+        )
     try:
         appointment = create_appointment(
             student_id=student_id,
@@ -2830,14 +3592,31 @@ async def create_new_appointment(data: dict, request: Request, user: dict = Depe
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    _safe_notify(student_id, "Appointment requested", f"{counsellor.get('name', 'Your counsellor')} proposed a wellbeing appointment.", "appointment")
-    write_audit(user["id"], user["role_type"], "APPOINTMENT_CREATED", "appointment", appointment["id"],
-                payload={"student_id": student_id, "start_at": appointment["start_at"]}, ip=_client_ip(request))
+    _safe_notify(
+        student_id,
+        "Appointment requested",
+        f"{counsellor.get('name', 'Your counsellor')} proposed a wellbeing appointment.",
+        "appointment",
+    )
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "APPOINTMENT_CREATED",
+        "appointment",
+        appointment["id"],
+        payload={"student_id": student_id, "start_at": appointment["start_at"]},
+        ip=_client_ip(request),
+    )
     return appointment
 
 
 @app.patch("/api/appointments/{appointment_id}/status")
-async def change_appointment_status(appointment_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+async def change_appointment_status(
+    appointment_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
     appointment = get_appointment(appointment_id)
     if not appointment:
         raise HTTPException(404, "Appointment not found")
@@ -2847,22 +3626,57 @@ async def change_appointment_status(appointment_id: str, data: dict, request: Re
     allowed = {
         "REQUESTED": {"CONFIRMED", "DECLINED", "CANCELLED"},
         "CONFIRMED": {"CANCELLED", "COMPLETED", "NO_SHOW"},
-        "DECLINED": set(), "CANCELLED": set(), "COMPLETED": set(), "NO_SHOW": set(),
+        "DECLINED": set(),
+        "CANCELLED": set(),
+        "COMPLETED": set(),
+        "NO_SHOW": set(),
     }
     if status not in allowed.get(current, set()):
         raise HTTPException(409, f"Cannot change {current} appointment to {status}")
     if user["role_type"] != "admin":
-        if user["id"] == appointment["student_id"] and status not in {"CONFIRMED", "DECLINED", "CANCELLED"}:
-            raise HTTPException(403, "Students may only confirm, decline, or cancel appointments")
-        if user["id"] == appointment["counsellor_id"] and status not in {"CONFIRMED", "DECLINED", "CANCELLED", "COMPLETED", "NO_SHOW"}:
-            raise HTTPException(403, "Counsellors may not use this appointment transition")
-    updated = update_appointment_status(appointment_id, status, (data.get("reason") or "").strip() or None)
+        if user["id"] == appointment["student_id"] and status not in {
+            "CONFIRMED",
+            "DECLINED",
+            "CANCELLED",
+        }:
+            raise HTTPException(
+                403, "Students may only confirm, decline, or cancel appointments"
+            )
+        if user["id"] == appointment["counsellor_id"] and status not in {
+            "CONFIRMED",
+            "DECLINED",
+            "CANCELLED",
+            "COMPLETED",
+            "NO_SHOW",
+        }:
+            raise HTTPException(
+                403, "Counsellors may not use this appointment transition"
+            )
+    updated = update_appointment_status(
+        appointment_id, status, (data.get("reason") or "").strip() or None
+    )
     if not updated:
         raise HTTPException(404, "Appointment not found")
-    recipient = updated["student_id"] if user["id"] == updated["counsellor_id"] else updated["counsellor_id"]
-    _safe_notify(recipient, "Appointment updated", f"Appointment status: {status.lower().replace('_', ' ')}.", "appointment")
-    write_audit(user["id"], user["role_type"], "APPOINTMENT_STATUS_CHANGED", "appointment", appointment_id,
-                payload={"from": current, "to": status, "reason": data.get("reason")}, ip=_client_ip(request))
+    recipient = (
+        updated["student_id"]
+        if user["id"] == updated["counsellor_id"]
+        else updated["counsellor_id"]
+    )
+    _safe_notify(
+        recipient,
+        "Appointment updated",
+        f"Appointment status: {status.lower().replace('_', ' ')}.",
+        "appointment",
+    )
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "APPOINTMENT_STATUS_CHANGED",
+        "appointment",
+        appointment_id,
+        payload={"from": current, "to": status, "reason": data.get("reason")},
+        ip=_client_ip(request),
+    )
     return updated
 
 
@@ -2874,6 +3688,7 @@ async def get_one_appointment(appointment_id: str, user: dict = Depends(require_
     _appointment_actor_can_access(user, appointment)
     return appointment
 
+
 @app.get("/api/counsellor/dashboard")
 async def counsellor_dashboard(user: dict = Depends(require_auth)):
     if user["role_type"] not in ("counsellor", "admin"):
@@ -2883,6 +3698,7 @@ async def counsellor_dashboard(user: dict = Depends(require_auth)):
 
 
 # ── Notifications routes ─────────────────────────────────────────────
+
 
 @app.get("/api/notifications")
 async def get_user_notifications(user: dict = Depends(require_auth)):
@@ -2902,6 +3718,7 @@ async def mark_user_notification_read(data: dict, user: dict = Depends(require_a
 
 # ── Admin routes ─────────────────────────────────────────────────────
 
+
 @app.get("/api/admin/users")
 async def admin_list_users(user: dict = Depends(require_auth)):
     if user["role_type"] != "admin":
@@ -2909,8 +3726,19 @@ async def admin_list_users(user: dict = Depends(require_auth)):
     return get_all_users()
 
 
+@app.get("/api/admin/individuals")
+async def admin_list_individuals(user: dict = Depends(require_auth)):
+    """List public consumer accounts separately from institution students."""
+    if user["role_type"] != "admin":
+        raise HTTPException(403, "Admin access required")
+    individuals = get_individual_users(limit=1000)
+    return {"individuals": individuals, "total": len(individuals)}
+
+
 @app.post("/api/admin/broadcast")
-async def admin_broadcast(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def admin_broadcast(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
     title = (data.get("title") or "").strip()
@@ -2927,8 +3755,10 @@ async def admin_broadcast(data: dict, request: Request, user: dict = Depends(req
             _safe_notify(u["id"], title, message, "broadcast")
             sent += 1
     write_audit(
-        actor_id=user["id"], actor_role=user["role_type"],
-        action="broadcast.send", target_type="notification",
+        actor_id=user["id"],
+        actor_role=user["role_type"],
+        action="broadcast.send",
+        target_type="notification",
         payload={"title": title, "target_role": target_role, "recipients": sent},
         ip=request.client.host if request.client else None,
     )
@@ -2938,8 +3768,11 @@ async def admin_broadcast(data: dict, request: Request, user: dict = Depends(req
 
 # ── User directory ──────────────────────────────────────────────────
 
+
 @app.get("/api/users/directory")
-async def get_user_directory(role: str | None = None, user: dict = Depends(require_auth)):
+async def get_user_directory(
+    role: str | None = None, user: dict = Depends(require_auth)
+):
     """List users by role for starting conversations.
 
     Any authenticated user may look up peers by name/id, but emails are only
@@ -2951,12 +3784,17 @@ async def get_user_directory(role: str | None = None, user: dict = Depends(requi
     if user["role_type"] == "admin":
         return users
     return [
-        {k: v for k, v in u.items() if k not in ("email", "password_hash", "dob", "parent_email")}
+        {
+            k: v
+            for k, v in u.items()
+            if k not in ("email", "password_hash", "dob", "parent_email")
+        }
         for u in users
     ]
 
 
 # ── Resources routes ─────────────────────────────────────────────────
+
 
 @app.get("/api/resources")
 async def get_resources(user: dict = Depends(require_auth)):
@@ -2977,15 +3815,24 @@ async def get_team():
 # API v1 routes
 # ═════════════════════════════════════════════════════════════════════
 
+
 def _require_counsellor(user: dict) -> None:
     """Raise 403 unless the user holds any staff-level permission."""
-    require_any_permission(user, {
-        PERM_ANALYSIS_RUN, PERM_CONSENT_MANAGE,
-        PERM_ROSTER_UPLOAD, PERM_STUDENTS_VIEW, PERM_DEMO_MANAGE,
-    })
+    require_any_permission(
+        user,
+        {
+            PERM_ANALYSIS_RUN,
+            PERM_CONSENT_MANAGE,
+            PERM_ROSTER_UPLOAD,
+            PERM_STUDENTS_VIEW,
+            PERM_DEMO_MANAGE,
+        },
+    )
 
 
-def _require_institution_scope(user: dict, institution_id: str | None = None) -> str | None:
+def _require_institution_scope(
+    user: dict, institution_id: str | None = None
+) -> str | None:
     """Resolve institution scope from the authenticated principal.
 
     Platform admins may explicitly select a valid institution. All other
@@ -3012,7 +3859,9 @@ def _require_institution_scope(user: dict, institution_id: str | None = None) ->
     return account_institution
 
 
-def _require_institution_admin(user: dict, institution_id: str | None = None) -> str | None:
+def _require_institution_admin(
+    user: dict, institution_id: str | None = None
+) -> str | None:
     if user.get("role_type") not in ("admin", "school_admin"):
         raise HTTPException(403, "Institution administrator access required")
     return _require_institution_scope(user, institution_id)
@@ -3026,14 +3875,19 @@ def _require_counsellor_student_access(
         return
     _require_counsellor(user)
     from backend.database import has_active_assignment, get_user_by_id
+
     if not has_active_assignment(user["id"], student_id):
         raise HTTPException(403, "Student not assigned to you")
     counsellor_inst = user.get("institution_id")
     student = get_user_by_id(student_id)
     student_inst = student.get("institution_id") if student else None
-    if (counsellor_inst or student_inst) and (not counsellor_inst or not student_inst or counsellor_inst != student_inst):
+    if (counsellor_inst or student_inst) and (
+        not counsellor_inst or not student_inst or counsellor_inst != student_inst
+    ):
         raise HTTPException(403, "Student not in your institution")
-    if counsellor_inst and not has_active_assignment(user["id"], student_id, counsellor_inst):
+    if counsellor_inst and not has_active_assignment(
+        user["id"], student_id, counsellor_inst
+    ):
         raise HTTPException(403, "Assignment is not in your institution")
     if require_consent and not has_consent_relationship(student_id, user["id"]):
         raise HTTPException(403, "No active consent for this student")
@@ -3058,11 +3912,19 @@ def _require_user_communication_access(user: dict, other_id: str) -> dict:
         return other
     user_is_parent = user_role == "parent" or user.get("user_category") == "parent"
     other_is_parent = other_role == "parent" or other.get("user_category") == "parent"
-    if user_is_parent and other_role == "student" and other.get("user_category") != "parent":
+    if (
+        user_is_parent
+        and other_role == "student"
+        and other.get("user_category") != "parent"
+    ):
         if other.get("parent_guardian_id") != user["id"]:
             raise HTTPException(403, "Users are not permitted to communicate")
         return other
-    if other_is_parent and user_role == "student" and user.get("user_category") != "parent":
+    if (
+        other_is_parent
+        and user_role == "student"
+        and user.get("user_category") != "parent"
+    ):
         if user.get("parent_guardian_id") != other["id"]:
             raise HTTPException(403, "Users are not permitted to communicate")
         return other
@@ -3078,6 +3940,10 @@ def _communication_allowed(user: dict, other_id: str) -> bool:
 
 
 def _client_ip(request: Request) -> str:
+    if os.getenv("TRUSTED_PROXY", "").strip().lower() in {"1", "true", "yes"}:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip() or "unknown"
     return request.client.host if request.client else "unknown"
 
 
@@ -3086,6 +3952,7 @@ def _client_user_agent(request: Request) -> str | None:
 
 
 # ── Consent management ────────────────────────────────────────────────
+
 
 @app.post("/api/v1/students/{student_id}/consent", status_code=201)
 async def v1_create_and_dispatch_consent(
@@ -3107,15 +3974,26 @@ async def v1_create_and_dispatch_consent(
     recipient_role = data.get("recipient_role", "student")
     if recipient_role not in ("student", "parent"):
         raise HTTPException(400, "recipient_role must be 'student' or 'parent'")
-    if recipient_role == "student" and recipient_email.lower() != str(student.get("email") or "").lower():
-        raise HTTPException(403, "Student consent must be addressed to the student account")
+    if (
+        recipient_role == "student"
+        and recipient_email.lower() != str(student.get("email") or "").lower()
+    ):
+        raise HTTPException(
+            403, "Student consent must be addressed to the student account"
+        )
     if recipient_role == "parent":
         parent_email = str(student.get("parent_email") or "").strip().lower()
         parent = get_user_by_email(recipient_email)
         if not parent_email or recipient_email.lower() != parent_email:
-            raise HTTPException(403, "Parent consent must be addressed to the registered guardian")
-        if student.get("parent_guardian_id") and student.get("parent_guardian_id") != parent.get("id"):
-            raise HTTPException(403, "Parent consent recipient is not the linked guardian")
+            raise HTTPException(
+                403, "Parent consent must be addressed to the registered guardian"
+            )
+        if student.get("parent_guardian_id") and student.get(
+            "parent_guardian_id"
+        ) != parent.get("id"):
+            raise HTTPException(
+                403, "Parent consent recipient is not the linked guardian"
+            )
 
     platforms = data.get("platforms", [])
     mode = data.get("mode", "ON_DEMAND")
@@ -3131,7 +4009,9 @@ async def v1_create_and_dispatch_consent(
             platforms=platforms,
             mode=mode,
         )
-        consent = dispatch_consent(consent["id"], actor_id=user["id"], ip=_client_ip(request))
+        consent = dispatch_consent(
+            consent["id"], actor_id=user["id"], ip=_client_ip(request)
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3139,13 +4019,20 @@ async def v1_create_and_dispatch_consent(
         raise HTTPException(500, "Failed to create consent")
 
     write_audit(
-        user["id"], user["role_type"], "CONSENT_CREATED",
-        "consent", consent["id"],
+        user["id"],
+        user["role_type"],
+        "CONSENT_CREATED",
+        "consent",
+        consent["id"],
         payload={"student_id": student_id, "recipient_email": recipient_email},
         ip=_client_ip(request),
     )
-    _safe_notify(student_id, "Consent Request Sent",
-                 "A consent request has been dispatched to your guardian/student.", "consent")
+    _safe_notify(
+        student_id,
+        "Consent Request Sent",
+        "A consent request has been dispatched to your guardian/student.",
+        "consent",
+    )
     return consent
 
 
@@ -3210,7 +4097,9 @@ async def v1_get_consent(
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
     if user["role_type"] != "admin":
-        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, consent["student_id"], require_consent=False
+        )
     events = get_consent_events(consent_id)
     audit_log = get_audit_log_for_target("consent", consent_id)
     return {"consent": consent, "events": events, "audit_log": audit_log}
@@ -3229,9 +4118,13 @@ async def v1_dispatch_consent(
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
     if user["role_type"] != "admin":
-        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, consent["student_id"], require_consent=False
+        )
     try:
-        updated = dispatch_consent(consent_id, actor_id=user["id"], ip=_client_ip(request))
+        updated = dispatch_consent(
+            consent_id, actor_id=user["id"], ip=_client_ip(request)
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3253,11 +4146,17 @@ async def v1_remind_consent(
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
     if user["role_type"] != "admin":
-        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, consent["student_id"], require_consent=False
+        )
     if consent["status"] not in ("PENDING", "VIEWED"):
-        raise HTTPException(400, f"Cannot send reminder for consent in status {consent['status']}")
+        raise HTTPException(
+            400, f"Cannot send reminder for consent in status {consent['status']}"
+        )
     try:
-        updated = remind_consent(consent_id, actor_id=user["id"], ip=_client_ip(request))
+        updated = remind_consent(
+            consent_id, actor_id=user["id"], ip=_client_ip(request)
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3265,7 +4164,9 @@ async def v1_remind_consent(
         raise HTTPException(500, "Failed to send reminder")
     return {
         "ok": True,
-        "message": "Reminder sent" if updated.get("email_sent") else "Reminder recorded but email was not sent",
+        "message": "Reminder sent"
+        if updated.get("email_sent")
+        else "Reminder recorded but email was not sent",
         "email_sent": updated.get("email_sent", False),
         "email_error": updated.get("email_error", ""),
         "consent_url": updated.get("consent_url", ""),
@@ -3300,7 +4201,9 @@ async def v1_record_consent_decision(
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
     if user["role_type"] != "admin":
-        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, consent["student_id"], require_consent=False
+        )
     decision = (data.get("decision") or "").strip().upper()
     if decision not in ("ACCEPTED", "DECLINED"):
         raise HTTPException(400, "decision must be 'ACCEPTED' or 'DECLINED'")
@@ -3321,7 +4224,9 @@ async def v1_record_consent_decision(
     return {
         "ok": True,
         "status": updated["status"],
-        "email_sent": bool(updated.get("email_sent")) if isinstance(updated, dict) else False,
+        "email_sent": bool(updated.get("email_sent"))
+        if isinstance(updated, dict)
+        else False,
         "consent_url": updated.get("consent_url", ""),
     }
 
@@ -3339,23 +4244,34 @@ async def v1_cancel_consent(
     if consent["counsellor_id"] != user["id"] and user["role_type"] != "admin":
         raise HTTPException(403, "Access denied")
     if user["role_type"] != "admin":
-        _require_counsellor_student_access(user, consent["student_id"], require_consent=False)
+        _require_counsellor_student_access(
+            user, consent["student_id"], require_consent=False
+        )
     if consent["status"] != "PENDING":
-        raise HTTPException(400, f"Only PENDING consents can be cancelled (current: {consent['status']})")
+        raise HTTPException(
+            400,
+            f"Only PENDING consents can be cancelled (current: {consent['status']})",
+        )
     try:
         from backend.database import update_consent_status
+
         updated = update_consent_status(consent_id, "DRAFT")
     except Exception as exc:
         logger.error("cancel_consent error: %s", exc)
         raise HTTPException(500, "Failed to cancel consent")
     write_audit(
-        user["id"], user["role_type"], "CONSENT_CANCELLED",
-        "consent", consent_id, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "CONSENT_CANCELLED",
+        "consent",
+        consent_id,
+        ip=_client_ip(request),
     )
     return updated
 
 
 # ── Consent portal (magic-link, no JWT required) ──────────────────────
+
 
 @app.get("/api/v1/portal/consents/{token}")
 async def v1_portal_get_consent(token: str, request: Request):
@@ -3365,7 +4281,10 @@ async def v1_portal_get_consent(token: str, request: Request):
     if not verify_consent_token(consent, token):
         raise HTTPException(404, "Consent not found or link invalid")
     if remaining_views(consent["id"]) <= 0:
-        raise HTTPException(429, "This consent link has been opened too many times. Please contact your counsellor.")
+        raise HTTPException(
+            429,
+            "This consent link has been opened too many times. Please contact your counsellor.",
+        )
     # Validate magic token expiry
     expires = consent.get("magic_token_expires_at") or ""
     if expires and datetime.now(timezone.utc).isoformat() > expires:
@@ -3373,7 +4292,11 @@ async def v1_portal_get_consent(token: str, request: Request):
     if consent["status"] not in ("PENDING", "VIEWED", "ACCEPTED", "DECLINED"):
         raise HTTPException(410, "This consent link is no longer active")
     try:
-        consent = record_view(consent["id"], ip=_client_ip(request), user_agent=_client_user_agent(request))
+        consent = record_view(
+            consent["id"],
+            ip=_client_ip(request),
+            user_agent=_client_user_agent(request),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3381,9 +4304,20 @@ async def v1_portal_get_consent(token: str, request: Request):
         raise HTTPException(500, "Failed to record view")
     # Strip sensitive fields before returning to unauthenticated recipients
     safe_keys = {
-        "id", "student_id", "recipient_email", "recipient_role", "status",
-        "platforms_json", "mode", "document_version", "dispatched_at",
-        "viewed_at", "accepted_at", "declined_at", "expires_at", "created_at",
+        "id",
+        "student_id",
+        "recipient_email",
+        "recipient_role",
+        "status",
+        "platforms_json",
+        "mode",
+        "document_version",
+        "dispatched_at",
+        "viewed_at",
+        "accepted_at",
+        "declined_at",
+        "expires_at",
+        "created_at",
     }
     return {k: v for k, v in consent.items() if k in safe_keys}
 
@@ -3407,6 +4341,7 @@ async def v1_portal_accept_consent(token: str, data: dict, request: Request):
 
     # Validate platforms and social accounts are within original consent scope
     import json as _json
+
     try:
         original = set(_json.loads(consent.get("platforms_json") or "[]"))
     except Exception:
@@ -3417,7 +4352,11 @@ async def v1_portal_accept_consent(token: str, data: dict, request: Request):
         submitted_set = set(platforms)
         extra = submitted_set - original
         if extra:
-            logger.warning("Consent %s: rejected platforms not in original request: %s", consent["id"], extra)
+            logger.warning(
+                "Consent %s: rejected platforms not in original request: %s",
+                consent["id"],
+                extra,
+            )
             raise HTTPException(400, f"Invalid platforms: {', '.join(sorted(extra))}")
         requested = submitted_set
     else:
@@ -3427,8 +4366,14 @@ async def v1_portal_accept_consent(token: str, data: dict, request: Request):
             raise HTTPException(400, "Invalid social_accounts format")
         extra_sa = set(social_accounts.keys()) - requested
         if extra_sa:
-            logger.warning("Consent %s: rejected social platforms not in request: %s", consent["id"], extra_sa)
-            raise HTTPException(400, f"Invalid platforms: {', '.join(sorted(extra_sa))}")
+            logger.warning(
+                "Consent %s: rejected social platforms not in request: %s",
+                consent["id"],
+                extra_sa,
+            )
+            raise HTTPException(
+                400, f"Invalid platforms: {', '.join(sorted(extra_sa))}"
+            )
 
     try:
         updated = accept_consent(
@@ -3459,7 +4404,12 @@ async def v1_portal_decline_consent(token: str, request: Request):
     if expires and datetime.now(timezone.utc).isoformat() > expires:
         raise HTTPException(410, "This consent link has expired")
     try:
-        updated = decline_consent(consent["id"], ip=_client_ip(request), user_agent=_client_user_agent(request), token=token)
+        updated = decline_consent(
+            consent["id"],
+            ip=_client_ip(request),
+            user_agent=_client_user_agent(request),
+            token=token,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3476,7 +4426,11 @@ async def v1_portal_revoke_consent(token: str, request: Request):
     if not verify_consent_token(consent, token):
         raise HTTPException(404, "Consent not found or link invalid")
     try:
-        updated = revoke_consent(consent["id"], ip=_client_ip(request), user_agent=_client_user_agent(request))
+        updated = revoke_consent(
+            consent["id"],
+            ip=_client_ip(request),
+            user_agent=_client_user_agent(request),
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
@@ -3486,6 +4440,7 @@ async def v1_portal_revoke_consent(token: str, request: Request):
 
 
 # ── Account linking ───────────────────────────────────────────────────
+
 
 @app.get("/api/v1/students/{student_id}/accounts")
 async def v1_list_accounts(student_id: str, user: dict = Depends(require_auth)):
@@ -3524,9 +4479,14 @@ async def v1_create_account(
         if (
             not linked_consent
             or linked_consent.get("student_id") != student_id
-            or (user["role_type"] != "admin" and linked_consent.get("counsellor_id") != user["id"])
+            or (
+                user["role_type"] != "admin"
+                and linked_consent.get("counsellor_id") != user["id"]
+            )
         ):
-            raise HTTPException(403, "Consent does not belong to this student and counsellor")
+            raise HTTPException(
+                403, "Consent does not belong to this student and counsellor"
+            )
 
     try:
         account = create_linked_account(student_id, consent_id, platform, mode, handle)
@@ -3535,8 +4495,11 @@ async def v1_create_account(
         raise HTTPException(500, "Failed to link account")
 
     write_audit(
-        user["id"], user["role_type"], "ACCOUNT_LINKED",
-        "linked_account", account["id"],
+        user["id"],
+        user["role_type"],
+        "ACCOUNT_LINKED",
+        "linked_account",
+        account["id"],
         payload={"student_id": student_id, "platform": platform},
         ip=_client_ip(request),
     )
@@ -3560,8 +4523,11 @@ async def v1_delete_account(
         raise HTTPException(404, "Linked account not found")
 
     write_audit(
-        user["id"], user["role_type"], "ACCOUNT_REVOKED",
-        "linked_account", account_id,
+        user["id"],
+        user["role_type"],
+        "ACCOUNT_REVOKED",
+        "linked_account",
+        account_id,
         payload={"student_id": student_id},
         ip=_client_ip(request),
     )
@@ -3569,6 +4535,7 @@ async def v1_delete_account(
 
 
 # ── Alert queue ───────────────────────────────────────────────────────
+
 
 @app.get("/api/v1/alerts")
 async def v1_list_alerts(
@@ -3578,7 +4545,14 @@ async def v1_list_alerts(
 ):
     _require_counsellor(user)
     scoped = _require_institution_scope(user, institution_id)
-    valid_statuses = {"OPEN", "ACKNOWLEDGED", "ESCALATED", "IN_PROGRESS", "CLOSED", "FALSE_POSITIVE"}
+    valid_statuses = {
+        "OPEN",
+        "ACKNOWLEDGED",
+        "ESCALATED",
+        "IN_PROGRESS",
+        "CLOSED",
+        "FALSE_POSITIVE",
+    }
     filter_status = status.upper() if status.upper() in valid_statuses else None
     alerts = get_alerts(
         None if user["role_type"] in ("admin", "school_admin") else user["id"],
@@ -3601,12 +4575,12 @@ async def v1_dispose_alert(
     _require_counsellor(user)
     action = (data.get("action") or "").strip().upper()
     if action not in _VALID_DISPOSITIONS:
-        raise HTTPException(400, f"action must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}")
+        raise HTTPException(
+            400, f"action must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}"
+        )
 
     reason_code = (data.get("reason_code") or "").strip()
     reason_note = (data.get("reason_note") or "").strip()
-    supersedes_id = data.get("supersedes_id")
-
     alert = get_alert_by_id(alert_id)
     if not alert:
         raise HTTPException(404, "Alert not found")
@@ -3627,7 +4601,9 @@ async def v1_dispose_alert(
             "REACH_OUT": "IN_PROGRESS",
             "SCHEDULE_CHECKIN": "IN_PROGRESS",
         }[action]
-        result = transition_alert(alert_id, workflow_status, user["id"], reason_note or reason_code)
+        result = transition_alert(
+            alert_id, workflow_status, user["id"], reason_note or reason_code
+        )
     except Exception as exc:
         logger.error("dispose_alert error: %s", exc)
         raise HTTPException(500, "Failed to dispose alert")
@@ -3636,8 +4612,11 @@ async def v1_dispose_alert(
         raise HTTPException(404, "Alert not found")
 
     write_audit(
-        user["id"], user["role_type"], "ALERT_DISPOSITIONED",
-        "alert", alert_id,
+        user["id"],
+        user["role_type"],
+        "ALERT_DISPOSITIONED",
+        "alert",
+        alert_id,
         payload={"action": action, "reason_code": reason_code},
         ip=_client_ip(request),
     )
@@ -3645,6 +4624,7 @@ async def v1_dispose_alert(
 
 
 # ── Risk timeline ─────────────────────────────────────────────────────
+
 
 @app.get("/api/v1/students/{student_id}/timeline")
 async def v1_student_timeline(student_id: str, user: dict = Depends(require_auth)):
@@ -3654,8 +4634,13 @@ async def v1_student_timeline(student_id: str, user: dict = Depends(require_auth
     _require_counsellor_student_access(user, student_id)
 
     history = get_rolling_risk_history(student_id)
-    alerts = get_alerts(None if user.get("role_type") == "admin" else user["id"], status=None,
-                        institution_id=user.get("institution_id") if user.get("role_type") != "admin" else None)
+    alerts = get_alerts(
+        None if user.get("role_type") == "admin" else user["id"],
+        status=None,
+        institution_id=user.get("institution_id")
+        if user.get("role_type") != "admin"
+        else None,
+    )
     student_alerts = [a for a in alerts if a["student_id"] == student_id]
 
     return {
@@ -3677,6 +4662,7 @@ async def v1_student_timeline(student_id: str, user: dict = Depends(require_auth
 
 
 # ── Notes ─────────────────────────────────────────────────────────────
+
 
 @app.get("/api/v1/students/{student_id}/notes")
 async def v1_list_notes(student_id: str, user: dict = Depends(require_auth)):
@@ -3711,8 +4697,11 @@ async def v1_create_note(
         raise HTTPException(500, "Failed to create note")
 
     write_audit(
-        user["id"], user["role_type"], "NOTE_CREATED",
-        "note", note["id"],
+        user["id"],
+        user["role_type"],
+        "NOTE_CREATED",
+        "note",
+        note["id"],
         payload={"student_id": student_id},
         ip=_client_ip(request),
     )
@@ -3720,6 +4709,7 @@ async def v1_create_note(
 
 
 # ── Audit log ─────────────────────────────────────────────────────────
+
 
 @app.get("/api/v1/audit")
 async def v1_audit_log(limit: int = 100, user: dict = Depends(require_auth)):
@@ -3731,6 +4721,7 @@ async def v1_audit_log(limit: int = 100, user: dict = Depends(require_auth)):
 
 
 # ── Roster & school-admin (Delivery Brief §5) ─────────────────────────
+
 
 @app.post("/api/v1/admin/roster/upload")
 async def v1_admin_roster_upload(
@@ -3752,11 +4743,21 @@ async def v1_admin_roster_upload(
         minor_age = int(inst.get("minor_age_threshold") or 18)
     except (TypeError, ValueError):
         minor_age = 18
-    summary = upsert_roster(institution_id, raw, user["id"], minor_age_threshold=minor_age)
+    summary = upsert_roster(
+        institution_id, raw, user["id"], minor_age_threshold=minor_age
+    )
     write_audit(
-        user["id"], user["role_type"], "ROSTER_UPLOAD", "institution", institution_id,
-        payload={"created": summary["created"], "updated": summary["updated"],
-                 "errors": len(summary["errors"]), "total": summary["total"]},
+        user["id"],
+        user["role_type"],
+        "ROSTER_UPLOAD",
+        "institution",
+        institution_id,
+        payload={
+            "created": summary["created"],
+            "updated": summary["updated"],
+            "errors": len(summary["errors"]),
+            "total": summary["total"],
+        },
     )
     return summary
 
@@ -3788,19 +4789,29 @@ async def v1_admin_roster_commit(
         minor_age = int(inst.get("minor_age_threshold") or 18)
     except (TypeError, ValueError):
         minor_age = 18
-    summary = upsert_roster(institution_id, raw, user["id"], minor_age_threshold=minor_age)
+    summary = upsert_roster(
+        institution_id, raw, user["id"], minor_age_threshold=minor_age
+    )
     student_ids = summary.get("student_ids") or []
     students = [s for s in (get_student_by_id(i) for i in student_ids) if s]
     dispatch = dispatch_consents_for_students(
         students, user["id"], ip=_client_ip(request)
     )
     write_audit(
-        user["id"], user["role_type"], "ROSTER_COMMIT", "institution", institution_id,
-        payload={"created": summary["created"], "updated": summary["updated"],
-                 "errors": len(summary["errors"]), "total": summary["total"],
-                 "consents_dispatched": dispatch["dispatched"],
-                 "consents_queued": dispatch["email_queued"],
-                 "skipped_no_parent": dispatch["skipped_no_parent"]},
+        user["id"],
+        user["role_type"],
+        "ROSTER_COMMIT",
+        "institution",
+        institution_id,
+        payload={
+            "created": summary["created"],
+            "updated": summary["updated"],
+            "errors": len(summary["errors"]),
+            "total": summary["total"],
+            "consents_dispatched": dispatch["dispatched"],
+            "consents_queued": dispatch["email_queued"],
+            "skipped_no_parent": dispatch["skipped_no_parent"],
+        },
     )
     return {"roster": summary, "dispatch": dispatch}
 
@@ -3822,15 +4833,17 @@ async def v1_admin_list_students(
         consent = None
         if s.get("current_consent_id"):
             consent = get_consent_by_id(s["current_consent_id"])
-        out.append({
-            "id": s["id"],
-            "student_id_hash": s["student_id_hash"],
-            "name": decrypt_pii(s["first_name_encrypted"]),
-            "email": decrypt_pii(s["email_encrypted"]),
-            "is_minor": bool(s["is_minor"]),
-            "grade_level": s["grade_level"],
-            "consent_status": consent["status"] if consent else None,
-        })
+        out.append(
+            {
+                "id": s["id"],
+                "student_id_hash": s["student_id_hash"],
+                "name": decrypt_pii(s["first_name_encrypted"]),
+                "email": decrypt_pii(s["email_encrypted"]),
+                "is_minor": bool(s["is_minor"]),
+                "grade_level": s["grade_level"],
+                "consent_status": consent["status"] if consent else None,
+            }
+        )
     return {"students": out, "total": len(out)}
 
 
@@ -3840,11 +4853,10 @@ async def available_students(user: dict = Depends(require_auth)):
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
     from backend.database import get_db
+
     conn = get_db()
-    # Get all approved students from users table
-    all_students = conn.execute(
-        "SELECT id, email, name, role_type, status FROM users WHERE role_type = 'student' AND status = 'approved' ORDER BY name"
-    ).fetchall()
+    # Only institution-managed students are eligible for assignment.
+    all_students = [s for s in get_students(limit=10000) if s["status"] == "approved"]
     assigned_ids = set()
     # Get all active assignments to find which students are already assigned
     rows = conn.execute(
@@ -3854,13 +4866,15 @@ async def available_students(user: dict = Depends(require_auth)):
     out = []
     for s in all_students:
         if s["id"] not in assigned_ids:
-            out.append({
-                "id": s["id"],
-                "email": s["email"],
-                "name": s["name"],
-                "role_type": s["role_type"],
-                "status": s["status"],
-            })
+            out.append(
+                {
+                    "id": s["id"],
+                    "email": s["email"],
+                    "name": s["name"],
+                    "role_type": s["role_type"],
+                    "status": s["status"],
+                }
+            )
     conn.close()
     return {"students": out, "total": len(out)}
 
@@ -3872,17 +4886,19 @@ async def v1_admin_list_institutions(user: dict = Depends(require_auth)):
     insts = list_institutions()
     if scoped:
         insts = [i for i in insts if i["id"] == scoped]
-    return {"institutions": [
-        {
-            "id": i["id"],
-            "name": i["name"],
-            "type": i.get("type"),
-            "minor_age_threshold": i.get("minor_age_threshold", 18),
-            "consent_reminder_days": i.get("consent_reminder_days", "[3,7]"),
-            "consent_expiry_days": i.get("consent_expiry_days", 30),
-        }
-        for i in insts
-    ]}
+    return {
+        "institutions": [
+            {
+                "id": i["id"],
+                "name": i["name"],
+                "type": i.get("type"),
+                "minor_age_threshold": i.get("minor_age_threshold", 18),
+                "consent_reminder_days": i.get("consent_reminder_days", "[3,7]"),
+                "consent_expiry_days": i.get("consent_expiry_days", 30),
+            }
+            for i in insts
+        ]
+    }
 
 
 @app.post("/api/v1/admin/institutions", status_code=201)
@@ -3901,8 +4917,11 @@ async def v1_admin_create_institution(
         raise HTTPException(400, "Institution name is too long")
     institution = create_institution(name, inst_type, created_by=user["id"])
     write_audit(
-        user["id"], user["role_type"], "INSTITUTION_CREATED",
-        "institution", institution["id"],
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_CREATED",
+        "institution",
+        institution["id"],
         payload={"type": inst_type},
         ip=_client_ip(request),
     )
@@ -3926,8 +4945,15 @@ async def v1_admin_update_institution(
         raise HTTPException(400, "Invalid institution status")
     updates = {key: data[key] for key in ("name", "type", "status") if key in data}
     updated = update_institution(institution_id, **updates)
-    write_audit(user["id"], user["role_type"], "INSTITUTION_UPDATED", "institution", institution_id,
-                payload={"fields": sorted(updates)}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_UPDATED",
+        "institution",
+        institution_id,
+        payload={"fields": sorted(updates)},
+        ip=_client_ip(request),
+    )
     return updated
 
 
@@ -3939,6 +4965,7 @@ async def institution_workspace(user: dict = Depends(require_auth)):
     institution = get_institution_by_id(institution_id)
     students = list_students(institution_id=institution_id, limit=1000)
     from backend.database import get_db
+
     conn = get_db()
     staff_count = conn.execute(
         "SELECT COUNT(*) FROM users WHERE institution_id = ? AND role_type IN ('counsellor', 'school_admin') AND status = 'approved'",
@@ -3968,31 +4995,63 @@ async def get_institution_settings(user: dict = Depends(require_auth)):
 
 
 @app.patch("/api/institution/settings")
-async def patch_institution_settings(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def patch_institution_settings(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     institution_id = _require_institution_admin(user)
     if not institution_id:
         raise HTTPException(400, "An institution context is required")
     allowed = {
-        "name", "type", "retention_days", "alert_threshold", "confidence_floor",
-        "minor_age_threshold", "consent_template_id", "consent_reminder_days", "consent_expiry_days",
+        "name",
+        "type",
+        "retention_days",
+        "alert_threshold",
+        "confidence_floor",
+        "minor_age_threshold",
+        "consent_template_id",
+        "consent_reminder_days",
+        "consent_expiry_days",
     }
     updates = {key: data[key] for key in allowed if key in data}
-    if "retention_days" in updates and (not isinstance(updates["retention_days"], int) or not 1 <= updates["retention_days"] <= 3650):
+    if "retention_days" in updates and (
+        not isinstance(updates["retention_days"], int)
+        or not 1 <= updates["retention_days"] <= 3650
+    ):
         raise HTTPException(400, "retention_days must be between 1 and 3650")
-    if "alert_threshold" in updates and (not isinstance(updates["alert_threshold"], (int, float)) or not 0 <= updates["alert_threshold"] <= 1):
+    if "alert_threshold" in updates and (
+        not isinstance(updates["alert_threshold"], (int, float))
+        or not 0 <= updates["alert_threshold"] <= 1
+    ):
         raise HTTPException(400, "alert_threshold must be between 0 and 1")
-    if "confidence_floor" in updates and (not isinstance(updates["confidence_floor"], (int, float)) or not 0 <= updates["confidence_floor"] <= 1):
+    if "confidence_floor" in updates and (
+        not isinstance(updates["confidence_floor"], (int, float))
+        or not 0 <= updates["confidence_floor"] <= 1
+    ):
         raise HTTPException(400, "confidence_floor must be between 0 and 1")
-    if "consent_expiry_days" in updates and (not isinstance(updates["consent_expiry_days"], int) or not 1 <= updates["consent_expiry_days"] <= 365):
+    if "consent_expiry_days" in updates and (
+        not isinstance(updates["consent_expiry_days"], int)
+        or not 1 <= updates["consent_expiry_days"] <= 365
+    ):
         raise HTTPException(400, "consent_expiry_days must be between 1 and 365")
     if "consent_reminder_days" in updates:
         reminders = updates["consent_reminder_days"]
-        if not isinstance(reminders, list) or any(not isinstance(day, int) or day < 1 for day in reminders):
-            raise HTTPException(400, "consent_reminder_days must be a list of positive integers")
+        if not isinstance(reminders, list) or any(
+            not isinstance(day, int) or day < 1 for day in reminders
+        ):
+            raise HTTPException(
+                400, "consent_reminder_days must be a list of positive integers"
+            )
         updates["consent_reminder_days"] = json.dumps(reminders)
     updated = update_institution(institution_id, **updates)
-    write_audit(user["id"], user["role_type"], "INSTITUTION_SETTINGS_UPDATED", "institution", institution_id,
-                payload={"fields": sorted(updates)}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_SETTINGS_UPDATED",
+        "institution",
+        institution_id,
+        payload={"fields": sorted(updates)},
+        ip=_client_ip(request),
+    )
     return updated
 
 
@@ -4002,6 +5061,7 @@ async def list_institution_staff(user: dict = Depends(require_auth)):
     if not institution_id:
         raise HTTPException(400, "Global admins must select an institution context")
     from backend.database import get_db
+
     conn = get_db()
     rows = conn.execute(
         "SELECT id, email, name, role_type, status, institution_id, created_at FROM users "
@@ -4025,6 +5085,7 @@ async def list_institution_consents(
     if limit < 1 or limit > 1000 or offset < 0:
         raise HTTPException(400, "Invalid pagination")
     from backend.database import get_db
+
     conn = get_db()
     clauses = ["u.institution_id = ?"]
     params: list[Any] = [institution_id]
@@ -4057,6 +5118,7 @@ async def list_institution_audit(limit: int = 100, user: dict = Depends(require_
     if limit < 1 or limit > 1000:
         raise HTTPException(400, "limit must be between 1 and 1000")
     from backend.database import get_db
+
     conn = get_db()
     rows = conn.execute(
         "SELECT a.* FROM audit_log a JOIN users u ON u.id = a.actor_id "
@@ -4068,7 +5130,9 @@ async def list_institution_audit(limit: int = 100, user: dict = Depends(require_
 
 
 @app.post("/api/institution/students/{student_id}/archive")
-async def archive_institution_student(student_id: str, request: Request, user: dict = Depends(require_auth)):
+async def archive_institution_student(
+    student_id: str, request: Request, user: dict = Depends(require_auth)
+):
     institution_id = _require_institution_admin(user)
     if not institution_id:
         raise HTTPException(400, "An institution context is required")
@@ -4080,27 +5144,41 @@ async def archive_institution_student(student_id: str, request: Request, user: d
     if not archive_student(student["id"]):
         raise HTTPException(404, "Student not found")
     write_audit(
-        user["id"], user["role_type"], "STUDENT_ARCHIVED", "student", student["id"],
-        payload={"institution_id": institution_id}, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "STUDENT_ARCHIVED",
+        "student",
+        student["id"],
+        payload={"institution_id": institution_id},
+        ip=_client_ip(request),
     )
     return {"ok": True, "student_id": student["id"], "archived": True}
 
 
 @app.post("/api/institution/retention/run")
-async def run_institution_retention(request: Request, user: dict = Depends(require_auth)):
+async def run_institution_retention(
+    request: Request, user: dict = Depends(require_auth)
+):
     institution_id = _require_institution_admin(user)
     if not institution_id:
         raise HTTPException(400, "An institution context is required")
     result = await asyncio.to_thread(run_retention_cleanup, institution_id)
     write_audit(
-        user["id"], user["role_type"], "RETENTION_CLEANUP_RUN", "institution", institution_id,
-        payload=result, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "RETENTION_CLEANUP_RUN",
+        "institution",
+        institution_id,
+        payload=result,
+        ip=_client_ip(request),
     )
     return result
 
 
 @app.post("/api/institution/staff", status_code=201)
-async def invite_institution_staff(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def invite_institution_staff(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     institution_id = _require_institution_admin(user)
     if not institution_id:
         raise HTTPException(400, "An institution context is required")
@@ -4115,10 +5193,21 @@ async def invite_institution_staff(data: dict, request: Request, user: dict = De
     if existing:
         raise HTTPException(409, "A user with this email already exists")
     placeholder_hash = hash_password(secrets.token_urlsafe(32))
-    staff = create_user(email, name, placeholder_hash, role_type=role_type, institution_id=institution_id)
+    staff = create_user(
+        email,
+        name,
+        placeholder_hash,
+        role_type=role_type,
+        institution_id=institution_id,
+    )
     from backend.services.crypto import hash_token
+
     token = secrets.token_urlsafe(32)
-    set_user_invitation(staff["id"], hash_token(token), (datetime.now(timezone.utc) + timedelta(days=7)).isoformat())
+    set_user_invitation(
+        staff["id"],
+        hash_token(token),
+        (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    )
     institution = get_institution_by_id(institution_id) or {}
     base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
     invite_url = f"{base}/invite?token={token}"
@@ -4134,21 +5223,51 @@ async def invite_institution_staff(data: dict, request: Request, user: dict = De
     }
     subject, body = counsellor_invitation_notification(context)
     email_sent, email_error = send_html_email(
-        email, subject, body, related_type="institution_staff_invitation", related_id=staff["id"],
+        email,
+        subject,
+        body,
+        related_type="institution_staff_invitation",
+        related_id=staff["id"],
         metadata={"role_type": role_type, "institution_id": institution_id},
     )
-    write_audit(user["id"], user["role_type"], "INSTITUTION_STAFF_INVITED", "user", staff["id"],
-                payload={"role_type": role_type, "institution_id": institution_id, "email_sent": email_sent}, ip=_client_ip(request))
-    return {"staff": {**staff, "status": "pending", "institution_id": institution_id, "role_type": role_type}, "email_sent": email_sent, "email_error": email_error or None}
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_STAFF_INVITED",
+        "user",
+        staff["id"],
+        payload={
+            "role_type": role_type,
+            "institution_id": institution_id,
+            "email_sent": email_sent,
+        },
+        ip=_client_ip(request),
+    )
+    return {
+        "staff": {
+            **staff,
+            "status": "pending",
+            "institution_id": institution_id,
+            "role_type": role_type,
+        },
+        "email_sent": email_sent,
+        "email_error": email_error or None,
+    }
 
 
 @app.patch("/api/institution/staff/{staff_id}")
-async def update_institution_staff(staff_id: str, data: dict, request: Request, user: dict = Depends(require_auth)):
+async def update_institution_staff(
+    staff_id: str, data: dict, request: Request, user: dict = Depends(require_auth)
+):
     institution_id = _require_institution_admin(user)
     if not institution_id:
         raise HTTPException(400, "An institution context is required")
     staff = get_user_by_id(staff_id)
-    if not staff or staff.get("institution_id") != institution_id or staff.get("role_type") not in ("counsellor", "school_admin"):
+    if (
+        not staff
+        or staff.get("institution_id") != institution_id
+        or staff.get("role_type") not in ("counsellor", "school_admin")
+    ):
         raise HTTPException(404, "Staff member not found")
     new_status = data.get("status")
     if new_status not in ("approved", "suspended", "revoked"):
@@ -4156,18 +5275,30 @@ async def update_institution_staff(staff_id: str, data: dict, request: Request, 
     update_user_status(staff_id, new_status)
     if new_status in ("suspended", "revoked"):
         from backend.database import get_db
+
         conn = get_db()
-        assignments = conn.execute("SELECT id FROM counsellor_student_assignments WHERE counsellor_id = ? AND active = 1", (staff_id,)).fetchall()
+        assignments = conn.execute(
+            "SELECT id FROM counsellor_student_assignments WHERE counsellor_id = ? AND active = 1",
+            (staff_id,),
+        ).fetchall()
         conn.close()
         for assignment in assignments:
             unassign_student_from_counsellor(assignment["id"])
     updated = get_user_by_id(staff_id)
-    write_audit(user["id"], user["role_type"], "INSTITUTION_STAFF_STATUS_CHANGED", "user", staff_id,
-                payload={"status": new_status, "institution_id": institution_id}, ip=_client_ip(request))
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_STAFF_STATUS_CHANGED",
+        "user",
+        staff_id,
+        payload={"status": new_status, "institution_id": institution_id},
+        ip=_client_ip(request),
+    )
     return updated
 
 
 # ── Consent maintenance (manual trigger) ──────────────────────────────
+
 
 @app.post("/api/v1/admin/consents/run-maintenance")
 async def v1_admin_run_consent_maintenance(user: dict = Depends(require_auth)):
@@ -4195,7 +5326,9 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
 
     _check_rate_limit(f"demo:{client_ip}", max_requests=5, window=3600)
     if not data.consent_to_contact:
-        raise HTTPException(400, "Consent to contact is required to submit a demo request")
+        raise HTTPException(
+            400, "Consent to contact is required to submit a demo request"
+        )
     try:
         demo = create_demo_request(
             full_name=data.full_name.strip(),
@@ -4222,7 +5355,9 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
         metadata={"event": "confirmation"},
     )
     if not ok:
-        logger.warning("demo confirmation email failed for %s: %s", data.work_email, err)
+        logger.warning(
+            "demo confirmation email failed for %s: %s", data.work_email, err
+        )
 
     notify_to = DEMO_NOTIFY_EMAIL.strip()
     if notify_to:
@@ -4237,21 +5372,29 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
             logger.warning("demo notification email failed to %s: %s", notify_to, err)
 
     write_audit(
-        None, "public", "DEMO_REQUEST_CREATED", "demo_request", demo["id"],
+        None,
+        "public",
+        "DEMO_REQUEST_CREATED",
+        "demo_request",
+        demo["id"],
         ip=client_ip,
     )
 
     def _composio_demo_fastlane():
         try:
             from backend.services.composio_fastlane import trigger_demo_fastlane
+
             trigger_demo_fastlane(demo)
         except Exception as e:
             logger.warning("composio demo fastlane failed for %s: %s", demo["id"], e)
 
     try:
         import asyncio as _asyncio
+
         try:
-            _asyncio.get_running_loop().create_task(_asyncio.to_thread(_composio_demo_fastlane))
+            _asyncio.get_running_loop().create_task(
+                _asyncio.to_thread(_composio_demo_fastlane)
+            )
         except RuntimeError:
             _composio_demo_fastlane()
     except Exception:
@@ -4269,13 +5412,15 @@ def _demo_calendar_url(demo: dict) -> str:
     end = start + timedelta(minutes=30)
     dates = f"{start.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}/{end.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     details = f"MindGuard institution onboarding meeting. Join: {demo.get('meeting_url') or ''}"
-    return "https://calendar.google.com/calendar/render?" + urlencode({
-        "action": "TEMPLATE",
-        "text": f"MindGuard onboarding — {demo.get('organisation') or 'Institution'}",
-        "dates": dates,
-        "details": details,
-        "location": demo.get("meeting_url") or "",
-    })
+    return "https://calendar.google.com/calendar/render?" + urlencode(
+        {
+            "action": "TEMPLATE",
+            "text": f"MindGuard onboarding — {demo.get('organisation') or 'Institution'}",
+            "dates": dates,
+            "details": details,
+            "location": demo.get("meeting_url") or "",
+        }
+    )
 
 
 @app.post("/api/v1/admin/demo-requests/{demo_request_id}/schedule")
@@ -4300,6 +5445,7 @@ async def v1_admin_schedule_demo(
         raise HTTPException(400, "meeting_at must be a valid ISO date")
 
     from backend.services.crypto import hash_token
+
     response_token = secrets.token_urlsafe(32)
     updated = update_demo_request(
         demo_request_id,
@@ -4313,7 +5459,9 @@ async def v1_admin_schedule_demo(
     updated = updated or demo
     public_base = os.getenv("PUBLIC_SITE_URL", "https://mindguardai.me").rstrip("/")
     accept_url = f"{public_base}/demo/respond?token={response_token}&action=accept"
-    reschedule_url = f"{public_base}/demo/respond?token={response_token}&action=reschedule"
+    reschedule_url = (
+        f"{public_base}/demo/respond?token={response_token}&action=reschedule"
+    )
     calendar_url = _demo_calendar_url(updated)
     recipient = html_lib.escape(updated.get("work_email") or "")
     name = html_lib.escape(updated.get("full_name") or "there")
@@ -4327,20 +5475,34 @@ async def v1_admin_schedule_demo(
     <p>If you request a change, our team will contact you to agree another slot.</p>
     """
     email_sent, email_error = send_html_email(
-        recipient, "MindGuard onboarding meeting invitation", body,
-        related_type="demo_meeting_invitation", related_id=demo_request_id,
+        recipient,
+        "MindGuard onboarding meeting invitation",
+        body,
+        related_type="demo_meeting_invitation",
+        related_id=demo_request_id,
         metadata={"meeting_at": meeting_at, "meeting_url": meeting_url},
     )
     write_audit(
-        user["id"], user["role_type"], "DEMO_MEETING_SCHEDULED", "demo_request", demo_request_id,
-        payload={"meeting_at": meeting_at, "email_sent": email_sent}, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "DEMO_MEETING_SCHEDULED",
+        "demo_request",
+        demo_request_id,
+        payload={"meeting_at": meeting_at, "email_sent": email_sent},
+        ip=_client_ip(request),
     )
-    return {"demo_request": updated, "calendar_url": calendar_url, "email_sent": email_sent, "email_error": email_error or None}
+    return {
+        "demo_request": updated,
+        "calendar_url": calendar_url,
+        "email_sent": email_sent,
+        "email_error": email_error or None,
+    }
 
 
 @app.get("/api/v1/demo-requests/respond")
 async def demo_meeting_response_details(token: str):
     from backend.services.crypto import hash_token
+
     demo = get_demo_request_by_response_token(hash_token(token))
     if not demo:
         raise HTTPException(404, "This meeting invitation is no longer valid")
@@ -4356,6 +5518,7 @@ async def demo_meeting_response_details(token: str):
 @app.post("/api/v1/demo-requests/respond")
 async def respond_to_demo_meeting(token: str, data: dict, request: Request):
     from backend.services.crypto import hash_token
+
     demo = get_demo_request_by_response_token(hash_token(token))
     if not demo:
         raise HTTPException(404, "This meeting invitation is no longer valid")
@@ -4365,18 +5528,26 @@ async def respond_to_demo_meeting(token: str, data: dict, request: Request):
     response = "ACCEPTED" if action == "accept" else "RESCHEDULE_REQUESTED"
     note = (data.get("note") or "").strip()[:2000] or None
     updated = update_demo_request(
-        demo["id"], meeting_response=response, meeting_response_note=note,
+        demo["id"],
+        meeting_response=response,
+        meeting_response_note=note,
     )
     write_audit(
-        None, "public", "DEMO_MEETING_RESPONSE", "demo_request", demo["id"],
-        payload={"response": response, "has_note": bool(note)}, ip=_client_ip(request),
+        None,
+        "public",
+        "DEMO_MEETING_RESPONSE",
+        "demo_request",
+        demo["id"],
+        payload={"response": response, "has_note": bool(note)},
+        ip=_client_ip(request),
     )
     if response == "RESCHEDULE_REQUESTED" and DEMO_NOTIFY_EMAIL:
         send_html_email(
             DEMO_NOTIFY_EMAIL,
             "MindGuard demo reschedule requested",
             f"The requester for {html_lib.escape(demo.get('organisation') or 'an institution')} requested a new meeting time.<br><br>{html_lib.escape(note or 'No reason provided.')}",
-            related_type="demo_meeting_reschedule", related_id=demo["id"],
+            related_type="demo_meeting_reschedule",
+            related_id=demo["id"],
         )
     return {"ok": True, "meeting_response": response, "demo_request": updated}
 
@@ -4406,10 +5577,15 @@ async def v1_admin_update_demo_request(
     existing = get_demo_request(demo_request_id)
     if not existing:
         raise HTTPException(404, "Demo request not found")
-    updated = update_demo_request(demo_request_id, **data.model_dump(exclude_unset=True))
+    updated = update_demo_request(
+        demo_request_id, **data.model_dump(exclude_unset=True)
+    )
     write_audit(
-        user["id"], user["role_type"], "DEMO_REQUEST_UPDATED",
-        "demo_request", demo_request_id,
+        user["id"],
+        user["role_type"],
+        "DEMO_REQUEST_UPDATED",
+        "demo_request",
+        demo_request_id,
         payload={k: v for k, v in data.model_dump(exclude_unset=True).items()},
         ip=_client_ip(request),
     )
@@ -4429,11 +5605,15 @@ async def v1_admin_convert_demo_request(
     if not demo:
         raise HTTPException(404, "Demo request not found")
     if demo.get("institution_id"):
-        raise HTTPException(409, "This demo request is already linked to an institution")
+        raise HTTPException(
+            409, "This demo request is already linked to an institution"
+        )
     requester_email = (demo.get("work_email") or "").strip().lower()
     existing = get_user_by_email(requester_email) if requester_email else None
     if existing:
-        raise HTTPException(409, "The requester email already belongs to an account; provision manually")
+        raise HTTPException(
+            409, "The requester email already belongs to an account; provision manually"
+        )
 
     institution = create_institution(
         demo.get("organisation") or "New MindGuard institution",
@@ -4448,9 +5628,11 @@ async def v1_admin_convert_demo_request(
         institution_id=institution["id"],
     )
     from backend.services.crypto import hash_token
+
     token = secrets.token_urlsafe(32)
     set_user_invitation(
-        staff["id"], hash_token(token),
+        staff["id"],
+        hash_token(token),
         (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
     )
     base = os.getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
@@ -4467,9 +5649,15 @@ async def v1_admin_convert_demo_request(
     }
     subject, body = counsellor_invitation_notification(context)
     email_sent, email_error = send_html_email(
-        requester_email, subject, body,
-        related_type="institution_admin_invitation", related_id=staff["id"],
-        metadata={"institution_id": institution["id"], "demo_request_id": demo_request_id},
+        requester_email,
+        subject,
+        body,
+        related_type="institution_admin_invitation",
+        related_id=staff["id"],
+        metadata={
+            "institution_id": institution["id"],
+            "demo_request_id": demo_request_id,
+        },
     )
     converted_at = datetime.now(timezone.utc).isoformat()
     updated = update_demo_request(
@@ -4480,21 +5668,36 @@ async def v1_admin_convert_demo_request(
         converted_at=converted_at,
     )
     write_audit(
-        user["id"], user["role_type"], "DEMO_REQUEST_CONVERTED",
-        "demo_request", demo_request_id,
-        payload={"institution_id": institution["id"], "staff_id": staff["id"], "email_sent": email_sent},
+        user["id"],
+        user["role_type"],
+        "DEMO_REQUEST_CONVERTED",
+        "demo_request",
+        demo_request_id,
+        payload={
+            "institution_id": institution["id"],
+            "staff_id": staff["id"],
+            "email_sent": email_sent,
+        },
         ip=_client_ip(request),
     )
     write_audit(
-        user["id"], user["role_type"], "INSTITUTION_PROVISIONED_FROM_DEMO",
-        "institution", institution["id"],
+        user["id"],
+        user["role_type"],
+        "INSTITUTION_PROVISIONED_FROM_DEMO",
+        "institution",
+        institution["id"],
         payload={"demo_request_id": demo_request_id, "staff_id": staff["id"]},
         ip=_client_ip(request),
     )
     return {
         "demo_request": updated,
         "institution": institution,
-        "staff": {"id": staff["id"], "email": staff["email"], "name": staff["name"], "role_type": staff["role_type"]},
+        "staff": {
+            "id": staff["id"],
+            "email": staff["email"],
+            "name": staff["name"],
+            "role_type": staff["role_type"],
+        },
         "email_sent": email_sent,
         "email_error": email_error or None,
     }
@@ -4513,6 +5716,7 @@ async def v1_admin_audit_log(
 
 
 # ── ESP webhooks (Delivery Brief §6/§9.4) ─────────────────────────────
+
 
 @app.post("/webhooks/email/resend")
 async def v1_resend_webhook(request: Request):
@@ -4538,11 +5742,14 @@ async def v1_resend_webhook(request: Request):
 
 # ── Rolling risk trigger ──────────────────────────────────────────────
 
+
 @app.post(
     "/api/v1/students/{student_id}/analyze",
     responses={
         200: {"description": "Rolling risk computed and persisted"},
-        403: {"description": "Analysis is consent-gated: no active (accepted, non-expired) consent on record"},
+        403: {
+            "description": "Analysis is consent-gated: no active (accepted, non-expired) consent on record"
+        },
         404: {"description": "Student not found"},
         503: {"description": "Analysis service temporarily unavailable"},
     },
@@ -4561,20 +5768,31 @@ async def v1_student_analyze(
     requested_platform = (data.get("platform") or "").strip()
     if requested_platform or data.get("platforms"):
         from backend.services.consent_gate import get_active_consent
+
         consent = get_active_consent(student_id)
         if consent:
             try:
                 import json as _json
+
                 consented = set(_json.loads(consent.get("platforms_json") or "[]"))
             except Exception:
                 consented = set()
             if requested_platform and requested_platform not in consented:
-                raise HTTPException(400, f"Platform {requested_platform} not in consented platforms: {', '.join(sorted(consented)) if consented else 'none'}")
+                raise HTTPException(
+                    400,
+                    f"Platform {requested_platform} not in consented platforms: {', '.join(sorted(consented)) if consented else 'none'}",
+                )
             if data.get("platforms"):
-                req_set = set(data.get("platforms") if isinstance(data.get("platforms"), list) else [])
+                req_set = set(
+                    data.get("platforms")
+                    if isinstance(data.get("platforms"), list)
+                    else []
+                )
                 extra = req_set - consented
                 if extra:
-                    raise HTTPException(400, f"Invalid platforms: {', '.join(sorted(extra))}")
+                    raise HTTPException(
+                        400, f"Invalid platforms: {', '.join(sorted(extra))}"
+                    )
 
     try:
         result = run_consented_student_analysis(
@@ -4594,12 +5812,16 @@ async def v1_student_analyze(
             student_id=student_id,
             counsellor_id=user["id"],
             institution_id=student.get("institution_id") or user.get("institution_id"),
-            consent_id=result.get("risk_record", {}).get("consent_id") if isinstance(result.get("risk_record"), dict) else None,
+            consent_id=result.get("risk_record", {}).get("consent_id")
+            if isinstance(result.get("risk_record"), dict)
+            else None,
             analysis_type="counsellor_student",
             platforms=[data.get("platform")] if data.get("platform") else [],
             findings={"posts": data.get("posts"), "result": result},
             risk_score=result.get("rolling_score"),
-            insights=f"Rolling risk {result.get('rolling_score'):.2f} on {data.get('platform')}" if result.get("rolling_score") is not None else None,
+            insights=f"Rolling risk {result.get('rolling_score'):.2f} on {data.get('platform')}"
+            if result.get("rolling_score") is not None
+            else None,
         )
         result["session_id"] = sess["id"]
     except Exception as e:
@@ -4621,18 +5843,20 @@ async def v1_list_groups(user: dict = Depends(require_auth)):
     result = []
     for g in groups:
         unread = get_group_unread_count(g["id"], user["id"])
-        result.append({
-            "id": g["id"],
-            "name": g["name"],
-            "description": g["description"],
-            "avatar_url": g["avatar_url"],
-            "created_by": g["created_by"],
-            "is_active": bool(g["is_active"]),
-            "member_count": g["member_count"],
-            "unread_count": unread,
-            "created_at": g["created_at"],
-            "updated_at": g["updated_at"],
-        })
+        result.append(
+            {
+                "id": g["id"],
+                "name": g["name"],
+                "description": g["description"],
+                "avatar_url": g["avatar_url"],
+                "created_by": g["created_by"],
+                "is_active": bool(g["is_active"]),
+                "member_count": g["member_count"],
+                "unread_count": unread,
+                "created_at": g["created_at"],
+                "updated_at": g["updated_at"],
+            }
+        )
     return {"groups": result, "total": len(result)}
 
 
@@ -4649,19 +5873,28 @@ async def v1_create_group(req: CreateGroupRequest, user: dict = Depends(require_
                 if user["role_type"] != "admin":
                     _require_counsellor_student_access(user, mid)
                 add_group_member(group["id"], mid, role="member")
-                _safe_notify(mid, "Group Invitation",
-                             f"You have been added to the group '{req.name}' by {user['name']}.",
-                             "system")
+                _safe_notify(
+                    mid,
+                    "Group Invitation",
+                    f"You have been added to the group '{req.name}' by {user['name']}.",
+                    "system",
+                )
         members = get_group_members(group["id"])
         return {
             **group,
             "is_active": True,
             "member_count": len(members),
-            "members": [{
-                "id": m["id"], "user_id": m["user_id"],
-                "name": m["name"], "email": m["email"],
-                "role": m["role"], "joined_at": m["joined_at"],
-            } for m in members],
+            "members": [
+                {
+                    "id": m["id"],
+                    "user_id": m["user_id"],
+                    "name": m["name"],
+                    "email": m["email"],
+                    "role": m["role"],
+                    "joined_at": m["joined_at"],
+                }
+                for m in members
+            ],
         }
     except HTTPException:
         raise
@@ -4684,16 +5917,24 @@ async def v1_get_group(group_id: str, user: dict = Depends(require_auth)):
         **group,
         "is_active": bool(group["is_active"]),
         "member_count": len(members),
-        "members": [{
-            "id": m["id"], "user_id": m["user_id"],
-            "name": m["name"], "email": m["email"],
-            "role": m["role"], "joined_at": m["joined_at"],
-        } for m in members],
+        "members": [
+            {
+                "id": m["id"],
+                "user_id": m["user_id"],
+                "name": m["name"],
+                "email": m["email"],
+                "role": m["role"],
+                "joined_at": m["joined_at"],
+            }
+            for m in members
+        ],
     }
 
 
 @app.patch("/api/v1/groups/{group_id}")
-async def v1_update_group(group_id: str, req: UpdateGroupRequest, user: dict = Depends(require_auth)):
+async def v1_update_group(
+    group_id: str, req: UpdateGroupRequest, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     group = get_group_by_id(group_id)
@@ -4723,7 +5964,9 @@ async def v1_delete_group(group_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/v1/groups/{group_id}/members", status_code=201)
-async def v1_add_group_members(group_id: str, data: dict, user: dict = Depends(require_auth)):
+async def v1_add_group_members(
+    group_id: str, data: dict, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     group = get_group_by_id(group_id)
@@ -4743,14 +5986,19 @@ async def v1_add_group_members(group_id: str, data: dict, user: dict = Depends(r
             result = add_group_member(group_id, uid, role="member")
             if result:
                 added.append(result)
-                _safe_notify(uid, "Group Invitation",
-                             f"You have been added to the group '{group['name']}' by {user['name']}.",
-                             "system")
+                _safe_notify(
+                    uid,
+                    "Group Invitation",
+                    f"You have been added to the group '{group['name']}' by {user['name']}.",
+                    "system",
+                )
     return {"added": len(added), "members": added}
 
 
 @app.delete("/api/v1/groups/{group_id}/members/{user_id}")
-async def v1_remove_group_member(group_id: str, user_id: str, user: dict = Depends(require_auth)):
+async def v1_remove_group_member(
+    group_id: str, user_id: str, user: dict = Depends(require_auth)
+):
     if user["role_type"] not in ("counsellor", "admin"):
         raise HTTPException(403, "Counsellor or admin access required")
     group = get_group_by_id(group_id)
@@ -4798,10 +6046,15 @@ async def v1_send_group_message(
     # Notify other group members
     members = get_group_members(group_id)
     for m in members:
-        if m["user_id"] != user["id"] and should_notify(m["user_id"], "group_message", group_id):
-            _safe_notify(m["user_id"], f"Group: {group['name']}",
-                         f"{user['name']}: {req.message[:120]}{'...' if len(req.message) > 120 else ''}",
-                         "group_message")
+        if m["user_id"] != user["id"] and should_notify(
+            m["user_id"], "group_message", group_id
+        ):
+            _safe_notify(
+                m["user_id"],
+                f"Group: {group['name']}",
+                f"{user['name']}: {req.message[:120]}{'...' if len(req.message) > 120 else ''}",
+                "group_message",
+            )
     msg["sender_name"] = user["name"]
     return msg
 
@@ -4823,7 +6076,9 @@ async def v1_mark_group_read(group_id: str, user: dict = Depends(require_auth)):
 async def get_my_conversations(user: dict = Depends(require_auth)):
     conversations = get_conversations(user["id"])
     if user.get("role_type") != "admin":
-        conversations = [c for c in conversations if _communication_allowed(user, c["other_id"])]
+        conversations = [
+            c for c in conversations if _communication_allowed(user, c["other_id"])
+        ]
     # Also fetch group previews
     groups = get_groups_for_user(user["id"])
     group_previews = []
@@ -4831,22 +6086,26 @@ async def get_my_conversations(user: dict = Depends(require_auth)):
         msgs = get_group_messages(g["id"], limit=1)
         last_msg = msgs[-1] if msgs else None
         unread = get_group_unread_count(g["id"], user["id"])
-        group_previews.append({
-            "type": "group",
-            "group_id": g["id"],
-            "name": g["name"],
-            "avatar_url": g.get("avatar_url", ""),
-            "member_count": g["member_count"],
-            "last_message": last_msg["message"] if last_msg else "",
-            "last_time": last_msg["created_at"] if last_msg else "",
-            "last_sender": last_msg["sender_name"] if last_msg else "",
-            "unread": unread,
-        })
+        group_previews.append(
+            {
+                "type": "group",
+                "group_id": g["id"],
+                "name": g["name"],
+                "avatar_url": g.get("avatar_url", ""),
+                "member_count": g["member_count"],
+                "last_message": last_msg["message"] if last_msg else "",
+                "last_time": last_msg["created_at"] if last_msg else "",
+                "last_sender": last_msg["sender_name"] if last_msg else "",
+                "unread": unread,
+            }
+        )
     return {"direct": conversations, "groups": group_previews}
 
 
 @app.post("/api/messages/send")
-async def send_message_any(data: dict, request: Request, user: dict = Depends(require_auth)):
+async def send_message_any(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
     receiver_id = data.get("receiver_id")
     message = data.get("message", "").strip()
     if not receiver_id:
@@ -4856,10 +6115,17 @@ async def send_message_any(data: dict, request: Request, user: dict = Depends(re
     _require_user_communication_access(user, receiver_id)
     msg = send_message(user["id"], receiver_id, message)
     if should_notify(receiver_id, "message"):
-        _safe_notify(receiver_id, "New Message", f"New message from {user['name']}", "message")
+        _safe_notify(
+            receiver_id, "New Message", f"New message from {user['name']}", "message"
+        )
     write_audit(
-        user["id"], user["role_type"], "MESSAGE_SENT", "communication", msg["id"],
-        payload={"receiver_id": receiver_id}, ip=_client_ip(request),
+        user["id"],
+        user["role_type"],
+        "MESSAGE_SENT",
+        "communication",
+        msg["id"],
+        payload={"receiver_id": receiver_id},
+        ip=_client_ip(request),
     )
     return msg
 
@@ -4918,9 +6184,13 @@ async def update_notification_preference(
     user: dict = Depends(require_auth),
 ):
     if notify_type not in NOTIFICATION_TYPES:
-        raise HTTPException(400, f"Invalid notification type. Must be one of: {', '.join(sorted(NOTIFICATION_TYPES))}")
+        raise HTTPException(
+            400,
+            f"Invalid notification type. Must be one of: {', '.join(sorted(NOTIFICATION_TYPES))}",
+        )
     pref = set_notification_preference(
-        user["id"], notify_type,
+        user["id"],
+        notify_type,
         enabled=req.enabled,
         muted_groups=req.muted_groups,
     )
@@ -4942,6 +6212,7 @@ if _frontend_dir and Path(_frontend_dir).is_dir():
 
 if __name__ == "__main__":
     import uvicorn
+
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", "8000"))
     reload = os.getenv("API_RELOAD", "false").lower() == "true"

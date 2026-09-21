@@ -14,7 +14,7 @@ if not TOKEN:
         open(f"./{fname}", "a").close()
     raise SystemExit(0)
 
-import huggingface_hub as hf
+import huggingface_hub as hf  # noqa: E402
 
 REPO = "kopiyodiana/mindguard-mental-roberta"
 WEIGHTS_FILE = "mindguard_best_weights.pt"

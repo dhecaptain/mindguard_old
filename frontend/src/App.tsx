@@ -292,7 +292,9 @@ export default function App() {
   }
 
   const userCat = (useAuthStore.getState().user as unknown as { user_category?: string })?.user_category
-  if (userCat === 'pending' || !userCat) {
+  const roleType = (useAuthStore.getState().user as unknown as { role_type?: string })?.role_type
+  const isStaff = roleType === 'admin' || roleType === 'school_admin' || roleType === 'counsellor' || userCat === 'staff'
+  if (!isStaff && (userCat === 'pending' || !userCat)) {
     return <OnboardingPage onComplete={() => window.location.reload()} />
   }
 

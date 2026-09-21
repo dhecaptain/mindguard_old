@@ -1,8 +1,5 @@
 """Tests for the demo request pipeline (Delivery Brief §6)."""
 
-import pytest
-
-from backend import database
 from backend.services.email_sender import send_html_email
 from backend.services.demo_service import work_email_warning
 
@@ -71,7 +68,9 @@ def test_work_email_warning_only_for_k12_university():
 
 
 def test_demo_request_migration_column_exists(db):
-    cols = {r[1] for r in db.get_db().execute("PRAGMA table_info(demo_requests)").fetchall()}
+    cols = {
+        r[1] for r in db.get_db().execute("PRAGMA table_info(demo_requests)").fetchall()
+    }
     assert "consent_to_contact" in cols
 
 
@@ -82,15 +81,20 @@ def test_send_html_email_logs_demo_request_event(db, monkeypatch):
 
     monkeypatch.setattr(email_sender, "get_secret", lambda name: "")
     ok, err = send_html_email(
-        "jordan@acme.org", "Sub", "<p>Hi</p>",
-        related_type="demo_request", related_id="demo-1",
+        "jordan@acme.org",
+        "Sub",
+        "<p>Hi</p>",
+        related_type="demo_request",
+        related_id="demo-1",
         metadata={"event": "confirmation"},
     )
     assert ok is False  # no Resend configured in tests
     assert "not configured" in err
-    events = db.get_db().execute(
-        "SELECT * FROM email_events WHERE related_type = 'demo_request'"
-    ).fetchall()
+    events = (
+        db.get_db()
+        .execute("SELECT * FROM email_events WHERE related_type = 'demo_request'")
+        .fetchall()
+    )
     assert len(events) == 1
     assert events[0]["related_id"] == "demo-1"
     assert events[0]["event"] == "failed"

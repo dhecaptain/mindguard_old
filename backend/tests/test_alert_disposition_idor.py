@@ -24,7 +24,12 @@ def client():
 
 
 def _make_counsellor(db, email: str) -> dict:
-    user = database.create_user(email, email.split("@")[0].title(), hash_password("pw-12345"), role_type="counsellor")
+    user = database.create_user(
+        email,
+        email.split("@")[0].title(),
+        hash_password("pw-12345"),
+        role_type="counsellor",
+    )
     conn = db.get_db()
     conn.execute("UPDATE users SET status = 'approved' WHERE id = ?", (user["id"],))
     conn.commit()
@@ -33,14 +38,18 @@ def _make_counsellor(db, email: str) -> dict:
 
 
 def _token(client, email: str) -> str:
-    return client.post("/api/auth/login", json={"email": email, "password": "pw-12345"}).json()["access_token"]
+    return client.post(
+        "/api/auth/login", json={"email": email, "password": "pw-12345"}
+    ).json()["access_token"]
 
 
 def test_cannot_dispose_another_counsellors_alert(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
     a = _make_counsellor(db, "alice@school.edu")
-    b = _make_counsellor(db, "bob@school.edu")
-    student = database.create_user("stu@school.edu", "Stu", hash_password("pw-12345"), role_type="student")
+    _make_counsellor(db, "bob@school.edu")
+    student = database.create_user(
+        "stu@school.edu", "Stu", hash_password("pw-12345"), role_type="student"
+    )
 
     alert = database.create_alert(student["id"], a["id"], 0.91, 0.65, "reddit")
     assert alert is not None
@@ -54,15 +63,21 @@ def test_cannot_dispose_another_counsellors_alert(db, client, monkeypatch):
     assert resp.status_code == 403
 
     conn = db.get_db()
-    row = conn.execute("SELECT status FROM alerts WHERE id = ?", (alert["id"],)).fetchone()
+    row = conn.execute(
+        "SELECT status FROM alerts WHERE id = ?", (alert["id"],)
+    ).fetchone()
     conn.close()
-    assert row["status"] == "OPEN", "alert must remain OPEN after an unauthorised attempt"
+    assert row["status"] == "OPEN", (
+        "alert must remain OPEN after an unauthorised attempt"
+    )
 
 
 def test_owner_can_dispose_own_alert(db, client, monkeypatch):
     monkeypatch.delenv("RECAPTCHA_SECRET", raising=False)
     a = _make_counsellor(db, "carol@school.edu")
-    student = database.create_user("stu2@school.edu", "Stu Two", hash_password("pw-12345"), role_type="student")
+    student = database.create_user(
+        "stu2@school.edu", "Stu Two", hash_password("pw-12345"), role_type="student"
+    )
 
     alert = database.create_alert(student["id"], a["id"], 0.91, 0.65, "reddit")
     token = _token(client, "carol@school.edu")
@@ -74,6 +89,8 @@ def test_owner_can_dispose_own_alert(db, client, monkeypatch):
     assert resp.status_code == 200, resp.text
 
     conn = db.get_db()
-    row = conn.execute("SELECT status FROM alerts WHERE id = ?", (alert["id"],)).fetchone()
+    row = conn.execute(
+        "SELECT status FROM alerts WHERE id = ?", (alert["id"],)
+    ).fetchone()
     conn.close()
     assert row["status"] == "CLOSED"

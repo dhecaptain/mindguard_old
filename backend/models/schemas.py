@@ -17,6 +17,9 @@ class TextAnalysisResponse(BaseModel):
     prob: float
     latency_ms: float
     analytics: dict
+    risk_tier: str = "low"
+    alert_eligible: bool = False
+    crisis_escalation_eligible: bool = False
 
 
 class PlatformRequest(BaseModel):
@@ -71,10 +74,13 @@ class UserResponse(BaseModel):
 
 # ── Group schemas ──────────────────────────────────────────────────────────────
 
+
 class CreateGroupRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(default="", max_length=500)
-    member_ids: list[str] = Field(default_factory=list, description="Initial members to add")
+    member_ids: list[str] = Field(
+        default_factory=list, description="Initial members to add"
+    )
 
 
 class UpdateGroupRequest(BaseModel):
@@ -136,8 +142,14 @@ class GroupMessageResponse(BaseModel):
 # ── Notification preference schemas ────────────────────────────────────────────
 
 NOTIFICATION_TYPES = {
-    "message", "group_message", "alert", "referral",
-    "broadcast", "consent", "approval", "system",
+    "message",
+    "group_message",
+    "alert",
+    "referral",
+    "broadcast",
+    "consent",
+    "approval",
+    "system",
 }
 
 
@@ -161,8 +173,14 @@ class MuteGroupRequest(BaseModel):
 
 INSTITUTION_ORGANISATION_TYPES = {"k12", "university", "clinic", "research", "other"}
 DEMO_REQUEST_STATUSES = {
-    "new", "contacted", "qualified", "demo_scheduled",
-    "institution_provisioning", "onboarding", "closed_won", "closed_lost",
+    "new",
+    "contacted",
+    "qualified",
+    "demo_scheduled",
+    "institution_provisioning",
+    "onboarding",
+    "closed_won",
+    "closed_lost",
 }
 
 
@@ -213,7 +231,9 @@ class DemoRequestCreate(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=255)
     work_email: str = Field(..., min_length=3, max_length=255)
     organisation: str = Field(..., min_length=1, max_length=255)
-    organisation_type: str = Field(default="other", pattern="^(k12|university|clinic|research|other)$")
+    organisation_type: str = Field(
+        default="other", pattern="^(k12|university|clinic|research|other)$"
+    )
     role_title: Optional[str] = Field(default=None, max_length=255)
     country: Optional[str] = Field(default=None, max_length=64)
     student_count_range: Optional[str] = Field(default=None, max_length=32)
@@ -243,7 +263,10 @@ class DemoRequestResponse(BaseModel):
 
 
 class DemoRequestUpdate(BaseModel):
-    status: Optional[str] = Field(default=None, pattern="^(new|contacted|qualified|demo_scheduled|institution_provisioning|onboarding|closed_won|closed_lost)$")
+    status: Optional[str] = Field(
+        default=None,
+        pattern="^(new|contacted|qualified|demo_scheduled|institution_provisioning|onboarding|closed_won|closed_lost)$",
+    )
     assigned_to: Optional[str] = None
     notes: Optional[str] = None
     meeting_at: Optional[str] = Field(default=None, max_length=64)

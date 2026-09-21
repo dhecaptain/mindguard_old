@@ -35,7 +35,9 @@ def _approve(db, user_id: str) -> None:
 
 
 def _make_user(db, email: str, role: str) -> dict:
-    user = db.create_user(email, email.split("@")[0].title(), hash_password("pw-12345"), role_type=role)
+    user = db.create_user(
+        email, email.split("@")[0].title(), hash_password("pw-12345"), role_type=role
+    )
     _approve(db, user["id"])
     return user
 
@@ -47,7 +49,9 @@ def _login(client, email: str, password: str = "pw-12345") -> str:
 
 
 def _grant_active_consent(db, student_id: str, counsellor_id: str) -> dict:
-    consent = db.create_consent(student_id, counsellor_id, "student@school.edu", "student", ["reddit"])
+    consent = db.create_consent(
+        student_id, counsellor_id, "student@school.edu", "student", ["reddit"]
+    )
     dispatched = consent_service.dispatch_consent(consent["id"], counsellor_id)
     return consent_service.accept_consent(dispatched["id"], "Student", "127.0.0.1")
 
@@ -116,7 +120,9 @@ def test_runs_analysis_with_active_consent(db, client):
 def test_student_detail_reports_missing_consent_for_ui_gating(db, client):
     counsellor = _make_user(db, "c5@school.edu", "counsellor")
     student = _make_user(db, "s5@school.edu", "student")
-    db.create_consent(student["id"], counsellor["id"], "student@school.edu", "student", ["reddit"])
+    db.create_consent(
+        student["id"], counsellor["id"], "student@school.edu", "student", ["reddit"]
+    )
     database.assign_student_to_counsellor(counsellor["id"], student["id"])
     token = _login(client, "c5@school.edu")
 
@@ -131,7 +137,7 @@ def test_student_detail_reports_missing_consent_for_ui_gating(db, client):
 
 
 def test_404_for_unknown_student(db, client):
-    counsellor = _make_user(db, "c3@school.edu", "counsellor")
+    _make_user(db, "c3@school.edu", "counsellor")
     token = _login(client, "c3@school.edu")
 
     resp = client.post(
@@ -151,7 +157,9 @@ def test_blocks_unauthenticated(db, client):
 
 
 def test_blocks_pending_counsellor_at_permission_layer(db, client):
-    counsellor = db.create_user("c4@school.edu", "C4", hash_password("pw-12345"), role_type="counsellor")
+    counsellor = db.create_user(
+        "c4@school.edu", "C4", hash_password("pw-12345"), role_type="counsellor"
+    )
     student = _make_user(db, "s4@school.edu", "student")
     database.assign_student_to_counsellor(counsellor["id"], student["id"])
     _grant_active_consent(db, student["id"], counsellor["id"])

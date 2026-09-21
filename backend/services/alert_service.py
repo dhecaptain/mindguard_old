@@ -2,14 +2,17 @@
 Alert generation and disposition.
 
 Thresholds:
-  - Default risk threshold: 0.65 (institution-tunable)
+  - Default risk threshold: 0.55 (institution-tunable)
   - Confidence floor: 0.70 (posts below don't trigger alerts)
   - Short-text penalty: < 20 tokens → score × 0.8
   - Cooldown: 12 h after alert fires; second alert only if score jumps >= 0.15
   - Rolling risk: time-decayed weighted average (recent posts weigh more)
 """
+
 import math
 from datetime import datetime, timezone
+
+from backend.services.risk_policy import ALERT_THRESHOLD
 
 
 def compute_rolling_risk(posts: list, window_days: int = 14) -> float:
@@ -55,7 +58,7 @@ def compute_rolling_risk(posts: list, window_days: int = 14) -> float:
 
 def should_alert(
     rolling_score: float,
-    threshold: float = 0.65,
+    threshold: float = ALERT_THRESHOLD,
     confidence: float = 1.0,
     confidence_floor: float = 0.70,
 ) -> bool:
@@ -68,7 +71,7 @@ def try_create_alert(
     counsellor_id: str,
     rolling_score: float,
     platform: str,
-    threshold: float = 0.65,
+    threshold: float = ALERT_THRESHOLD,
 ) -> dict | None:
     """
     Create an alert when:

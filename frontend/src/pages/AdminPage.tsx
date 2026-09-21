@@ -20,14 +20,21 @@ export default function AdminPage() {
   const [success, setSuccess] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [users, setUsers] = useState<SystemUser[]>([])
+  const [population, setPopulation] = useState({ institutionStudents: 0, individuals: 0 })
   const [loadingUsers, setLoadingUsers] = useState(true)
   const [usersError, setUsersError] = useState<string | null>(null)
 
   const loadUsers = () => {
     setLoadingUsers(true)
     setUsersError(null)
-    api.get('/admin/users')
-      .then(({ data }) => setUsers(data))
+    Promise.all([api.get('/admin/users'), api.get('/counsellor/dashboard')])
+      .then(([usersResponse, dashboardResponse]) => {
+        setUsers(usersResponse.data)
+        setPopulation({
+          institutionStudents: dashboardResponse.data.total_students ?? 0,
+          individuals: dashboardResponse.data.individual_users ?? 0,
+        })
+      })
       .catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : 'Unable to load users'
         setUsersError(msg)
@@ -36,6 +43,8 @@ export default function AdminPage() {
   }
 
   useEffect(() => {
+    // The loader synchronizes this page with the admin API on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadUsers()
   }, [])
 
@@ -50,15 +59,17 @@ export default function AdminPage() {
       setTitle('')
       setMessage('')
       setTargetRole('')
-    } catch (e: any) {
-      setError(e?.response?.data?.detail ?? 'Failed to send broadcast')
+    } catch (e: unknown) {
+      const error = e as { response?: { data?: { detail?: string } } }
+      setError(error.response?.data?.detail ?? 'Failed to send broadcast')
     }
     setSending(false)
   }
 
   const counts = {
     total: users.length,
-    students: users.filter((u) => u.role_type === 'student').length,
+    students: population.institutionStudents,
+    individuals: population.individuals,
     counsellors: users.filter((u) => u.role_type === 'counsellor').length,
   }
 
@@ -70,10 +81,11 @@ export default function AdminPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-[12px]">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-[12px]">
         {[
           { label: 'Total Users', value: counts.total, icon: 'ti ti-users', color: '#0F766E' },
           { label: 'Students', value: counts.students, icon: 'ti ti-school', color: '#3b82f6' },
+          { label: 'Individuals', value: counts.individuals, icon: 'ti ti-user', color: '#f59e0b' },
           { label: 'Counsellors', value: counts.counsellors, icon: 'ti ti-stethoscope', color: '#8b5cf6' },
         ].map((s) => (
           <div key={s.label} className="bg-white rounded-xl border border-[rgba(229,231,235,0.7)] p-[16px] flex items-center gap-[12px]">

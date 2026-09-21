@@ -1,9 +1,14 @@
 import os
+import tempfile
 
 import pytest
 
 # Point the DB and crypto key at per-session temp locations before importing.
-os.environ.setdefault("MINDGUARD_DB_DIR", "")
+# The repository .env may point at a production container path such as
+# /app/data. TestClient starts the app before function-scoped DB fixtures can
+# patch database.DB_PATH, so give lifespan startup its own writable database.
+os.environ["MINDGUARD_DB_DIR"] = tempfile.mkdtemp(prefix="mindguard-test-lifespan-")
+os.environ["MINDGUARD_DISABLE_BACKGROUND_TASKS"] = "true"
 os.environ.setdefault("ENCRYPTION_KEY", "a" * 64)
 
 from backend import database  # noqa: E402

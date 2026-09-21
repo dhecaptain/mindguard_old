@@ -22,7 +22,7 @@ export default function PredictionPanel({ result }: PredictionPanelProps) {
     )
   }
 
-  const isHighRisk = result.prob >= 0.5
+  const isHighRisk = result.alert_eligible
   const riskInfo = getRiskLabel(result.prob)
   const displayConfidence = (2 * Math.abs(result.prob - 0.5) * 100).toFixed(1)
 
@@ -52,10 +52,10 @@ export default function PredictionPanel({ result }: PredictionPanelProps) {
       </div>
 
       {/* Alert */}
-      {isHighRisk && (
+      {result.crisis_escalation_eligible && (
         <div className="mt-[10px] bg-[#fef2f2] border-[0.5px] border-[#fecaca] rounded-[8px] p-[10px_12px] text-[0.78rem] text-[#991b1b] font-semibold flex items-center gap-[8px]">
           <i className="ti ti-alert-triangle text-[16px]" />
-          Crisis alert — high-risk language detected
+          Critical signal — human review is recommended
         </div>
       )}
     </div>

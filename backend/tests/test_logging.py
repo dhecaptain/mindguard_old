@@ -7,8 +7,11 @@ import logging
 import pytest
 
 from backend.logging_setup import (
-    RequestContextFilter, StructuredFormatter, generate_request_id,
-    set_request_context, setup_logging,
+    RequestContextFilter,
+    StructuredFormatter,
+    generate_request_id,
+    set_request_context,
+    setup_logging,
 )
 
 
@@ -28,8 +31,13 @@ def capture():
 
 def test_record_is_json_with_request_fields(capture):
     set_request_context(
-        request_id="abc123", method="POST", path="/api/x",
-        status_code=201, duration_ms=12.5, user_id="u1", ip="1.2.3.4",
+        request_id="abc123",
+        method="POST",
+        path="/api/x",
+        status_code=201,
+        duration_ms=12.5,
+        user_id="u1",
+        ip="1.2.3.4",
     )
     logging.getLogger("backend.main").info("boom")
     set_request_context()
@@ -55,7 +63,7 @@ def test_fields_cleared_after_request(capture):
     set_request_context()
     logging.getLogger("x").info("second")
 
-    lines = [json.loads(l) for l in capture.getvalue().strip().splitlines()]
+    lines = [json.loads(line) for line in capture.getvalue().strip().splitlines()]
     assert len(lines) == 2
     assert "request_id" in lines[0]
     assert "request_id" not in lines[1]

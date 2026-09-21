@@ -9,6 +9,8 @@ export interface AnalysisResult {
   label: string
   risk_level: RiskLevel
   risk_color: string
+  alert_eligible: boolean
+  crisis_escalation_eligible: boolean
 }
 
 export interface HistoryEntry {
@@ -76,7 +78,7 @@ export interface UserInfo {
   terms_accepted?: boolean
   dob?: string
   parent_email?: string
-  user_category?: string
+  user_category?: 'staff' | 'adult' | 'minor' | 'parent' | 'institution_managed' | 'pending'
   onboarding_completed?: boolean
 }
 
@@ -108,6 +110,8 @@ export const RISK_THRESHOLDS = {
   low: 0.35,
   moderate: 0.55,
   high: 0.75,
+  alert: 0.55,
+  critical: 0.75,
 } as const
 
 export function getRiskLabel(score: number): { label: string; color: string; level: RiskLevel } {
@@ -383,6 +387,14 @@ export interface GroupMessage {
   group_id: string
   sender_id: string
   sender_name: string
+  message: string
+  created_at: string
+}
+
+export interface DirectMessage {
+  id: string
+  sender_id: string
+  receiver_id: string
   message: string
   created_at: string
 }

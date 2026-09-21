@@ -20,6 +20,7 @@ Revision ID: 0001
 Revises:
 Create Date: 2026-08-05
 """
+
 from typing import Sequence, Union
 
 from alembic import op
@@ -50,8 +51,6 @@ def _add_column_if_missing(table: str, column: sa.Column) -> None:
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-
     # ── Core (users first: referenced by most other tables) ─────────────
     if not _has_table("users"):
         op.create_table(
@@ -68,9 +67,13 @@ def upgrade() -> None:
         )
     _add_column_if_missing("users", sa.Column("dob", sa.Text(), nullable=True))
     _add_column_if_missing("users", sa.Column("parent_email", sa.Text(), nullable=True))
-    _add_column_if_missing("users", sa.Column("referral_code", sa.Text(), nullable=True))
+    _add_column_if_missing(
+        "users", sa.Column("referral_code", sa.Text(), nullable=True)
+    )
     _add_column_if_missing("users", sa.Column("referred_by", sa.Text(), nullable=True))
-    _add_column_if_missing("users", sa.Column("permissions_json", sa.Text(), server_default="[]"))
+    _add_column_if_missing(
+        "users", sa.Column("permissions_json", sa.Text(), server_default="[]")
+    )
 
     if not _has_table("analyses"):
         op.create_table(
@@ -88,8 +91,12 @@ def upgrade() -> None:
         op.create_table(
             "referrals",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("urgency", sa.Text(), nullable=False, server_default="medium"),
             sa.Column("status", sa.Text(), nullable=False, server_default="open"),
             sa.Column("notes", sa.Text(), server_default=""),
@@ -101,8 +108,12 @@ def upgrade() -> None:
         op.create_table(
             "communications",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("sender_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("receiver_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "sender_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "receiver_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("message", sa.Text(), nullable=False),
             sa.Column("read", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("created_at", sa.Text(), nullable=False),
@@ -131,19 +142,36 @@ def upgrade() -> None:
             sa.Column("alert_threshold", sa.Float(), server_default="0.65"),
             sa.Column("confidence_floor", sa.Float(), server_default="0.70"),
         )
-    _add_column_if_missing("institutions", sa.Column("minor_age_threshold", sa.Integer(), server_default="18"))
-    _add_column_if_missing("institutions", sa.Column("consent_template_id", sa.Text(), nullable=True))
-    _add_column_if_missing("institutions", sa.Column("consent_reminder_days", sa.Text(), server_default="[3,7]"))
-    _add_column_if_missing("institutions", sa.Column("consent_expiry_days", sa.Integer(), server_default="30"))
+    _add_column_if_missing(
+        "institutions",
+        sa.Column("minor_age_threshold", sa.Integer(), server_default="18"),
+    )
+    _add_column_if_missing(
+        "institutions", sa.Column("consent_template_id", sa.Text(), nullable=True)
+    )
+    _add_column_if_missing(
+        "institutions",
+        sa.Column("consent_reminder_days", sa.Text(), server_default="[3,7]"),
+    )
+    _add_column_if_missing(
+        "institutions",
+        sa.Column("consent_expiry_days", sa.Integer(), server_default="30"),
+    )
 
     if not _has_table("consents"):
         op.create_table(
             "consents",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("recipient_email", sa.Text(), nullable=False),
-            sa.Column("recipient_role", sa.Text(), nullable=False, server_default="student"),
+            sa.Column(
+                "recipient_role", sa.Text(), nullable=False, server_default="student"
+            ),
             sa.Column("status", sa.Text(), nullable=False, server_default="DRAFT"),
             sa.Column("platforms_json", sa.Text(), server_default="[]"),
             sa.Column("mode", sa.Text(), server_default="ON_DEMAND"),
@@ -161,19 +189,33 @@ def upgrade() -> None:
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("updated_at", sa.Text(), nullable=False),
         )
-    _add_column_if_missing("consents", sa.Column("signed_token_hash", sa.Text(), nullable=True))
-    _add_column_if_missing("consents", sa.Column("response_ip", sa.Text(), nullable=True))
-    _add_column_if_missing("consents", sa.Column("response_user_agent", sa.Text(), nullable=True))
-    _add_column_if_missing("consents", sa.Column("reminders_sent", sa.Integer(), server_default="0"))
-    _add_column_if_missing("consents", sa.Column("template_version", sa.Text(), server_default="1.0.0"))
+    _add_column_if_missing(
+        "consents", sa.Column("signed_token_hash", sa.Text(), nullable=True)
+    )
+    _add_column_if_missing(
+        "consents", sa.Column("response_ip", sa.Text(), nullable=True)
+    )
+    _add_column_if_missing(
+        "consents", sa.Column("response_user_agent", sa.Text(), nullable=True)
+    )
+    _add_column_if_missing(
+        "consents", sa.Column("reminders_sent", sa.Integer(), server_default="0")
+    )
+    _add_column_if_missing(
+        "consents", sa.Column("template_version", sa.Text(), server_default="1.0.0")
+    )
     _add_column_if_missing("consents", sa.Column("notes", sa.Text(), server_default=""))
 
     if not _has_table("linked_accounts"):
         op.create_table(
             "linked_accounts",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("consent_id", sa.Text(), sa.ForeignKey("consents.id"), nullable=True),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "consent_id", sa.Text(), sa.ForeignKey("consents.id"), nullable=True
+            ),
             sa.Column("platform", sa.Text(), nullable=False),
             sa.Column("mode", sa.Text(), server_default="handle"),
             sa.Column("handle", sa.Text(), nullable=True),
@@ -187,8 +229,12 @@ def upgrade() -> None:
         op.create_table(
             "alerts",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "counsellor_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("fired_at", sa.Text(), nullable=False),
             sa.Column("risk_score", sa.Float(), nullable=False),
             sa.Column("threshold_at_fire", sa.Float(), nullable=False),
@@ -222,8 +268,12 @@ def upgrade() -> None:
         op.create_table(
             "notes",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
-            sa.Column("author_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
+            sa.Column(
+                "author_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("body", sa.Text(), nullable=False),
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("updated_at", sa.Text(), nullable=False),
@@ -233,7 +283,9 @@ def upgrade() -> None:
         op.create_table(
             "rolling_risk",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "student_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("computed_at", sa.Text(), nullable=False),
             sa.Column("score", sa.Float(), nullable=False),
             sa.Column("window_days", sa.Integer(), server_default="14"),
@@ -248,7 +300,9 @@ def upgrade() -> None:
             sa.Column("name", sa.Text(), nullable=False),
             sa.Column("description", sa.Text(), server_default=""),
             sa.Column("avatar_url", sa.Text(), server_default=""),
-            sa.Column("created_by", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "created_by", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("is_active", sa.Integer(), nullable=False, server_default="1"),
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("updated_at", sa.Text(), nullable=False),
@@ -258,7 +312,9 @@ def upgrade() -> None:
         op.create_table(
             "group_members",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("group_id", sa.Text(), sa.ForeignKey("groups.id"), nullable=False),
+            sa.Column(
+                "group_id", sa.Text(), sa.ForeignKey("groups.id"), nullable=False
+            ),
             sa.Column("user_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
             sa.Column("role", sa.Text(), nullable=False, server_default="member"),
             sa.Column("joined_at", sa.Text(), nullable=False),
@@ -269,8 +325,12 @@ def upgrade() -> None:
         op.create_table(
             "group_messages",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("group_id", sa.Text(), sa.ForeignKey("groups.id"), nullable=False),
-            sa.Column("sender_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
+            sa.Column(
+                "group_id", sa.Text(), sa.ForeignKey("groups.id"), nullable=False
+            ),
+            sa.Column(
+                "sender_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False
+            ),
             sa.Column("message", sa.Text(), nullable=False),
             sa.Column("created_at", sa.Text(), nullable=False),
         )
@@ -279,7 +339,12 @@ def upgrade() -> None:
         op.create_table(
             "group_message_read",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("message_id", sa.Text(), sa.ForeignKey("group_messages.id"), nullable=False),
+            sa.Column(
+                "message_id",
+                sa.Text(),
+                sa.ForeignKey("group_messages.id"),
+                nullable=False,
+            ),
             sa.Column("user_id", sa.Text(), sa.ForeignKey("users.id"), nullable=False),
             sa.Column("read_at", sa.Text(), nullable=False),
             sa.UniqueConstraint("message_id", "user_id"),
@@ -302,7 +367,12 @@ def upgrade() -> None:
         op.create_table(
             "students",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("institution_id", sa.Text(), sa.ForeignKey("institutions.id"), nullable=True),
+            sa.Column(
+                "institution_id",
+                sa.Text(),
+                sa.ForeignKey("institutions.id"),
+                nullable=True,
+            ),
             sa.Column("student_id_hash", sa.Text(), nullable=False, unique=True),
             sa.Column("first_name_encrypted", sa.Text(), nullable=False),
             sa.Column("email_encrypted", sa.Text(), nullable=False),
@@ -311,8 +381,15 @@ def upgrade() -> None:
             sa.Column("parent_email_encrypted", sa.Text(), nullable=True),
             sa.Column("parent_first_name_encrypted", sa.Text(), nullable=True),
             sa.Column("grade_level", sa.Text(), nullable=True),
-            sa.Column("current_consent_id", sa.Text(), sa.ForeignKey("consents.id"), nullable=True),
-            sa.Column("created_by", sa.Text(), sa.ForeignKey("users.id"), nullable=True),
+            sa.Column(
+                "current_consent_id",
+                sa.Text(),
+                sa.ForeignKey("consents.id"),
+                nullable=True,
+            ),
+            sa.Column(
+                "created_by", sa.Text(), sa.ForeignKey("users.id"), nullable=True
+            ),
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("updated_at", sa.Text(), nullable=False),
             sa.Column("deleted_at", sa.Text(), nullable=True),
@@ -322,7 +399,12 @@ def upgrade() -> None:
         op.create_table(
             "consent_templates",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("institution_id", sa.Text(), sa.ForeignKey("institutions.id"), nullable=True),
+            sa.Column(
+                "institution_id",
+                sa.Text(),
+                sa.ForeignKey("institutions.id"),
+                nullable=True,
+            ),
             sa.Column("version", sa.Text(), nullable=False, server_default="1.0.0"),
             sa.Column("language", sa.Text(), nullable=False, server_default="en"),
             sa.Column("subject_email_html", sa.Text(), nullable=True),
@@ -337,7 +419,9 @@ def upgrade() -> None:
         op.create_table(
             "consent_events",
             sa.Column("id", sa.Text(), primary_key=True),
-            sa.Column("consent_id", sa.Text(), sa.ForeignKey("consents.id"), nullable=False),
+            sa.Column(
+                "consent_id", sa.Text(), sa.ForeignKey("consents.id"), nullable=False
+            ),
             sa.Column("event_type", sa.Text(), nullable=False),
             sa.Column("actor_type", sa.Text(), nullable=False, server_default="system"),
             sa.Column("actor_id", sa.Text(), nullable=True),
@@ -353,15 +437,21 @@ def upgrade() -> None:
             sa.Column("work_email", sa.Text(), nullable=False),
             sa.Column("organisation", sa.Text(), nullable=False),
             sa.Column("role_title", sa.Text(), nullable=True),
-            sa.Column("organisation_type", sa.Text(), nullable=False, server_default="other"),
+            sa.Column(
+                "organisation_type", sa.Text(), nullable=False, server_default="other"
+            ),
             sa.Column("country", sa.Text(), nullable=True),
             sa.Column("student_count_range", sa.Text(), nullable=True),
             sa.Column("message", sa.Text(), nullable=True),
             sa.Column("heard_about_us", sa.Text(), nullable=True),
             sa.Column("status", sa.Text(), nullable=False, server_default="new"),
-            sa.Column("assigned_to", sa.Text(), sa.ForeignKey("users.id"), nullable=True),
+            sa.Column(
+                "assigned_to", sa.Text(), sa.ForeignKey("users.id"), nullable=True
+            ),
             sa.Column("notes", sa.Text(), nullable=True),
-            sa.Column("consent_to_contact", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column(
+                "consent_to_contact", sa.Integer(), nullable=False, server_default="1"
+            ),
             sa.Column("created_at", sa.Text(), nullable=False),
             sa.Column("updated_at", sa.Text(), nullable=False),
         )
