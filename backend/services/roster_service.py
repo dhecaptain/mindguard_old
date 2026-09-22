@@ -215,10 +215,11 @@ def upsert_roster(
         elif dob is not None:
             minor = _age_years(dob) < minor_age_threshold
 
-        # Brief §2.4 routing rules: minor without parent_email is rejected at validation
-        if minor and not parent_email:
-            summary["errors"].append({"row_number": idx, "row": row, "error": "parent_email is required for minor students"})
-            continue
+        # Minors may be imported before guardian details are available. They
+        # remain consent-gated and are reported by the dispatch step as
+        # "minor without parent_email" until an administrator adds a guardian
+        # email and resends consent. Adults in the same CSV must not be held
+        # back by that pending guardian workflow.
 
         # Full name resolution
         name = f"{first_name} {last_name}".strip() if last_name else first_name

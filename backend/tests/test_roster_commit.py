@@ -83,20 +83,19 @@ def test_commit_dispatches_minor_to_parent_with_courtesy(db):
     assert consent["status"] == "PENDING"
 
 
-def test_commit_minor_without_parent_is_routing_error(db):
+def test_commit_minor_without_parent_is_imported_but_routing_is_pending(db):
     _seed_admin(db)
     inst = db.create_institution("Riverside High", "secondary")
     
-    # 1. Verification at upload validation time:
-    # A minor without parent email is rejected at validation (cannot proceed)
+    # 1. The minor is imported so other eligible rows in the same CSV are not
+    # delayed. Consent remains pending until a guardian email is supplied.
     summary = roster_service.upsert_roster(
         inst["id"],
         _csv("S-1,Jane,Doe,jane@school.edu,2010-01-01,9,\n"),
         "admin-001",
     )
-    assert len(summary["errors"]) == 1
-    assert "parent_email is required" in summary["errors"][0]["error"]
-    assert summary["created"] == 0
+    assert summary["errors"] == []
+    assert summary["created"] == 1
 
     # 2. Verification at dispatch time (defensive path):
     # Construct a student row bypassing the CSV validator to test service robustness
@@ -120,7 +119,9 @@ def test_commit_minor_without_parent_is_routing_error(db):
     assert result["skipped_no_parent"] == 1
     assert len(result["routing_errors"]) == 1
     assert "parent_email" in result["routing_errors"][0]["reason"]
-    assert _outbox_rows(db) == []
+    # The student may still receive an activation invitation; the protected
+    # wellbeing consent request is the part that must remain blocked.
+    assert {row["to_email"] for row in _outbox_rows(db)} == {"bob@school.edu"}
 
 
 def test_commit_skips_students_with_live_consent(db):
