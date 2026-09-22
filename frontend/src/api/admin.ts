@@ -31,6 +31,28 @@ export async function updateInstitution(id: string, patch: { status?: string; na
   return data
 }
 
+export interface RosterConflict {
+  id: string
+  student_id: string
+  name: string
+  email: string
+  institution: { id: string | null; name: string }
+  has_linked_account: boolean
+}
+
+export async function findRosterConflict(studentId: string): Promise<RosterConflict> {
+  const { data } = await api.get('/v1/admin/roster-conflicts', { params: { student_id: studentId } })
+  return data
+}
+
+export async function purgeRosterConflict(studentId: string): Promise<{ ok: boolean; linked_account_preserved: boolean }> {
+  const { data } = await api.post('/v1/admin/roster-conflicts/purge', {
+    student_id: studentId,
+    confirmation: studentId,
+  })
+  return data
+}
+
 export async function getInstitutionSetup(): Promise<InstitutionSetup> {
   const { data } = await api.get('/institution/setup')
   return data
