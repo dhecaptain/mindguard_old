@@ -18,6 +18,11 @@ export async function getInstitutions(): Promise<Institution[]> {
   return data.institutions ?? data
 }
 
+export async function permanentlyDeleteAdminUser(userId: string, confirmation: string): Promise<{ ok: boolean; deleted_user_id: string }> {
+  const { data } = await api.delete(`/admin/users/${userId}`, { data: { confirmation } })
+  return data
+}
+
 export async function createInstitution(
   name: string,
   type = 'university',
