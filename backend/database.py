@@ -847,6 +847,11 @@ def permanently_delete_user(user_id: str) -> dict | None:
             conn.execute(f"DELETE FROM analysis_sessions WHERE consent_id IN ({marks})", consent_ids)
             conn.execute(f"DELETE FROM consents WHERE id IN ({marks})", consent_ids)
 
+        # Consent-event actor references are nullable in the current schema but
+        # may be foreign keys in production migrations. Detach them before the
+        # account is removed while retaining the event history itself.
+        conn.execute("UPDATE consent_events SET actor_id = NULL WHERE actor_id = ?", (user_id,))
+
         conn.execute("UPDATE students SET created_by = NULL WHERE created_by = ?", (user_id,))
         conn.execute("UPDATE users SET parent_guardian_id = NULL WHERE parent_guardian_id = ?", (user_id,))
 
