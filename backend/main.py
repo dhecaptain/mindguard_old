@@ -157,6 +157,8 @@ from backend.database import (
     archive_student,
     get_student_by_id,
     get_student_by_user_id,
+    get_student_by_student_id_hash,
+    purge_roster_student,
     create_demo_request,
     get_demo_request,
     get_demo_request_by_response_token,
@@ -211,7 +213,7 @@ from backend.services.analysis_service import (
     inference_http_error,
     run_consented_student_analysis,
 )
-from backend.services.crypto import decrypt_pii, hash_token
+from backend.services.crypto import decrypt_pii, hash_student_id, hash_token
 from backend.services.consent_gate import consent_status_for_ui
 from backend.services.risk_policy import assess_risk
 from backend.services.demo_service import (
@@ -4979,6 +4981,50 @@ async def v1_admin_roster_commit(
         },
     )
     return {"roster": summary, "dispatch": dispatch}
+
+
+@app.get("/api/v1/admin/roster-conflicts")
+async def v1_admin_roster_conflict(student_id: str, user: dict = Depends(require_auth)):
+    """Find the existing roster record blocking a school-ID import."""
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can resolve roster conflicts")
+    normalized_id = (student_id or "").strip()
+    if not normalized_id:
+        raise HTTPException(400, "student_id is required")
+    student = get_student_by_student_id_hash(hash_student_id(normalized_id))
+    if not student:
+        raise HTTPException(404, "No active roster record was found for this student ID")
+    institution = get_institution_by_id(student.get("institution_id")) or {}
+    return {
+        "id": student["id"],
+        "student_id": normalized_id,
+        "name": decrypt_pii(student.get("first_name_encrypted") or ""),
+        "email": decrypt_pii(student.get("email_encrypted") or ""),
+        "institution": {"id": institution.get("id"), "name": institution.get("name") or "Unknown institution"},
+        "has_linked_account": bool(student.get("user_id")),
+    }
+
+
+@app.post("/api/v1/admin/roster-conflicts/purge")
+async def v1_admin_purge_roster_conflict(data: dict, request: Request, user: dict = Depends(require_auth)):
+    """Permanently remove a duplicate roster record after explicit confirmation."""
+    if user.get("role_type") != "admin":
+        raise HTTPException(403, "Only global admins can resolve roster conflicts")
+    student_id = (data.get("student_id") or "").strip()
+    if not student_id or data.get("confirmation") != student_id:
+        raise HTTPException(400, "Type the exact student ID to confirm removal")
+    student = get_student_by_student_id_hash(hash_student_id(student_id))
+    if not student:
+        raise HTTPException(404, "No active roster record was found for this student ID")
+    removed = purge_roster_student(student["id"])
+    if not removed:
+        raise HTTPException(404, "Roster record was already removed")
+    write_audit(
+        user["id"], user["role_type"], "ROSTER_CONFLICT_PURGED", "student", student["id"],
+        payload={"student_id_hash": student["student_id_hash"], "institution_id": student.get("institution_id"), "linked_account_preserved": bool(student.get("user_id"))},
+        ip=_client_ip(request),
+    )
+    return {"ok": True, "student_id": student_id, "linked_account_preserved": bool(student.get("user_id"))}
 
 
 @app.get("/api/v1/admin/students")

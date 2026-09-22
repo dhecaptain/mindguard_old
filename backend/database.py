@@ -2700,6 +2700,26 @@ def get_student_by_student_id_hash(student_id_hash: str) -> dict | None:
     return dict(row) if row else None
 
 
+def purge_roster_student(student_id: str) -> dict | None:
+    """Permanently remove one roster record without deleting its user account.
+
+    This is reserved for global-admin conflict resolution. Related consent and
+    account records are retained for audit and privacy obligations; only the
+    duplicate roster identity is removed so its school ID can be imported
+    again into the correct institution.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+        if not row:
+            return None
+        conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        conn.commit()
+        return dict(row)
+    finally:
+        conn.close()
+
+
 def list_students(
     institution_id: str | None = None, limit: int = 200, offset: int = 0
 ) -> list:
