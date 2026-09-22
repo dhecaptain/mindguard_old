@@ -854,6 +854,37 @@ def permanently_delete_user(user_id: str) -> dict | None:
 
         conn.execute("UPDATE students SET created_by = NULL WHERE created_by = ?", (user_id,))
         conn.execute("UPDATE users SET parent_guardian_id = NULL WHERE parent_guardian_id = ?", (user_id,))
+        # These tables were added by later migrations and are not present in
+        # every older local database, so guard each cleanup by table existence.
+        table_names = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "institutions" in table_names:
+            institution_columns = {row[1] for row in conn.execute("PRAGMA table_info(institutions)").fetchall()}
+            if "created_by" in institution_columns:
+                conn.execute("UPDATE institutions SET created_by = NULL WHERE created_by = ?", (user_id,))
+        if "students" in table_names:
+            student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
+            if "user_id" in student_columns:
+                conn.execute("DELETE FROM students WHERE user_id = ?", (user_id,))
+        if "appointments" in table_names:
+            conn.execute(
+                "DELETE FROM appointments WHERE student_id = ? OR counsellor_id = ? OR created_by = ?",
+                (user_id, user_id, user_id),
+            )
+        if "referral_events" in table_names:
+            referral_ids = [
+                row[0] for row in conn.execute(
+                    "SELECT id FROM referrals WHERE student_id = ? OR counsellor_id = ?",
+                    (user_id, user_id),
+                ).fetchall()
+            ]
+            if referral_ids:
+                marks = ",".join("?" for _ in referral_ids)
+                conn.execute(f"DELETE FROM referral_events WHERE referral_id IN ({marks})", referral_ids)
+            conn.execute("UPDATE referral_events SET actor_id = NULL WHERE actor_id = ?", (user_id,))
 
         # Groups created by the account are user-owned; remove their messages
         # and memberships before removing the group itself.
