@@ -28,12 +28,16 @@ from backend.database import (
     get_consents_by_student,
     get_user_by_email,
     get_user_by_id,
+    link_parent_guardian,
     get_all_consents,
     get_institution_id_for_consent,
     get_institution_by_id,
     get_active_consent_template,
     mark_analyses_consent_withdrawn,
     set_student_current_consent,
+    set_user_invitation,
+    update_user_onboarding,
+    update_student,
     update_consent_status,
     write_audit,
 )
@@ -395,6 +399,11 @@ def accept_consent(
                 save_social_account(consent["student_id"], platform, handle, None)
     
     _notify_consent_response(updated, accepted=True, token=token)
+    if updated.get("recipient_role") == "parent":
+        parent = get_user_by_email(updated.get("recipient_email") or "")
+        if parent and (parent.get("role_type") == "parent" or parent.get("user_category") == "parent"):
+            link_parent_guardian(updated["student_id"], parent["id"])
+            write_audit(parent["id"], "parent", "PARENT_LINKED_TO_STUDENT", "user", updated["student_id"], payload={"consent_id": consent_id}, ip=ip)
     return updated
 
 
@@ -631,6 +640,10 @@ def dispatch_consents_for_students(
                 _created_user_ids.add(user_id)
                 summary["users_created"] += 1
 
+            _ensure_roster_student_invitation(user_id, student)
+            if not student.get("user_id"):
+                update_student(student["id"], user_id=user_id)
+
             # Skip students that already have a live consent (no double-send).
             existing = get_consents_by_student(user_id) or []
             live = [c for c in existing if c["status"] in ("PENDING", "VIEWED")]
@@ -694,14 +707,46 @@ def _resolve_student_user(student: dict) -> str | None:
         return None
     existing = get_user_by_email(email)
     if existing:
+        if not existing.get("institution_id"):
+            update_user_onboarding(existing["id"], "institution_managed", student.get("institution_id"))
         return existing["id"]
     name = "Student"
     try:
         name = (decrypt_pii(student.get("first_name_encrypted") or "") or "").strip() or "Student"
     except Exception:
         pass
-    user = create_user(email, name, "", role_type="student")
+    user = create_user(email, name, "", role_type="student", institution_id=student.get("institution_id"))
     return user["id"]
+
+
+def _ensure_roster_student_invitation(user_id: str, student: dict) -> None:
+    """Issue one secure activation link for a roster-created student account."""
+    user = get_user_by_id(user_id)
+    if not user or user.get("password_hash") or user.get("invitation_token_hash"):
+        return
+    token = os.urandom(32)
+    token_value = __import__("base64").urlsafe_b64encode(token).decode().rstrip("=")
+    set_user_invitation(
+        user_id,
+        hash_token(token_value),
+        (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    )
+    base = (os.getenv("APP_BASE_URL") or os.getenv("FRONTEND_URL") or "http://localhost:5173").rstrip("/")
+    invite_url = f"{base}/invite?token={token_value}"
+    first_name = (decrypt_pii(student.get("first_name_encrypted") or "") or "there").split()[0]
+    institution = get_institution_by_id(student.get("institution_id")) or {}
+    subject = "Complete your MindGuard student account"
+    html = (
+        f"<p>Hello {first_name},</p>"
+        f"<p>{institution.get('name') or 'Your institution'} has invited you to MindGuard.</p>"
+        f"<p><a href=\"{invite_url}\">Set your password and activate your account</a></p>"
+        "<p>This link expires in 7 days. If you are under 18, a parent or guardian must also complete consent before protected wellbeing features are available.</p>"
+    )
+    send_html_email(
+        user["email"], subject, html,
+        related_type="student_invitation", related_id=user_id,
+        metadata={"institution_id": student.get("institution_id")},
+    )
 
 
 def _send_courtesy_copy(student: dict, consent: dict, token: str) -> bool:

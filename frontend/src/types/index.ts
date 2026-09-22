@@ -80,6 +80,11 @@ export interface UserInfo {
   parent_email?: string
   user_category?: 'staff' | 'adult' | 'minor' | 'parent' | 'institution_managed' | 'pending'
   onboarding_completed?: boolean
+  institution_id?: string | null
+  profile_completed?: boolean
+  invitation_status?: string | null
+  staff_role?: string | null
+  institution_permissions?: string[]
 }
 
 export interface CrisisResource {
@@ -218,6 +223,27 @@ export interface Institution {
   minor_age_threshold?: number
   consent_reminder_days?: string
   consent_expiry_days?: number
+  status?: string
+  settings_version?: number
+}
+
+export interface InstitutionSetup {
+  institution: Institution
+  checks: Array<{ key: string; label: string; complete: boolean }>
+  next_action: string
+  counts: { school_admins: number; counsellors: number; students: number; active_assignments: number }
+}
+
+export interface InstitutionStaff {
+  id: string
+  email: string
+  name: string
+  role_type: 'school_admin' | 'counsellor'
+  status: string
+  created_at: string
+  invitation_pending: boolean
+  profile_completed: boolean
+  profile: Record<string, string>
 }
 
 export interface RosterUploadSummary {

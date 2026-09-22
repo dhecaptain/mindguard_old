@@ -468,6 +468,31 @@ def set_user_invitation(user_id: str, token_hash: str, expires_at: str) -> bool:
     return ok
 
 
+def update_staff_profile(user_id: str, **fields) -> dict | None:
+    """Update the operational profile for a provisioned staff member."""
+    allowed = {
+        "phone", "country", "address", "professional_title",
+        "qualification", "emergency_contact",
+    }
+    updates = [(key, value) for key, value in fields.items() if key in allowed]
+    if not updates:
+        return get_user_by_id(user_id)
+    values = dict(updates)
+    required = ("phone", "country", "address", "professional_title", "qualification")
+    complete = all(str(values.get(field) or "").strip() for field in required)
+    conn = get_db()
+    assignments = [f"{key} = ?" for key, _ in updates]
+    params = [encrypt_pii(str(value).strip()) if value not in (None, "") else None for _, value in updates]
+    if complete:
+        assignments.append("profile_completed_at = COALESCE(profile_completed_at, ?)")
+        params.append(datetime.now(timezone.utc).isoformat())
+    params.append(user_id)
+    conn.execute(f"UPDATE users SET {', '.join(assignments)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+    return get_user_by_id(user_id)
+
+
 def get_user_by_invitation_token_hash(token_hash: str) -> dict | None:
     conn = get_db()
     row = conn.execute(
@@ -505,6 +530,19 @@ def update_user_onboarding(
     cur = conn.execute(
         "UPDATE users SET user_category = ?, institution_id = ?, parent_guardian_id = ?, onboarding_completed_at = ? WHERE id = ?",
         (user_category, institution_id, parent_guardian_id, now, user_id),
+    )
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def link_parent_guardian(student_id: str, parent_id: str) -> bool:
+    """Link a student to a separately identified parent account."""
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE users SET parent_guardian_id = ? WHERE id = ? AND role_type = 'student'",
+        (parent_id, student_id),
     )
     conn.commit()
     ok = cur.rowcount > 0
@@ -3464,6 +3502,13 @@ def assign_student_to_counsellor(
     if existing:
         conn.close()
         return get_assignment(existing["id"])
+    # Institution policy: one active primary counsellor per student. Preserve
+    # the old assignment rows for audit/history while ending their access.
+    conn.execute(
+        "UPDATE counsellor_student_assignments SET active = 0, unassigned_at = ? "
+        "WHERE student_id = ? AND active = 1",
+        (now, student_id),
+    )
     new_id = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO counsellor_student_assignments (id, counsellor_id, student_id, institution_id, assigned_by, assigned_at, active) "
