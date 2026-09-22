@@ -30,9 +30,17 @@ DB_PATH = (
 
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    # Roster imports and the email/outbox worker can write concurrently. The
+    # default SQLite busy timeout is effectively zero, which turns normal
+    # short-lived write contention into a user-facing HTTP 500.
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -526,15 +534,23 @@ def update_user_onboarding(
     if user_category not in allowed:
         user_category = "pending"
     now = datetime.now(timezone.utc).isoformat()
-    conn = get_db()
-    cur = conn.execute(
-        "UPDATE users SET user_category = ?, institution_id = ?, parent_guardian_id = ?, onboarding_completed_at = ? WHERE id = ?",
-        (user_category, institution_id, parent_guardian_id, now, user_id),
-    )
-    conn.commit()
-    ok = cur.rowcount > 0
-    conn.close()
-    return ok
+    for attempt in range(3):
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "UPDATE users SET user_category = ?, institution_id = ?, parent_guardian_id = ?, onboarding_completed_at = ? WHERE id = ?",
+                (user_category, institution_id, parent_guardian_id, now, user_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            time.sleep(0.1 * (attempt + 1))
+        finally:
+            conn.close()
+    return False
 
 
 def link_parent_guardian(student_id: str, parent_id: str) -> bool:
