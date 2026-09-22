@@ -269,6 +269,7 @@ def upsert_roster(
         # only for this reconciliation step; the durable relationship is the
         # students.user_id foreign key.
         account = database.get_user_by_email(item["email"])
+        account_to_link = None
         if account and account.get("role_type") == "student":
             account_institution = account.get("institution_id")
             if account_institution and account_institution != institution_id:
@@ -279,23 +280,26 @@ def upsert_roster(
                 })
                 continue
             if not account_institution:
-                database.update_user_onboarding(account["id"], "institution_managed", institution_id)
+                account_to_link = account["id"]
             payload["user_id"] = account["id"]
         if item["parent_email"]:
             payload["parent_email_encrypted"] = crypto.encrypt_pii(item["parent_email"])
             payload["parent_first_name_encrypted"] = crypto.encrypt_pii(item["parent_first_name"])
 
         try:
-            if existing:
-                database.update_student(existing["id"], **payload)
+            saved, created = database.upsert_roster_student(
+                payload,
+                existing_student_id=existing["id"] if existing else None,
+                link_existing_user_id=account_to_link,
+            )
+            if created:
+                summary["created"] += 1
+                summary["student_ids"].append(saved["id"])
+            else:
                 # If notes column exists and was provided, we can update it in the consents if needed,
                 # but we focus on updating the student record.
                 summary["updated"] += 1
-                summary["student_ids"].append(existing["id"])
-            else:
-                created = database.create_student(**payload)
-                summary["created"] += 1
-                summary["student_ids"].append(created["id"])
+                summary["student_ids"].append(saved["id"])
         except Exception as exc:  # pragma: no cover
             logger.exception("roster upsert failed for student_id=%s", item["student_id"])
             summary["errors"].append({"row_number": item["row_number"], "row": item["row"], "error": f"database error: {exc}"})

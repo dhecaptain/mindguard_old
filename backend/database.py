@@ -5,6 +5,7 @@ import re
 import secrets
 import sqlite3
 import string
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -27,20 +28,18 @@ DB_PATH = (
     / "mindguard.db"
 )
 
+_SQLITE_SETUP_LOCK = threading.Lock()
+_sqlite_setup_complete = False
+
 
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Roster imports and the email/outbox worker can write concurrently. The
     # default SQLite busy timeout is effectively zero, which turns normal
     # short-lived write contention into a user-facing HTTP 500.
-    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    conn = sqlite3.connect(str(DB_PATH), timeout=60.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError as exc:
-        if "locked" not in str(exc).lower():
-            raise
+    conn.execute("PRAGMA busy_timeout=60000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -124,6 +123,24 @@ def run_migrations(db_path: str | Path | None = None) -> None:
 def init_db():
     """Ensure the schema is current by running versioned migrations."""
     run_migrations()
+    _configure_sqlite_runtime()
+
+
+def _configure_sqlite_runtime() -> None:
+    """Enable WAL once during process startup, never per request connection."""
+    global _sqlite_setup_complete
+    if _sqlite_setup_complete:
+        return
+    with _SQLITE_SETUP_LOCK:
+        if _sqlite_setup_complete:
+            return
+        conn = sqlite3.connect(str(DB_PATH), timeout=60.0)
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA journal_mode=WAL")
+        finally:
+            conn.close()
+        _sqlite_setup_complete = True
 
 
 def consume_rate_limit(bucket: str, max_requests: int, window_seconds: int) -> bool:
@@ -2734,6 +2751,68 @@ def update_student(student_id: str, **kwargs) -> dict | None:
     conn.commit()
     conn.close()
     return get_student_by_id(student_id)
+
+
+def upsert_roster_student(
+    payload: dict,
+    existing_student_id: str | None = None,
+    link_existing_user_id: str | None = None,
+) -> tuple[dict, bool]:
+    """Atomically upsert one roster row and link an existing student account.
+
+    This keeps the account and roster writes in one short transaction. It is
+    deliberately used by the CSV importer so a pre-existing student account
+    cannot trigger an independent competing SQLite write mid-import.
+    """
+    allowed = {
+        "institution_id", "student_id_hash", "first_name_encrypted",
+        "email_encrypted", "date_of_birth_encrypted", "is_minor",
+        "parent_email_encrypted", "parent_first_name_encrypted",
+        "grade_level", "user_id", "created_by",
+    }
+    row = {key: value for key, value in payload.items() if key in allowed}
+    for attempt in range(8):
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if link_existing_user_id:
+                conn.execute(
+                    "UPDATE users SET user_category = 'institution_managed', institution_id = ?, onboarding_completed_at = ? "
+                    "WHERE id = ? AND role_type = 'student' AND institution_id IS NULL",
+                    (row["institution_id"], datetime.now(timezone.utc).isoformat(), link_existing_user_id),
+                )
+            now = datetime.now(timezone.utc).isoformat()
+            if existing_student_id:
+                updates = ["updated_at = ?"]
+                params: list = [now]
+                for key, value in row.items():
+                    if key != "created_by":
+                        updates.append(f"{key} = ?")
+                        params.append(value)
+                params.append(existing_student_id)
+                conn.execute(f"UPDATE students SET {', '.join(updates)} WHERE id = ?", params)
+                student_id = existing_student_id
+                created = False
+            else:
+                student_id = str(uuid.uuid4())
+                columns = ["id", *row.keys(), "created_at", "updated_at"]
+                values = [student_id, *row.values(), now, now]
+                placeholders = ", ".join("?" for _ in columns)
+                conn.execute(
+                    f"INSERT INTO students ({', '.join(columns)}) VALUES ({placeholders})",
+                    values,
+                )
+                created = True
+            conn.commit()
+            return {"id": student_id}, created
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "locked" not in str(exc).lower() or attempt == 7:
+                raise
+            time.sleep(min(0.25 * (2 ** attempt), 5.0))
+        finally:
+            conn.close()
+    raise RuntimeError("Roster transaction retry limit exceeded")
 
 
 def soft_delete_student(student_id: str) -> bool:
