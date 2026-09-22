@@ -2717,6 +2717,7 @@ def _staff_invitation_email(user: dict, token: str, institution_id: str | None) 
     invite_url = f"{base}/invite?token={token}"
     context = {
         "counsellor_name": user.get("name") or "there",
+        "staff_role": user.get("role_type"),
         "institution_name": institution_name,
         "invite_url": invite_url,
         "setup_url": invite_url,
@@ -5491,6 +5492,7 @@ async def invite_institution_staff(
     invite_url = f"{base}/invite?token={token}"
     context = {
         "counsellor_name": name,
+        "staff_role": role_type,
         "institution_name": institution.get("name") or "MindGuard",
         "invite_url": invite_url,
         "setup_url": invite_url,
@@ -5917,6 +5919,7 @@ async def v1_admin_convert_demo_request(
     invite_url = f"{base}/invite?token={token}"
     context = {
         "counsellor_name": staff["name"],
+        "staff_role": "school_admin",
         "institution_name": institution["name"],
         "invite_url": invite_url,
         "setup_url": invite_url,
