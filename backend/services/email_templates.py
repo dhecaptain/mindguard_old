@@ -395,20 +395,40 @@ def student_revocation_notification(context: dict) -> tuple[str, str]:
 
 
 def counsellor_invitation_notification(context: dict) -> tuple[str, str]:
-    """Invite a new counsellor via secure magic-link (single-use, 7-day expiry)."""
-    name = _esc(context.get("counsellor_name") or "there")
+    """Invite institution staff via a secure magic-link.
+
+    The legacy function name is retained for callers that send counsellor
+    invitations, but the copy is selected from the provisioned staff role so
+    school administrators are never described as counsellors.
+    """
+    name = _esc(context.get("counsellor_name") or context.get("recipient_name") or "there")
     institution = _esc(context.get("institution_name") or "your institution")
     invite_url = context.get("invite_url") or context.get("setup_url", "https://app.mindguardai.me/invite")
-    subject = f"MindGuard counsellor invitation — {institution}"
+    role = (context.get("staff_role") or context.get("role_type") or "counsellor").strip().lower()
+    is_school_admin = role in {"school_admin", "institution_admin", "administrator"}
+    role_label = "school administrator" if is_school_admin else "counsellor"
+    permissions = (
+        [
+            "Manage the institution's student roster",
+            "Invite and manage counsellors and school administrators",
+            "Review consent status and oversee student assignments",
+            "Manage institution wellbeing settings and operations",
+        ]
+        if is_school_admin
+        else [
+            "View and manage student consents",
+            "Analyse student social media content (with consent)",
+            "Create referrals and track student wellbeing",
+            "Communicate with students through the platform",
+        ]
+    )
+    subject = f"MindGuard {role_label} invitation — {institution}"
     body = (
         _p(f"Hi {name},")
-        + _p(f"You have been invited to join MindGuard as a counsellor at {institution}.")
-        + _p("As a counsellor, you will be able to:")
+        + _p(f"You have been invited to join MindGuard as a {role_label} at {institution}.")
+        + _p(f"As a {role_label}, you will be able to:")
         + '<ul style="margin:0 0 16px;padding-left:20px;">'
-        + _li("View and manage student consents")
-        + _li("Analyse student social media content (with consent)")
-        + _li("Create referrals and track student wellbeing")
-        + _li("Communicate with students through the platform")
+        + "".join(_li(item) for item in permissions)
         + "</ul>"
         + _p("This invitation link is single-use and expires in 7 days. Click below to set your password and activate your account:")
         + '<p style="margin:0 0 20px;">' + _button(invite_url, "Accept invitation") + "</p>"

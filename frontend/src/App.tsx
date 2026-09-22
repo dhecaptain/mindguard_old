@@ -243,8 +243,10 @@ export default function App() {
           const user = await getMe()
           setAuth(user)
           setTermsAccepted(Boolean(user.terms_accepted))
-          if (user.role_type?.toLowerCase() === 'counsellor' || user.role_type?.toLowerCase() === 'school_admin') {
+          if (user.role_type?.toLowerCase() === 'counsellor') {
             setPage('counsellor-dashboard')
+          } else if (user.role_type?.toLowerCase() === 'school_admin') {
+            setPage('institution')
           } else if (user.role_type?.toLowerCase() === 'admin') {
             setPage('admin')
           }
