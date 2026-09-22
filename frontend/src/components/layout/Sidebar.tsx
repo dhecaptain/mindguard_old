@@ -43,6 +43,7 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'alert-queue', icon: 'ti ti-bell-ringing', label: 'Alert Queue' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit Log' },
+  { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ] as const
 
 const SCHOOL_ADMIN_NAV_ITEMS = [
@@ -51,6 +52,7 @@ const SCHOOL_ADMIN_NAV_ITEMS = [
   { key: 'assignments', icon: 'ti ti-user-check', label: 'Assignments' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },
+  { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ] as const
 
 const ADMIN_NAV_ITEMS = [
@@ -61,6 +63,7 @@ const ADMIN_NAV_ITEMS = [
   { key: 'students', icon: 'ti ti-users', label: 'Students' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit' },
   ...COUNSELLOR_NAV_BASE.filter((i) => !['consent-tracker', 'students', 'audit-log'].includes(i.key)),
+  { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ]
 
 function RolePill({ role }: { role?: string }) {

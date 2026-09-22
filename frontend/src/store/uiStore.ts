@@ -11,6 +11,7 @@ export type PageKey =
   | 'admin' | 'counsellors' | 'institutions' | 'assignments' | 'my-accounts'
   | 'institution' | 'institution-students'
   | 'notification-preferences'
+  | 'profile'
   | 'self-history' | 'self-session'
 
 function _initialPage(): PageKey {

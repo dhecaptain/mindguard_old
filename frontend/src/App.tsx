@@ -115,6 +115,7 @@ function PageRouter() {
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />
       case 'notification-preferences': return <NotificationPreferencesPage />
+      case 'profile': return <StaffProfilePage />
       default: return <AdminPage />
     }
   }
@@ -143,6 +144,7 @@ function PageRouter() {
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />
       case 'notification-preferences': return <NotificationPreferencesPage />
+      case 'profile': return <StaffProfilePage />
       default: return <CounsellorDashboardPage />
     }
   }

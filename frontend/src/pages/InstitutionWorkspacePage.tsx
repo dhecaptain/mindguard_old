@@ -56,7 +56,9 @@ export default function InstitutionWorkspacePage() {
     setBusy(true); setError(''); setMessage('')
     try {
       const result = await commitRoster(file, setup.institution.id)
-      setMessage(`Roster processed: ${result.roster.created} created, ${result.roster.updated} updated, ${result.dispatch.dispatched} consent requests sent.`)
+      const rosterIssue = result.roster.parse_error || (result.roster.errors.length ? `${result.roster.errors.length} row error(s)` : '')
+      const dispatchIssue = result.dispatch.routing_errors?.length ? ` ${result.dispatch.routing_errors.length} consent issue(s) need attention.` : ''
+      setMessage(`Roster processed: ${result.roster.created} created, ${result.roster.updated} updated, ${result.dispatch.dispatched} consent requests sent.${rosterIssue ? ` ${rosterIssue}.` : ''}${dispatchIssue}`)
       await load()
     } catch (err) { setError(err instanceof Error ? err.message : 'Unable to process roster') }
     finally { setBusy(false) }

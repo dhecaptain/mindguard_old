@@ -338,13 +338,22 @@ def _auth_user_category(user: dict) -> str:
 
 
 def _staff_profile_payload(user: dict) -> dict:
+    def value(key: str) -> str:
+        raw = user.get(key) or ""
+        if isinstance(raw, str) and raw.startswith("gcm1:"):
+            try:
+                return decrypt_pii(raw)
+            except Exception:
+                return ""
+        return str(raw)
+
     return {
-        "phone": user.get("phone") or "",
-        "country": user.get("country") or "",
-        "address": user.get("address") or "",
-        "professional_title": user.get("professional_title") or "",
-        "qualification": user.get("qualification") or "",
-        "emergency_contact": user.get("emergency_contact") or "",
+        "phone": value("phone"),
+        "country": value("country"),
+        "address": value("address"),
+        "professional_title": value("professional_title"),
+        "qualification": value("qualification"),
+        "emergency_contact": value("emergency_contact"),
         "profile_completed": bool(user.get("profile_completed_at")),
     }
 
@@ -880,6 +889,9 @@ async def login(req: LoginRequest, request: Request):
         "referral_code": _generate_referral_code(),
         "terms_accepted": bool(user.get("terms_accepted_at")),
         "user_category": _auth_user_category(user),
+        "institution_id": user.get("institution_id"),
+        "profile_completed": bool(user.get("profile_completed_at")) if user.get("role_type") in {"school_admin", "counsellor"} else True,
+        "staff_role": user.get("role_type") if _auth_user_category(user) == "staff" else None,
         "access_token": token,
     }
 
@@ -1034,6 +1046,7 @@ async def get_me(user: dict = Depends(require_auth)):
         ),
         "staff_role": user.get("role_type") if _auth_user_category(user) == "staff" else None,
         "institution_permissions": list(__import__("backend.permissions", fromlist=["user_permissions"]).user_permissions(user)),
+        "profile": _staff_profile_payload(user) if user.get("role_type") in {"counsellor", "school_admin"} else None,
     }
 
 
@@ -1464,6 +1477,10 @@ async def google_auth(data: dict, request: Request):
         "role_type": user["role_type"],
         "referral_code": _generate_referral_code(),
         "terms_accepted": bool(user.get("terms_accepted_at")),
+        "user_category": _auth_user_category(user),
+        "institution_id": user.get("institution_id"),
+        "profile_completed": bool(user.get("profile_completed_at")) if user.get("role_type") in {"school_admin", "counsellor"} else True,
+        "staff_role": user.get("role_type") if _auth_user_category(user) == "staff" else None,
         "access_token": token,
     }
 
@@ -2793,6 +2810,13 @@ async def patch_staff_profile(data: dict, request: Request, user: dict = Depends
     updated = update_staff_profile(user["id"], **data)
     write_audit(user["id"], user["role_type"], "STAFF_PROFILE_UPDATED", "user", user["id"], ip=_client_ip(request))
     return {"ok": True, "profile": _staff_profile_payload(updated or user), "user": updated}
+
+
+@app.get("/api/institution/staff/profile")
+async def get_staff_profile(user: dict = Depends(require_auth)):
+    if user.get("role_type") not in {"school_admin", "counsellor"}:
+        raise HTTPException(403, "Staff account required")
+    return _staff_profile_payload(user)
 
 
 @app.post("/api/admin/counsellors")
@@ -4918,9 +4942,26 @@ async def v1_admin_roster_commit(
     )
     student_ids = summary.get("student_ids") or []
     students = [s for s in (get_student_by_id(i) for i in student_ids) if s]
-    dispatch = dispatch_consents_for_students(
-        students, user["id"], ip=_client_ip(request)
-    )
+    try:
+        dispatch = dispatch_consents_for_students(
+            students, user["id"], ip=_client_ip(request)
+        )
+    except Exception:
+        # Roster ingestion is already committed at this point. Keep the
+        # imported students visible and return a structured dispatch failure
+        # instead of turning the whole operation into an opaque HTTP 500.
+        logger.exception("Roster consent dispatch failed institution=%s", institution_id)
+        dispatch = {
+            "checked": len(students),
+            "created": 0,
+            "dispatched": 0,
+            "email_queued": 0,
+            "courtesy_queued": 0,
+            "skipped_live": 0,
+            "skipped_no_parent": 0,
+            "users_created": 0,
+            "routing_errors": [{"student_id": "batch", "reason": "Consent dispatch failed; retry from the student onboarding page."}],
+        }
     write_audit(
         user["id"],
         user["role_type"],
