@@ -252,8 +252,22 @@ def upsert_roster(
     for item in valid_rows_data:
         id_hash = crypto.hash_student_id(item["student_id"])
         
-        # Deduplicate against existing records
-        existing = email_to_student.get(item["email"]) or id_hash_to_student.get(id_hash)
+        # Deduplicate against existing records. student_id_hash is currently
+        # unique at the database level, so also perform a global lookup. This
+        # prevents a retry from attempting a duplicate INSERT when an earlier
+        # import already created the roster record.
+        existing = (
+            email_to_student.get(item["email"])
+            or id_hash_to_student.get(id_hash)
+            or database.get_student_by_student_id_hash(id_hash)
+        )
+        if existing and existing.get("institution_id") != institution_id:
+            summary["errors"].append({
+                "row_number": item["row_number"],
+                "row": item["row"],
+                "error": "student_id is already enrolled by another institution; use the institution's unique student ID or contact a global administrator",
+            })
+            continue
 
         payload = dict(
             institution_id=institution_id,
