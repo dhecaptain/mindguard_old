@@ -146,6 +146,7 @@ from backend.database import (
     get_rolling_risk_history,
     get_user_by_referral_code,
     get_all_users,
+    permanently_delete_user,
     update_user_password,
     update_staff_profile,
     update_user_role,
@@ -3874,6 +3875,45 @@ async def admin_list_users(user: dict = Depends(require_auth)):
     if user["role_type"] != "admin":
         raise HTTPException(403, "Admin access required")
     return get_all_users()
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_permanently_delete_user(
+    user_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Permanently remove a user and their owned records.
+
+    The exact email is required as a deliberate destructive-action
+    confirmation. Global admins cannot delete themselves or the final global
+    administrator; audit history is retained for accountability.
+    """
+    if user["role_type"] != "admin":
+        raise HTTPException(403, "Admin access required")
+    if user_id == user["id"]:
+        raise HTTPException(400, "You cannot permanently delete your own account")
+    target = get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(404, "User not found")
+    if (data.get("confirmation") or "").strip().lower() != str(target.get("email") or "").strip().lower():
+        raise HTTPException(400, "Type the user's exact email address to confirm permanent deletion")
+    if target.get("role_type") == "admin":
+        remaining_admins = [u for u in get_all_users() if u.get("role_type") == "admin" and u.get("id") != user_id]
+        if not remaining_admins:
+            raise HTTPException(409, "The final global administrator cannot be deleted")
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "USER_PERMANENTLY_DELETED",
+        "user",
+        user_id,
+        payload={"email": target.get("email"), "role_type": target.get("role_type")},
+        ip=request.client.host if request.client else None,
+    )
+    deleted = permanently_delete_user(user_id)
+    return {"ok": True, "deleted_user_id": deleted["id"] if deleted else user_id}
 
 
 @app.get("/api/admin/individuals")

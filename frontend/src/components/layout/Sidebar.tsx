@@ -60,9 +60,11 @@ const ADMIN_NAV_ITEMS = [
   { key: 'institutions', icon: 'ti ti-building-community', label: 'Institutions' },
   { key: 'counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
-  { key: 'students', icon: 'ti ti-users', label: 'Students' },
+  { key: 'students', icon: 'ti ti-school', label: 'Students' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit' },
-  ...COUNSELLOR_NAV_BASE.filter((i) => !['consent-tracker', 'students', 'audit-log'].includes(i.key)),
+  { key: 'alert-queue', icon: 'ti ti-bell-ringing', label: 'Alert Queue' },
+  { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },
+  { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ]
 

@@ -811,6 +811,107 @@ def get_all_users() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def permanently_delete_user(user_id: str) -> dict | None:
+    """Delete a user and their directly-owned records in one transaction.
+
+    This is intentionally explicit instead of relying on SQLite cascades: much
+    of the legacy schema predates foreign-key cascades, and consent/analysis
+    records must be removed in dependency order. Audit rows are retained for
+    accountability but the user's operational and personal records are not.
+    """
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        target = conn.execute(
+            "SELECT id, email, name, role_type, institution_id FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not target:
+            conn.rollback()
+            return None
+
+        # Keep audit history, but detach references that would otherwise point
+        # at a deleted account. The audit event written by the API before this
+        # transaction remains as the deletion record.
+        consent_ids = [
+            row[0] for row in conn.execute(
+                "SELECT id FROM consents WHERE student_id = ? OR counsellor_id = ?",
+                (user_id, user_id),
+            ).fetchall()
+        ]
+        if consent_ids:
+            marks = ",".join("?" for _ in consent_ids)
+            conn.execute(f"UPDATE students SET current_consent_id = NULL WHERE current_consent_id IN ({marks})", consent_ids)
+            conn.execute(f"DELETE FROM consent_events WHERE consent_id IN ({marks})", consent_ids)
+            conn.execute(f"DELETE FROM linked_accounts WHERE consent_id IN ({marks})", consent_ids)
+            conn.execute(f"DELETE FROM analysis_sessions WHERE consent_id IN ({marks})", consent_ids)
+            conn.execute(f"DELETE FROM consents WHERE id IN ({marks})", consent_ids)
+
+        conn.execute("UPDATE students SET created_by = NULL WHERE created_by = ?", (user_id,))
+        conn.execute("UPDATE users SET parent_guardian_id = NULL WHERE parent_guardian_id = ?", (user_id,))
+
+        # Groups created by the account are user-owned; remove their messages
+        # and memberships before removing the group itself.
+        group_ids = [row[0] for row in conn.execute("SELECT id FROM groups WHERE created_by = ?", (user_id,)).fetchall()]
+        if group_ids:
+            marks = ",".join("?" for _ in group_ids)
+            message_ids = [row[0] for row in conn.execute(f"SELECT id FROM group_messages WHERE group_id IN ({marks})", group_ids).fetchall()]
+            if message_ids:
+                message_marks = ",".join("?" for _ in message_ids)
+                conn.execute(f"DELETE FROM group_message_read WHERE message_id IN ({message_marks})", message_ids)
+                conn.execute(f"DELETE FROM group_messages WHERE id IN ({message_marks})", message_ids)
+            conn.execute(f"DELETE FROM group_members WHERE group_id IN ({marks})", group_ids)
+            conn.execute(f"DELETE FROM groups WHERE id IN ({marks})", group_ids)
+
+        # Messages sent by the account in groups owned by someone else also
+        # have a required users foreign key.
+        message_ids = [row[0] for row in conn.execute("SELECT id FROM group_messages WHERE sender_id = ?", (user_id,)).fetchall()]
+        if message_ids:
+            marks = ",".join("?" for _ in message_ids)
+            conn.execute(f"DELETE FROM group_message_read WHERE message_id IN ({marks})", message_ids)
+            conn.execute(f"DELETE FROM group_messages WHERE id IN ({marks})", message_ids)
+
+        for table, columns in (
+            ("analyses", ("user_id",)),
+            ("analysis_sessions", ("student_id", "counsellor_id")),
+            ("referrals", ("student_id", "counsellor_id")),
+            ("communications", ("sender_id", "receiver_id")),
+            ("notifications", ("user_id",)),
+            ("alerts", ("student_id", "counsellor_id")),
+            ("notes", ("student_id", "author_id")),
+            ("rolling_risk", ("student_id",)),
+            ("student_social_accounts", ("student_id",)),
+            ("counsellor_student_assignments", ("student_id", "counsellor_id", "assigned_by")),
+            ("group_members", ("user_id",)),
+            ("group_message_read", ("user_id",)),
+            ("notification_preferences", ("user_id",)),
+        ):
+            for column in columns:
+                conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (user_id,))
+
+        # Roster rows do not have a durable user_id column in older databases;
+        # match the encrypted roster email before removing the account.
+        target_email = str(target["email"] or "").strip().lower()
+        roster_ids = []
+        for row in conn.execute("SELECT id, email_encrypted FROM students").fetchall():
+            try:
+                if str(_decrypt_field(row[1]) or "").strip().lower() == target_email:
+                    roster_ids.append(row[0])
+            except Exception:
+                continue
+        if roster_ids:
+            marks = ",".join("?" for _ in roster_ids)
+            conn.execute(f"DELETE FROM students WHERE id IN ({marks})", roster_ids)
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+        return dict(target)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def accept_user_terms(user_id: str) -> bool:
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()

@@ -3,6 +3,7 @@ import { broadcastNotification } from '../api/auth'
 import api from '../api/client'
 import DemoRequestsPanel from '../components/admin/DemoRequestsPanel'
 import AuditTrailPanel from '../components/admin/AuditTrailPanel'
+import { permanentlyDeleteAdminUser } from '../api/admin'
 
 interface SystemUser {
   id: string
@@ -23,6 +24,9 @@ export default function AdminPage() {
   const [population, setPopulation] = useState({ institutionStudents: 0, individuals: 0 })
   const [loadingUsers, setLoadingUsers] = useState(true)
   const [usersError, setUsersError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<SystemUser | null>(null)
+  const [deleteConfirmation, setDeleteConfirmation] = useState('')
+  const [deleting, setDeleting] = useState(false)
 
   const loadUsers = () => {
     setLoadingUsers(true)
@@ -64,6 +68,24 @@ export default function AdminPage() {
       setError(error.response?.data?.detail ?? 'Failed to send broadcast')
     }
     setSending(false)
+  }
+
+  const handleDeleteUser = async () => {
+    if (!deleteTarget || deleteConfirmation.trim().toLowerCase() !== deleteTarget.email.toLowerCase()) return
+    setDeleting(true)
+    setError(null)
+    try {
+      await permanentlyDeleteAdminUser(deleteTarget.id, deleteConfirmation.trim())
+      setSuccess(`${deleteTarget.email} was permanently deleted.`)
+      setDeleteTarget(null)
+      setDeleteConfirmation('')
+      loadUsers()
+    } catch (e: unknown) {
+      const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail
+      setError(detail ?? 'Unable to permanently delete this user')
+    } finally {
+      setDeleting(false)
+    }
   }
 
   const counts = {
@@ -189,6 +211,7 @@ export default function AdminPage() {
                   <th className="pb-[8px] font-semibold">Email</th>
                   <th className="pb-[8px] font-semibold">Role</th>
                   <th className="pb-[8px] font-semibold">Status</th>
+                  <th className="pb-[8px] font-semibold text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -208,6 +231,7 @@ export default function AdminPage() {
                         u.status === 'approved' ? 'bg-[#d1fae5] text-[#065f46]' : 'bg-[#f3f4f6] text-[#6b7280]'
                       }`}>{u.status}</span>
                     </td>
+                    <td className="py-[8px] text-right"><button type="button" onClick={() => { setDeleteTarget(u); setDeleteConfirmation(''); setError(null) }} className="rounded-md border border-red-200 px-2 py-1 text-[0.68rem] font-semibold text-red-700 hover:bg-red-50">Delete permanently</button></td>
                   </tr>
                 ))}
               </tbody>
@@ -221,6 +245,8 @@ export default function AdminPage() {
 
       {/* Compliance & audit trail */}
       <AuditTrailPanel />
+
+      {deleteTarget && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"><div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl"><div className="flex items-start gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-700"><i className="ti ti-trash text-xl" /></div><div><h3 className="text-lg font-bold text-slate-900">Permanently delete user?</h3><p className="mt-1 text-sm leading-5 text-slate-600">This removes the account, roster link, consent records, analyses, messages, assignments, and other user-owned data. Audit history is retained. This cannot be undone.</p></div></div><p className="mt-4 text-sm text-slate-700">Type <strong>{deleteTarget.email}</strong> to confirm.</p><input autoFocus type="email" value={deleteConfirmation} onChange={(e) => setDeleteConfirmation(e.target.value)} className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-red-500" placeholder={deleteTarget.email} /><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => { setDeleteTarget(null); setDeleteConfirmation('') }} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700">Cancel</button><button type="button" onClick={handleDeleteUser} disabled={deleting || deleteConfirmation.trim().toLowerCase() !== deleteTarget.email.toLowerCase()} className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">{deleting ? 'Deleting…' : 'Delete permanently'}</button></div></div></div>}
     </div>
   )
 }
