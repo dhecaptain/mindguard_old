@@ -36,7 +36,6 @@ from backend.database import (
     mark_analyses_consent_withdrawn,
     set_student_current_consent,
     set_user_invitation,
-    update_user_onboarding,
     update_student,
     update_consent_status,
     write_audit,
@@ -707,8 +706,9 @@ def _resolve_student_user(student: dict) -> str | None:
         return None
     existing = get_user_by_email(email)
     if existing:
-        if not existing.get("institution_id"):
-            update_user_onboarding(existing["id"], "institution_managed", student.get("institution_id"))
+        # The roster's durable user-to-institution relationship is
+        # students.user_id. Do not silently mutate an existing account's
+        # category while dispatching a consent request.
         return existing["id"]
     name = "Student"
     try:

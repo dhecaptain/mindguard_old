@@ -269,7 +269,6 @@ def upsert_roster(
         # only for this reconciliation step; the durable relationship is the
         # students.user_id foreign key.
         account = database.get_user_by_email(item["email"])
-        account_to_link = None
         if account and account.get("role_type") == "student":
             account_institution = account.get("institution_id")
             if account_institution and account_institution != institution_id:
@@ -279,8 +278,10 @@ def upsert_roster(
                     "error": "student account belongs to a different institution",
                 })
                 continue
-            if not account_institution:
-                account_to_link = account["id"]
+            # A roster relationship is explicit through students.user_id. Do
+            # not rewrite an existing person's account category/institution in
+            # the middle of a bulk upload: it is both a privacy-sensitive
+            # change and a separate SQLite writer that can lock the import.
             payload["user_id"] = account["id"]
         if item["parent_email"]:
             payload["parent_email_encrypted"] = crypto.encrypt_pii(item["parent_email"])
@@ -290,7 +291,6 @@ def upsert_roster(
             saved, created = database.upsert_roster_student(
                 payload,
                 existing_student_id=existing["id"] if existing else None,
-                link_existing_user_id=account_to_link,
             )
             if created:
                 summary["created"] += 1
