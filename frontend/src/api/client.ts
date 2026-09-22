@@ -26,7 +26,8 @@ api.interceptors.response.use(
       const onAuthRoute =
         window.location.pathname.startsWith('/auth/') ||
         window.location.pathname.startsWith('/consent/') ||
-        window.location.pathname === '/demo'
+        window.location.pathname === '/demo' ||
+        window.location.pathname.startsWith('/demo/respond')
       if (!onAuthRoute && !_reloading401) {
         _reloading401 = true
         window.location.href = '/'

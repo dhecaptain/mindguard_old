@@ -7,6 +7,8 @@ import type {
   RosterCommitResult,
   RosterStudent,
   RosterUploadSummary,
+  InstitutionSetup,
+  InstitutionStaff,
 } from '../types'
 
 // ─── Roster & School Admin (Delivery Brief §5) ────────────────────────────────
@@ -26,6 +28,85 @@ export async function createInstitution(
 
 export async function updateInstitution(id: string, patch: { status?: string; name?: string; type?: string }): Promise<Institution> {
   const { data } = await api.patch(`/v1/admin/institutions/${id}`, patch)
+  return data
+}
+
+export async function getInstitutionSetup(): Promise<InstitutionSetup> {
+  const { data } = await api.get('/institution/setup')
+  return data
+}
+
+export async function getInstitutionStaff(): Promise<InstitutionStaff[]> {
+  const { data } = await api.get('/institution/staff')
+  return data
+}
+
+export async function inviteInstitutionStaff(payload: { name: string; email: string; role_type: 'school_admin' | 'counsellor'; institution_id?: string }) {
+  const { data } = await api.post('/institution/staff', payload)
+  return data
+}
+
+export async function markInstitutionReady() {
+  const { data } = await api.post('/institution/ready')
+  return data
+}
+
+export interface InstitutionStudentStatus {
+  id: string
+  account_id?: string | null
+  name: string
+  email: string
+  is_minor: boolean
+  grade_level?: string | null
+  account_status?: string | null
+  consent_status?: string | null
+  counsellor_id?: string | null
+  counsellor_name?: string | null
+  invitation_pending: boolean
+  onboarding_state: string
+}
+
+export interface InstitutionAssignment {
+  id: string
+  student_id: string
+  student_name: string
+  student_email: string
+  counsellor_id: string
+  counsellor_name: string
+  counsellor_email: string
+  assigned_at: string
+}
+
+export async function getInstitutionStudentStatus(): Promise<InstitutionStudentStatus[]> {
+  const { data } = await api.get('/institution/students/status')
+  return data
+}
+
+export async function resendStudentInvite(studentId: string) {
+  const { data } = await api.post(`/institution/students/${studentId}/resend-invite`)
+  return data
+}
+
+export async function getInstitutionAssignments(): Promise<InstitutionAssignment[]> {
+  const { data } = await api.get('/institution/assignments')
+  return data
+}
+
+export async function getAssignableInstitutionUsers(): Promise<{
+  counsellors: Array<{ id: string; name: string; email: string; status: string; profile_completed_at?: string }>
+  students: Array<{ id: string; name: string; email: string; status: string; assignment_id?: string; counsellor_id?: string; counsellor_name?: string }>
+}> {
+  const { data } = await api.get('/institution/assignable')
+  return data
+}
+
+export async function assignInstitutionStudent(counsellorId: string, studentId: string) {
+  const { data } = await api.post('/institution/assignments', { counsellor_id: counsellorId, student_id: studentId })
+  return data
+}
+
+export async function removeInstitutionAssignment(id: string) {
+  const { data } = await api.delete(`/institution/assignments/${id}`)
   return data
 }
 

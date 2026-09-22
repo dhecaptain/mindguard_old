@@ -17,6 +17,7 @@ import AdultAccountsPage from './pages/AdultAccountsPage'
 import AnalysisHistoryPage from './pages/AnalysisHistoryPage'
 import AnalysisSessionPage from './pages/AnalysisSessionPage'
 import DemoRequestPage from './pages/DemoRequestPage'
+import DemoResponsePage from './pages/DemoResponsePage'
 import DashboardPage from './pages/DashboardPage'
 import TextImageAnalysisPage from './pages/TextImageAnalysisPage'
 import BatchAnalysisPage from './pages/BatchAnalysisPage'
@@ -46,6 +47,9 @@ import AppointmentsPage from './pages/AppointmentsPage'
 import LandingPage from './pages/LandingPage'
 import InstitutionWorkspacePage from './pages/InstitutionWorkspacePage'
 import AdminInstitutionsPage from './pages/AdminInstitutionsPage'
+import StaffProfilePage from './pages/StaffProfilePage'
+import InstitutionStudentsPage from './pages/InstitutionStudentsPage'
+import InstitutionAssignmentsPage from './pages/InstitutionAssignmentsPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -118,6 +122,8 @@ function PageRouter() {
   if (role === 'counsellor' || role === 'school_admin') {
     switch (currentPage) {
       case 'institution': return <InstitutionWorkspacePage />
+      case 'institution-students': return <InstitutionStudentsPage />
+      case 'assignments': return <InstitutionAssignmentsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
       case 'batch': return <BatchAnalysisPage />
@@ -280,6 +286,10 @@ export default function App() {
     return <DemoRequestPage />
   }
 
+  if (window.location.pathname === '/demo/respond' || window.location.pathname.startsWith('/demo/respond/')) {
+    return <DemoResponsePage />
+  }
+
   if (!authenticated) {
     if (window.location.pathname === '/' || window.location.pathname === '') {
       return <LandingPage />
@@ -294,6 +304,10 @@ export default function App() {
   const userCat = (useAuthStore.getState().user as unknown as { user_category?: string })?.user_category
   const roleType = (useAuthStore.getState().user as unknown as { role_type?: string })?.role_type
   const isStaff = roleType === 'admin' || roleType === 'school_admin' || roleType === 'counsellor' || userCat === 'staff'
+  if (roleType === 'school_admin' || roleType === 'counsellor') {
+    const profileCompleted = (useAuthStore.getState().user as unknown as { profile_completed?: boolean })?.profile_completed
+    if (!profileCompleted) return <StaffProfilePage />
+  }
   if (!isStaff && (userCat === 'pending' || !userCat)) {
     return <OnboardingPage onComplete={() => window.location.reload()} />
   }

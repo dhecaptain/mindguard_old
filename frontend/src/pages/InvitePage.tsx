@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
 import api from '../api/client'
+import { setToken } from '../lib/tokenStorage'
+import { useAuthStore } from '../store/authStore'
+import { useUiStore } from '../store/uiStore'
 
 export default function InvitePage() {
   const params = new URLSearchParams(window.location.search)
@@ -11,6 +14,8 @@ export default function InvitePage() {
   const [status, setStatus] = useState<'loading' | 'ready' | 'done' | 'error'>('loading')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const setAuth = useAuthStore((state) => state.setAuth)
+  const setPage = useUiStore((state) => state.setPage)
 
   useEffect(() => {
     if (!token) {
@@ -42,8 +47,13 @@ export default function InvitePage() {
     setSubmitting(true)
     setError(null)
     try {
-      await api.post('/auth/invite/accept', { token, password })
-      setStatus('done')
+      const { data } = await api.post('/auth/invite/accept', { token, password })
+      if (data.access_token && data.user) {
+        setToken(data.access_token)
+        setAuth({ ...data.user, role: data.user.role_type, referral_code: '', terms_accepted: false, user_category: data.user.user_category })
+        setPage(data.user.role_type === 'school_admin' || data.user.role_type === 'counsellor' ? 'institution' : 'dashboard')
+        window.location.href = '/'
+      } else setStatus('done')
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to accept invitation'
       setError(msg)

@@ -23,3 +23,28 @@ export async function submitDemoRequest(payload: DemoSubmission): Promise<{
   const { data } = await api.post('/v1/demo-requests', payload)
   return data
 }
+
+export interface DemoResponseDetails {
+  full_name: string | null
+  organisation: string | null
+  meeting_at: string | null
+  meeting_url: string | null
+  meeting_response: string | null
+}
+
+export async function getDemoResponseDetails(token: string): Promise<DemoResponseDetails> {
+  const { data } = await api.get('/v1/demo-requests/respond', { params: { token } })
+  return data
+}
+
+export async function respondToDemoMeeting(
+  token: string,
+  action: 'accept' | 'reschedule',
+  note?: string,
+): Promise<{ ok: boolean; meeting_response: string }> {
+  const { data } = await api.post('/v1/demo-requests/respond', {
+    action,
+    ...(note?.trim() ? { note: note.trim() } : {}),
+  }, { params: { token } })
+  return data
+}

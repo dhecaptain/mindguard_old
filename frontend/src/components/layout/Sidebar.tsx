@@ -45,6 +45,14 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit Log' },
 ] as const
 
+const SCHOOL_ADMIN_NAV_ITEMS = [
+  { key: 'institution', icon: 'ti ti-building-community', label: 'Institution setup' },
+  { key: 'institution-students', icon: 'ti ti-users', label: 'Student onboarding' },
+  { key: 'assignments', icon: 'ti ti-user-check', label: 'Assignments' },
+  { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
+  { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },
+] as const
+
 const ADMIN_NAV_ITEMS = [
   { key: 'admin', icon: 'ti ti-shield-check', label: 'Dashboard' },
   { key: 'institutions', icon: 'ti ti-building-community', label: 'Institutions' },
@@ -95,7 +103,9 @@ export default function Sidebar() {
     ? ADMIN_NAV_ITEMS.map((item) =>
         item.key === 'alert-queue' && openAlertCount > 0 ? { ...item, badge: openAlertCount } : item
       )
-    : isCounsellor
+    : role === 'school_admin'
+      ? SCHOOL_ADMIN_NAV_ITEMS
+      : isCounsellor
       ? COUNSELLOR_NAV_BASE.map((item) =>
           item.key === 'alert-queue' && openAlertCount > 0 ? { ...item, badge: openAlertCount } : item
         )

@@ -168,12 +168,12 @@ export default function DemoRequestsPanel() {
             <thead className="bg-[#f9fafb]">
               <tr className="text-[#6b7280] font-semibold text-[0.72rem] uppercase tracking-wider">
                 <th className="text-left py-[10px] px-[20px]">Requester</th>
+                <th className="text-left py-[10px] px-[20px]">Meeting</th>
+                <th className="text-left py-[10px] px-[20px]">Onboarding</th>
                 <th className="text-left py-[10px] px-[20px]">Organisation</th>
                 <th className="text-left py-[10px] px-[20px]">Type</th>
                 <th className="text-left py-[10px] px-[20px]">Status</th>
                 <th className="text-left py-[10px] px-[20px]">Assigned to</th>
-                <th className="text-left py-[10px] px-[20px]">Meeting</th>
-                <th className="text-left py-[10px] px-[20px]">Onboarding</th>
                 <th className="text-left py-[10px] px-[20px]">Notes</th>
                 <th className="text-left py-[10px] px-[20px]">Submitted</th>
               </tr>
