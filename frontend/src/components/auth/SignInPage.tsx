@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect */
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store'
 import { useUiStore } from '../../store'
@@ -44,6 +45,7 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
       setAuth(user)
       const rt = user.role_type?.toLowerCase()
       if (rt === 'counsellor') setPage('counsellor-dashboard')
+      else if (rt === 'school_admin') setPage('institution')
       else if (rt === 'admin') setPage('admin')
       onSuccess()
     } catch (err: any) {

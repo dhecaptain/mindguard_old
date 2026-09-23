@@ -496,8 +496,12 @@ def set_user_invitation(user_id: str, token_hash: str, expires_at: str) -> bool:
 def update_staff_profile(user_id: str, **fields) -> dict | None:
     """Update the operational profile for a provisioned staff member."""
     allowed = {
-        "phone", "country", "address", "professional_title",
-        "qualification", "emergency_contact",
+        "phone",
+        "country",
+        "address",
+        "professional_title",
+        "qualification",
+        "emergency_contact",
     }
     updates = [(key, value) for key, value in fields.items() if key in allowed]
     if not updates:
@@ -515,7 +519,10 @@ def update_staff_profile(user_id: str, **fields) -> dict | None:
     complete = all(str(values.get(field) or "").strip() for field in required)
     conn = get_db()
     assignments = [f"{key} = ?" for key, _ in updates]
-    params = [encrypt_pii(str(value).strip()) if value not in (None, "") else None for _, value in updates]
+    params = [
+        encrypt_pii(str(value).strip()) if value not in (None, "") else None
+        for _, value in updates
+    ]
     if complete:
         assignments.append("profile_completed_at = COALESCE(profile_completed_at, ?)")
         params.append(datetime.now(timezone.utc).isoformat())
@@ -842,39 +849,67 @@ def permanently_delete_user(user_id: str) -> dict | None:
         # at a deleted account. The audit event written by the API before this
         # transaction remains as the deletion record.
         consent_ids = [
-            row[0] for row in conn.execute(
+            row[0]
+            for row in conn.execute(
                 "SELECT id FROM consents WHERE student_id = ? OR counsellor_id = ?",
                 (user_id, user_id),
             ).fetchall()
         ]
         if consent_ids:
             marks = ",".join("?" for _ in consent_ids)
-            conn.execute(f"UPDATE students SET current_consent_id = NULL WHERE current_consent_id IN ({marks})", consent_ids)
-            conn.execute(f"DELETE FROM consent_events WHERE consent_id IN ({marks})", consent_ids)
-            conn.execute(f"DELETE FROM linked_accounts WHERE consent_id IN ({marks})", consent_ids)
-            conn.execute(f"DELETE FROM analysis_sessions WHERE consent_id IN ({marks})", consent_ids)
+            conn.execute(
+                f"UPDATE students SET current_consent_id = NULL WHERE current_consent_id IN ({marks})",
+                consent_ids,
+            )
+            conn.execute(
+                f"DELETE FROM consent_events WHERE consent_id IN ({marks})", consent_ids
+            )
+            conn.execute(
+                f"DELETE FROM linked_accounts WHERE consent_id IN ({marks})",
+                consent_ids,
+            )
+            conn.execute(
+                f"DELETE FROM analysis_sessions WHERE consent_id IN ({marks})",
+                consent_ids,
+            )
             conn.execute(f"DELETE FROM consents WHERE id IN ({marks})", consent_ids)
 
         # Consent-event actor references are nullable in the current schema but
         # may be foreign keys in production migrations. Detach them before the
         # account is removed while retaining the event history itself.
-        conn.execute("UPDATE consent_events SET actor_id = NULL WHERE actor_id = ?", (user_id,))
+        conn.execute(
+            "UPDATE consent_events SET actor_id = NULL WHERE actor_id = ?", (user_id,)
+        )
 
-        conn.execute("UPDATE students SET created_by = NULL WHERE created_by = ?", (user_id,))
-        conn.execute("UPDATE users SET parent_guardian_id = NULL WHERE parent_guardian_id = ?", (user_id,))
+        conn.execute(
+            "UPDATE students SET created_by = NULL WHERE created_by = ?", (user_id,)
+        )
+        conn.execute(
+            "UPDATE users SET parent_guardian_id = NULL WHERE parent_guardian_id = ?",
+            (user_id,),
+        )
         # These tables were added by later migrations and are not present in
         # every older local database, so guard each cleanup by table existence.
         table_names = {
-            row[0] for row in conn.execute(
+            row[0]
+            for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
         if "institutions" in table_names:
-            institution_columns = {row[1] for row in conn.execute("PRAGMA table_info(institutions)").fetchall()}
+            institution_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(institutions)").fetchall()
+            }
             if "created_by" in institution_columns:
-                conn.execute("UPDATE institutions SET created_by = NULL WHERE created_by = ?", (user_id,))
+                conn.execute(
+                    "UPDATE institutions SET created_by = NULL WHERE created_by = ?",
+                    (user_id,),
+                )
         if "students" in table_names:
-            student_columns = {row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()}
+            student_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(students)").fetchall()
+            }
             if "user_id" in student_columns:
                 conn.execute("DELETE FROM students WHERE user_id = ?", (user_id,))
         if "appointments" in table_names:
@@ -884,36 +919,72 @@ def permanently_delete_user(user_id: str) -> dict | None:
             )
         if "referral_events" in table_names:
             referral_ids = [
-                row[0] for row in conn.execute(
+                row[0]
+                for row in conn.execute(
                     "SELECT id FROM referrals WHERE student_id = ? OR counsellor_id = ?",
                     (user_id, user_id),
                 ).fetchall()
             ]
             if referral_ids:
                 marks = ",".join("?" for _ in referral_ids)
-                conn.execute(f"DELETE FROM referral_events WHERE referral_id IN ({marks})", referral_ids)
-            conn.execute("UPDATE referral_events SET actor_id = NULL WHERE actor_id = ?", (user_id,))
+                conn.execute(
+                    f"DELETE FROM referral_events WHERE referral_id IN ({marks})",
+                    referral_ids,
+                )
+            conn.execute(
+                "UPDATE referral_events SET actor_id = NULL WHERE actor_id = ?",
+                (user_id,),
+            )
 
         # Groups created by the account are user-owned; remove their messages
         # and memberships before removing the group itself.
-        group_ids = [row[0] for row in conn.execute("SELECT id FROM groups WHERE created_by = ?", (user_id,)).fetchall()]
+        group_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM groups WHERE created_by = ?", (user_id,)
+            ).fetchall()
+        ]
         if group_ids:
             marks = ",".join("?" for _ in group_ids)
-            message_ids = [row[0] for row in conn.execute(f"SELECT id FROM group_messages WHERE group_id IN ({marks})", group_ids).fetchall()]
+            message_ids = [
+                row[0]
+                for row in conn.execute(
+                    f"SELECT id FROM group_messages WHERE group_id IN ({marks})",
+                    group_ids,
+                ).fetchall()
+            ]
             if message_ids:
                 message_marks = ",".join("?" for _ in message_ids)
-                conn.execute(f"DELETE FROM group_message_read WHERE message_id IN ({message_marks})", message_ids)
-                conn.execute(f"DELETE FROM group_messages WHERE id IN ({message_marks})", message_ids)
-            conn.execute(f"DELETE FROM group_members WHERE group_id IN ({marks})", group_ids)
+                conn.execute(
+                    f"DELETE FROM group_message_read WHERE message_id IN ({message_marks})",
+                    message_ids,
+                )
+                conn.execute(
+                    f"DELETE FROM group_messages WHERE id IN ({message_marks})",
+                    message_ids,
+                )
+            conn.execute(
+                f"DELETE FROM group_members WHERE group_id IN ({marks})", group_ids
+            )
             conn.execute(f"DELETE FROM groups WHERE id IN ({marks})", group_ids)
 
         # Messages sent by the account in groups owned by someone else also
         # have a required users foreign key.
-        message_ids = [row[0] for row in conn.execute("SELECT id FROM group_messages WHERE sender_id = ?", (user_id,)).fetchall()]
+        message_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM group_messages WHERE sender_id = ?", (user_id,)
+            ).fetchall()
+        ]
         if message_ids:
             marks = ",".join("?" for _ in message_ids)
-            conn.execute(f"DELETE FROM group_message_read WHERE message_id IN ({marks})", message_ids)
-            conn.execute(f"DELETE FROM group_messages WHERE id IN ({marks})", message_ids)
+            conn.execute(
+                f"DELETE FROM group_message_read WHERE message_id IN ({marks})",
+                message_ids,
+            )
+            conn.execute(
+                f"DELETE FROM group_messages WHERE id IN ({marks})", message_ids
+            )
 
         for table, columns in (
             ("analyses", ("user_id",)),
@@ -925,7 +996,10 @@ def permanently_delete_user(user_id: str) -> dict | None:
             ("notes", ("student_id", "author_id")),
             ("rolling_risk", ("student_id",)),
             ("student_social_accounts", ("student_id",)),
-            ("counsellor_student_assignments", ("student_id", "counsellor_id", "assigned_by")),
+            (
+                "counsellor_student_assignments",
+                ("student_id", "counsellor_id", "assigned_by"),
+            ),
             ("group_members", ("user_id",)),
             ("group_message_read", ("user_id",)),
             ("notification_preferences", ("user_id",)),
@@ -2855,7 +2929,9 @@ def purge_roster_student(student_id: str) -> dict | None:
     """
     conn = get_db()
     try:
-        row = conn.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM students WHERE id = ?", (student_id,)
+        ).fetchone()
         if not row:
             return None
         conn.execute("DELETE FROM students WHERE id = ?", (student_id,))
@@ -2930,10 +3006,17 @@ def upsert_roster_student(
     cannot trigger an independent competing SQLite write mid-import.
     """
     allowed = {
-        "institution_id", "student_id_hash", "first_name_encrypted",
-        "email_encrypted", "date_of_birth_encrypted", "is_minor",
-        "parent_email_encrypted", "parent_first_name_encrypted",
-        "grade_level", "user_id", "created_by",
+        "institution_id",
+        "student_id_hash",
+        "first_name_encrypted",
+        "email_encrypted",
+        "date_of_birth_encrypted",
+        "is_minor",
+        "parent_email_encrypted",
+        "parent_first_name_encrypted",
+        "grade_level",
+        "user_id",
+        "created_by",
     }
     row = {key: value for key, value in payload.items() if key in allowed}
     for attempt in range(8):
@@ -2944,7 +3027,11 @@ def upsert_roster_student(
                 conn.execute(
                     "UPDATE users SET user_category = 'institution_managed', institution_id = ?, onboarding_completed_at = ? "
                     "WHERE id = ? AND role_type = 'student' AND institution_id IS NULL",
-                    (row["institution_id"], datetime.now(timezone.utc).isoformat(), link_existing_user_id),
+                    (
+                        row["institution_id"],
+                        datetime.now(timezone.utc).isoformat(),
+                        link_existing_user_id,
+                    ),
                 )
             now = datetime.now(timezone.utc).isoformat()
             if existing_student_id:
@@ -2955,7 +3042,9 @@ def upsert_roster_student(
                         updates.append(f"{key} = ?")
                         params.append(value)
                 params.append(existing_student_id)
-                conn.execute(f"UPDATE students SET {', '.join(updates)} WHERE id = ?", params)
+                conn.execute(
+                    f"UPDATE students SET {', '.join(updates)} WHERE id = ?", params
+                )
                 student_id = existing_student_id
                 created = False
             else:
@@ -2974,7 +3063,7 @@ def upsert_roster_student(
             conn.rollback()
             if "locked" not in str(exc).lower() or attempt == 7:
                 raise
-            time.sleep(min(0.25 * (2 ** attempt), 5.0))
+            time.sleep(min(0.25 * (2**attempt), 5.0))
         finally:
             conn.close()
     raise RuntimeError("Roster transaction retry limit exceeded")
@@ -3574,14 +3663,21 @@ def save_social_account(
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     existing = conn.execute(
-        "SELECT id FROM student_social_accounts WHERE student_id = ? AND platform = ?",
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
         (student_id, slug),
     ).fetchone()
     if existing:
+        changed = (existing["handle"] or "") != (handle or "") or (
+            existing["profile_url"] or ""
+        ) != (profile_url or "")
         conn.execute(
             "UPDATE student_social_accounts SET handle = ?, profile_url = ?, updated_at = ?, active = 1, "
             "credentials_json = COALESCE(?, credentials_json), verification_status = ?, "
-            "verified_handle = COALESCE(?, verified_handle), verified_profile_url = COALESCE(?, verified_profile_url) "
+            "verified_handle = CASE WHEN ? THEN NULL ELSE COALESCE(?, verified_handle) END, "
+            "verified_profile_url = CASE WHEN ? THEN NULL ELSE COALESCE(?, verified_profile_url) END, "
+            "analysis_status = CASE WHEN ? THEN 'blocked' ELSE analysis_status END, "
+            "previous_handle = CASE WHEN ? THEN ? ELSE previous_handle END, "
+            "verification_code_hash = CASE WHEN ? THEN NULL ELSE verification_code_hash END "
             "WHERE student_id = ? AND platform = ?",
             (
                 handle,
@@ -3589,8 +3685,14 @@ def save_social_account(
                 now,
                 creds_blob,
                 verification_status,
+                changed,
                 verified_handle,
+                changed,
                 verified_profile_url,
+                changed,
+                changed,
+                existing["handle"],
+                changed,
                 student_id,
                 slug,
             ),
@@ -3600,7 +3702,7 @@ def save_social_account(
             "INSERT INTO student_social_accounts "
             "(id, student_id, platform, handle, profile_url, credentials_json, verification_status,"
             " verified_handle, verified_profile_url, last_verified_at, analysis_status, active, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_run', 1, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'blocked', 1, ?, ?)",
             (
                 str(uuid.uuid4()),
                 student_id,
@@ -3623,6 +3725,100 @@ def save_social_account(
     ).fetchone()
     conn.close()
     return _strip_credentials(dict(row)) if row else {"id": "", "platform": slug}
+
+
+def create_social_account_claim(
+    student_id: str,
+    platform: str,
+    handle: str | None,
+    profile_url: str | None,
+    credentials: dict | None = None,
+) -> tuple[dict, str]:
+    """Store a claimed account and issue a one-time public-profile proof code.
+
+    A claim is deliberately never analyzable until the proof is independently
+    observed.  The raw code is returned once only; the database keeps its hash.
+    """
+    save_social_account(student_id, platform, handle, profile_url, credentials)
+    code = "MG-" + secrets.token_urlsafe(9).upper().replace("_", "A").replace("-", "B")
+    slug = normalize_platform(platform) or platform.strip().lower()
+    conn = get_db()
+    conn.execute(
+        "UPDATE student_social_accounts SET verification_status = 'pending', verification_method = 'profile_code', "
+        "verification_code_hash = ?, verification_required_at = ?, analysis_status = 'blocked', updated_at = ? "
+        "WHERE student_id = ? AND platform = ?",
+        (
+            hash_token(code),
+            datetime.now(timezone.utc).isoformat(),
+            datetime.now(timezone.utc).isoformat(),
+            student_id,
+            slug,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
+        (student_id, slug),
+    ).fetchone()
+    conn.close()
+    return _strip_credentials(dict(row)), code
+
+
+def rotate_social_account_claim_code(
+    student_id: str, platform: str
+) -> tuple[dict, str] | None:
+    slug = normalize_platform(platform) or platform.strip().lower()
+    code = "MG-" + secrets.token_urlsafe(9).upper().replace("_", "A").replace("-", "B")
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE student_social_accounts SET verification_status = 'pending', verification_method = 'profile_code', "
+        "verification_code_hash = ?, verification_required_at = ?, analysis_status = 'blocked', updated_at = ? "
+        "WHERE student_id = ? AND platform = ? AND active = 1",
+        (hash_token(code), now, now, student_id, slug),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
+        (student_id, slug),
+    ).fetchone()
+    conn.close()
+    return (_strip_credentials(dict(row)), code) if row and cur.rowcount else None
+
+
+def get_social_account(
+    student_id: str, platform: str, *, include_verification_secret: bool = False
+) -> dict | None:
+    slug = normalize_platform(platform) or platform.strip().lower()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ? AND active = 1",
+        (student_id, slug),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    raw = dict(row)
+    return raw if include_verification_secret else _strip_credentials(raw)
+
+
+def mark_social_account_verified(student_id: str, platform: str) -> dict | None:
+    slug = normalize_platform(platform) or platform.strip().lower()
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE student_social_accounts SET verification_status = 'verified', verified_handle = handle, "
+        "verified_profile_url = profile_url, verification_code_hash = NULL, last_verified_at = ?, "
+        "analysis_status = 'ready', updated_at = ? WHERE student_id = ? AND platform = ? AND active = 1",
+        (now, now, student_id, slug),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
+        (student_id, slug),
+    ).fetchone()
+    conn.close()
+    return _strip_credentials(dict(row)) if row and cur.rowcount else None
 
 
 def get_social_accounts(student_id: str) -> list:
@@ -3723,7 +3919,11 @@ def set_social_account_analysis_status(
 
 def _strip_credentials(row: dict) -> dict:
     """Drop credential secrets from any social-account row before it leaves the DB layer."""
-    out = {k: v for k, v in row.items() if k != "credentials_json"}
+    out = {
+        k: v
+        for k, v in row.items()
+        if k not in {"credentials_json", "verification_code_hash"}
+    }
     out["has_credentials"] = bool(row.get("credentials_json"))
     return out
 

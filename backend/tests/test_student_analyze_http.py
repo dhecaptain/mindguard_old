@@ -49,6 +49,15 @@ def _login(client, email: str, password: str = "pw-12345") -> str:
 
 
 def _grant_active_consent(db, student_id: str, counsellor_id: str) -> dict:
+    # Analysis targets must be a student-owned, verified account. This is a
+    # fixture shortcut; the product flow verifies the public profile proof.
+    db.save_social_account(
+        student_id,
+        "reddit",
+        "student-owned-reddit",
+        "https://www.reddit.com/user/student-owned-reddit/",
+    )
+    db.mark_social_account_verified(student_id, "reddit")
     consent = db.create_consent(
         student_id, counsellor_id, "student@school.edu", "student", ["reddit"]
     )
