@@ -1,75 +1,30 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect */
 import { useState, useEffect } from 'react'
 import api from '../api/client'
 
-interface Account { platform: string; handle: string; profile_url: string; active: number }
+interface Account { platform: string; handle?: string; profile_url?: string; active: number; verification_status?: string; previous_handle?: string }
+const platforms = ['Instagram', 'X', 'Facebook', 'LinkedIn', 'TikTok', 'Mastodon', 'Bluesky', 'YouTube', 'Reddit']
+
+function accountStatus(account: Account) {
+  if (account.verification_status === 'verified') return { label: 'Verified — ready when consent allows', colour: 'text-[#047857] bg-[#d1fae5]' }
+  if (account.verification_status === 'legacy_unverified') return { label: 'Verification needed', colour: 'text-[#92400e] bg-[#fef3c7]' }
+  return { label: 'Ownership verification pending', colour: 'text-[#9a3412] bg-[#ffedd5]' }
+}
 
 export default function MyAccountsPage() {
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [platform, setPlatform] = useState('Instagram')
-  const [handle, setHandle] = useState('')
-  const [url, setUrl] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
-
-  const load = () => {
-    setLoading(true)
-    api.get('/self/social-accounts').then(({ data }) => setAccounts(data.accounts || [])).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed')).finally(() => setLoading(false))
-  }
-  useEffect(() => { load() }, [])
-
-  const handleAdd = async () => {
-    setError(null)
-    setSaving(true)
-    try {
-      await api.post('/self/social-accounts', { platform, handle, profile_url: url })
-      setHandle(''); setUrl('')
-      load()
-    } catch (e: unknown) { setError(e instanceof Error ? e.message : 'Failed') }
-    setSaving(false)
-  }
-
-  const handleDelete = async (p: string) => {
-    await api.delete(`/self/social-accounts/${p}`)
-    load()
-  }
-
-  return (
-    <div className="flex flex-col gap-[20px]">
-      <div>
-        <h2 className="text-[1.3rem] font-bold text-[#1f2937]">My Connected Accounts</h2>
-        <p className="text-[0.82rem] text-[#6b7280] mt-[4px]">Your connected accounts — only your own or explicitly authorized accounts. You cannot analyze arbitrary third-party handles.</p>
-      </div>
-
-      <div className="bg-white rounded-xl border border-[#e5e7eb] p-[20px]">
-        <h3 className="text-[0.95rem] font-bold text-[#1f2937] mb-[12px]">Add account</h3>
-        <div className="flex flex-col sm:flex-row gap-[10px]">
-          <select value={platform} onChange={(e) => setPlatform(e.target.value)} className="bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem]">
-            {['Instagram','X','Facebook','LinkedIn','TikTok','Mastodon','Bluesky','YouTube','Reddit'].map(p => <option key={p} value={p}>{p}</option>)}
-          </select>
-          <input value={handle} onChange={(e) => setHandle(e.target.value)} placeholder="handle (e.g. @yourname)" className="flex-1 bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem]" />
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="profile URL (optional)" className="flex-1 bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem]" />
-          <button onClick={handleAdd} disabled={saving} className="px-[16px] py-[9px] bg-[#0F766E] text-white rounded-[8px] text-[0.85rem] font-semibold disabled:opacity-50">Add</button>
-        </div>
-        {error && <div className="mt-[10px] px-[12px] py-[8px] bg-[#fee2e2] border border-[#fca5a5] rounded-[8px] text-[0.78rem] text-[#991b1b]">{error}</div>}
-      </div>
-
-      <div className="bg-white rounded-xl border border-[#e5e7eb] p-[20px]">
-        <h3 className="text-[0.95rem] font-bold text-[#1f2937] mb-[12px]">Connected accounts ({accounts.length})</h3>
-        {loading ? <div className="text-[0.82rem] text-[#6b7280]">Loading...</div> : accounts.length === 0 ? <div className="text-[0.82rem] text-[#6b7280]">No accounts yet. Add your own accounts above.</div> : (
-          <div className="flex flex-col gap-[8px]">
-            {accounts.map(a => (
-              <div key={a.platform} className="flex items-center justify-between p-[12px] bg-[#f8fafc] rounded-[8px] border border-[#e5e7eb]">
-                <div>
-                  <div className="text-[0.85rem] font-semibold text-[#1f2937]">{a.platform}</div>
-                  <div className="text-[0.78rem] text-[#6b7280]">{a.handle || a.profile_url}</div>
-                </div>
-                <button onClick={() => handleDelete(a.platform)} className="text-[0.75rem] text-[#dc2626] hover:underline">Remove</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )
+  const [accounts, setAccounts] = useState<Account[]>([]); const [platform, setPlatform] = useState('Instagram'); const [handle, setHandle] = useState(''); const [url, setUrl] = useState('')
+  const [editing, setEditing] = useState<string | null>(null); const [codes, setCodes] = useState<Record<string, string>>({}); const [loading, setLoading] = useState(true); const [message, setMessage] = useState<string | null>(null); const [error, setError] = useState<string | null>(null); const [saving, setSaving] = useState(false)
+  const load = async () => { setLoading(true); try { const { data } = await api.get('/self/social-accounts'); setAccounts(data.accounts || []) } catch (e: any) { setError(e?.response?.data?.detail || 'Could not load your accounts.') } finally { setLoading(false) } }
+  useEffect(() => { void load() }, [])
+  const save = async () => { setError(null); setMessage(null); setSaving(true); try { const path = editing ? `/self/social-accounts/${editing}` : '/self/social-accounts'; const { data } = await api[editing ? 'patch' : 'post'](path, { platform, handle, profile_url: url }); if (data.verification_code) setCodes(p => ({ ...p, [data.platform]: data.verification_code })); setMessage('Account saved. Add the verification code to its public profile bio/about section, then verify ownership.'); setHandle(''); setUrl(''); setEditing(null); await load() } catch (e: any) { setError(e?.response?.data?.detail || 'Could not save this account.') } finally { setSaving(false) } }
+  const verify = async (account: Account) => { const code = codes[account.platform]; if (!code) { setError('The verification code is not available in this session. Select “Get a new code”.'); return } setError(null); setSaving(true); try { await api.post(`/self/social-accounts/${account.platform}/verify`, { verification_code: code }); setMessage(`${account.platform} ownership verified. Your assigned counsellor can use it only after consent allows.`); setCodes(p => { const next = { ...p }; delete next[account.platform]; return next }); await load() } catch (e: any) { setError(e?.response?.data?.detail || 'We could not verify this account.') } finally { setSaving(false) } }
+  const newCode = async (account: Account) => { setError(null); setSaving(true); try { const { data } = await api.post(`/self/social-accounts/${account.platform}/verification-code`); setCodes(p => ({ ...p, [account.platform]: data.verification_code })); setMessage(`A new code was created for ${account.platform}. Put it in the public profile bio/about section.`); await load() } catch (e: any) { setError(e?.response?.data?.detail || 'Could not create a new code.') } finally { setSaving(false) } }
+  const edit = (account: Account) => { setEditing(account.platform); setPlatform(account.platform); setHandle(account.handle || ''); setUrl(account.profile_url || ''); setMessage(null); setError(null) }
+  const remove = async (p: string) => { if (!window.confirm('Remove this account? Its counsellor access will stop immediately.')) return; await api.delete(`/self/social-accounts/${p}`); await load() }
+  return <div className="flex flex-col gap-[20px]">
+    <div><h2 className="text-[1.3rem] font-bold text-[#1f2937]">My social accounts</h2><p className="text-[0.82rem] text-[#6b7280] mt-[4px]">Claim only accounts that belong to you. Analysis is performed by your assigned counsellor only after ownership verification and valid consent.</p></div>
+    <div className="bg-[#eff6ff] rounded-xl border border-[#bfdbfe] p-[14px] text-[0.8rem] text-[#1e3a5f]"><b>How verification works:</b> save an account, place the one-time MindGuard code in that profile’s public bio/about section, then select Verify ownership. Changing a handle or profile URL always requires verification again.</div>
+    <div className="bg-white rounded-xl border border-[#e5e7eb] p-[20px]"><h3 className="text-[0.95rem] font-bold text-[#1f2937] mb-[12px]">{editing ? `Update ${editing}` : 'Add account'}</h3><div className="flex flex-col sm:flex-row gap-[10px]"><select value={platform} onChange={e => setPlatform(e.target.value)} disabled={!!editing} className="bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem] disabled:opacity-60">{platforms.map(p => <option key={p}>{p}</option>)}</select><input value={handle} onChange={e => setHandle(e.target.value)} placeholder="handle (e.g. @yourname)" className="flex-1 bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem]" /><input value={url} onChange={e => setUrl(e.target.value)} placeholder="public HTTPS profile URL" className="flex-1 bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem]" /><button onClick={() => void save()} disabled={saving || (!handle && !url)} className="px-[16px] py-[9px] bg-[#0F766E] text-white rounded-[8px] text-[0.85rem] font-semibold disabled:opacity-50">{saving ? 'Saving…' : editing ? 'Save change' : 'Add account'}</button>{editing && <button onClick={() => { setEditing(null); setHandle(''); setUrl('') }} className="px-[12px] py-[9px] text-[0.85rem] text-[#475569]">Cancel</button>}</div>{message && <div className="mt-[10px] px-[12px] py-[8px] bg-[#dcfce7] border border-[#86efac] rounded-[8px] text-[0.78rem] text-[#166534]">{message}</div>}{error && <div className="mt-[10px] px-[12px] py-[8px] bg-[#fee2e2] border border-[#fca5a5] rounded-[8px] text-[0.78rem] text-[#991b1b]">{error}</div>}</div>
+    <div className="bg-white rounded-xl border border-[#e5e7eb] p-[20px]"><h3 className="text-[0.95rem] font-bold text-[#1f2937] mb-[12px]">Claimed accounts ({accounts.length})</h3>{loading ? <div className="text-[0.82rem] text-[#6b7280]">Loading…</div> : accounts.length === 0 ? <div className="text-[0.82rem] text-[#6b7280]">No accounts claimed yet.</div> : <div className="flex flex-col gap-[10px]">{accounts.map(a => { const s = accountStatus(a); const code = codes[a.platform]; return <div key={a.platform} className="p-[13px] bg-[#f8fafc] rounded-[8px] border border-[#e5e7eb]"><div className="flex items-start justify-between gap-[12px]"><div><div className="text-[0.85rem] font-semibold text-[#1f2937]">{a.platform}</div><div className="text-[0.78rem] text-[#6b7280]">{a.handle || a.profile_url}</div>{a.previous_handle && <div className="text-[0.72rem] text-[#9a3412]">Handle changed from {a.previous_handle}; verification is required again.</div>}</div><span className={`text-[0.7rem] px-[8px] py-[3px] rounded-full ${s.colour}`}>{s.label}</span></div>{code && <div className="mt-[9px] text-[0.8rem] text-[#1e3a5f]">Your one-time code: <code className="font-bold">{code}</code></div>}<div className="mt-[10px] flex gap-[14px] text-[0.76rem]">{a.verification_status !== 'verified' && <><button disabled={saving} onClick={() => void verify(a)} className="text-[#0f766e] font-semibold hover:underline">Verify ownership</button><button disabled={saving} onClick={() => void newCode(a)} className="text-[#475569] hover:underline">Get a new code</button></>}<button onClick={() => edit(a)} className="text-[#475569] hover:underline">Edit</button><button onClick={() => void remove(a.platform)} className="text-[#dc2626] hover:underline">Remove</button></div></div> })}</div>}</div>
+  </div>
 }

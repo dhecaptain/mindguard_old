@@ -126,7 +126,23 @@ function PageRouter() {
     }
   }
 
-  if (role === 'counsellor' || role === 'school_admin') {
+  if (role === 'school_admin') {
+    switch (currentPage) {
+      case 'institution': return <InstitutionWorkspacePage />
+      case 'institution-students': return <InstitutionStudentsPage />
+      case 'institution-counsellors': return <InstitutionCounsellorsPage />
+      case 'assignments': return <InstitutionAssignmentsPage />
+      case 'consent-tracker': return <ConsentTrackerPage />
+      case 'audit-log': return <AuditLogPage />
+      case 'profile': return <StaffProfilePage />
+      // A stale dashboard route can exist after a role change or an earlier
+      // login. School administrators belong in institution operations, not
+      // the counsellor-only dashboard.
+      default: return <InstitutionWorkspacePage />
+    }
+  }
+
+  if (role === 'counsellor') {
     switch (currentPage) {
       case 'institution': return <InstitutionWorkspacePage />
       case 'institution-students': return <InstitutionStudentsPage />

@@ -35,7 +35,12 @@ def _approve(db, user_id):
 
 
 def _make_adult(db, email: str) -> dict:
-    user = db.create_user(email, email.split("@")[0].title(), hash_password("pw-12345"), role_type="student")
+    user = db.create_user(
+        email,
+        email.split("@")[0].title(),
+        hash_password("pw-12345"),
+        role_type="student",
+    )
     _approve(db, user["id"])
     assert db.update_user_onboarding(user["id"], "adult")
     fresh = db.get_user_by_id(user["id"])
@@ -44,7 +49,12 @@ def _make_adult(db, email: str) -> dict:
 
 
 def _make_pending(db, email: str) -> dict:
-    user = db.create_user(email, email.split("@")[0].title(), hash_password("pw-12345"), role_type="student")
+    user = db.create_user(
+        email,
+        email.split("@")[0].title(),
+        hash_password("pw-12345"),
+        role_type="student",
+    )
     _approve(db, user["id"])
     return user
 
@@ -56,7 +66,9 @@ def _login(client, email: str) -> str:
 
 
 def _connect(parent_db, user_id: str, platform: str, handle: str, creds=None) -> dict:
-    return parent_db.save_social_account(user_id, platform, handle, None, credentials=creds or None)
+    return parent_db.save_social_account(
+        user_id, platform, handle, None, credentials=creds or None
+    )
 
 
 def test_self_routes_require_adult_category(db, client):
@@ -64,15 +76,21 @@ def test_self_routes_require_adult_category(db, client):
     _make_adult(db, "adult@self.test")
     token = _login(client, "pending@self.test")
 
-    resp = client.get("/api/self/platforms", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/self/platforms", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 403
     resp = client.post(
-        "/api/self/analyze", headers={"Authorization": f"Bearer {token}"}, json={"platform": "reddit"}
+        "/api/self/analyze",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"platform": "reddit"},
     )
     assert resp.status_code == 403
 
     token_adult = _login(client, "adult@self.test")
-    resp = client.get("/api/self/platforms", headers={"Authorization": f"Bearer {token_adult}"})
+    resp = client.get(
+        "/api/self/platforms", headers={"Authorization": f"Bearer {token_adult}"}
+    )
     assert resp.status_code == 200
     slugs = [p["key"] for p in resp.json()["platforms"]]
     assert "reddit" in slugs and "bluesky" in slugs
@@ -80,7 +98,13 @@ def test_self_routes_require_adult_category(db, client):
 
 def test_connect_encrypts_credentials_and_never_echoes(db, client):
     adult = _make_adult(db, "creds@self.test")
-    _connect(db, adult["id"], "bluesky", "me@mydomain.bsky.social", {"app_password": "abcd-efgh-ijkl-mnop"})
+    _connect(
+        db,
+        adult["id"],
+        "bluesky",
+        "me@mydomain.bsky.social",
+        {"app_password": "abcd-efgh-ijkl-mnop"},
+    )
 
     # At rest: app password is ciphertext, not a raw string.
     conn = db.get_db()
@@ -94,7 +118,9 @@ def test_connect_encrypts_credentials_and_never_echoes(db, client):
 
     # Over the wire: credentials are never returned.
     token = _login(client, "creds@self.test")
-    accs = client.get("/api/self/social-accounts", headers={"Authorization": f"Bearer {token}"}).json()["accounts"]
+    accs = client.get(
+        "/api/self/social-accounts", headers={"Authorization": f"Bearer {token}"}
+    ).json()["accounts"]
     assert accs[0]["platform"] == "bluesky"
     assert accs[0]["has_credentials"] is True
     serialized = str(accs)
@@ -107,7 +133,11 @@ def test_analyze_with_no_data_never_fakes_a_score(db, client, monkeypatch):
     _connect(db, adult["id"], "reddit", "sneaky_snack")
 
     async def fake_reddit(user_id):
-        return {"platform": "reddit", "status": "no_data", "message": "No public posts found."}
+        return {
+            "platform": "reddit",
+            "status": "no_data",
+            "message": "No public posts found.",
+        }
 
     monkeypatch.setattr(self_analysis, "_ANALYZERS", {"reddit": fake_reddit})
 
@@ -117,15 +147,8 @@ def test_analyze_with_no_data_never_fakes_a_score(db, client, monkeypatch):
         headers={"Authorization": f"Bearer {token}"},
         json={"platform": "reddit"},
     )
-    assert resp.status_code == 200, resp.text
-    session = resp.json()["session"]
-    assert session["status"] == "no_data"
-    assert session["risk_score"] in (None, 0)
-    findings = session.get("findings") or {}
-    assert findings.get("overall_risk") is None
-    assert findings.get("posts_analyzed") == 0
-    insights_text = session.get("insights")
-    assert insights_text and "no signals to report yet" in " ".join(insights_text)
+    assert resp.status_code == 403
+    assert "assigned counsellor" in resp.json()["detail"].lower()
 
 
 def test_analyze_only_uses_own_connected_accounts(db, client, monkeypatch):
@@ -152,61 +175,57 @@ def test_analyze_only_uses_own_connected_accounts(db, client, monkeypatch):
 
     monkeypatch.setattr(self_analysis, "_ANALYZERS", {"reddit": fake_reddit_ok})
 
-    # A analyzes own connected account -> completed session.
+    # Self-service analysis is deliberately unavailable: an assigned
+    # counsellor performs analysis after account ownership is verified.
     token_a = _login(client, "owna@self.test")
-    ra = client.post("/api/self/analyze", headers={"Authorization": f"Bearer {token_a}"}, json={"platform": "reddit"})
-    assert ra.status_code == 200, ra.text
-    sess_a = ra.json()["session"]
-    assert sess_a["status"] == "completed"
-    assert sess_a["findings"]["overall_risk"] >= 0.5
-
-    # B has no connected accounts -> analyze reports no_data for B, and never
-    # touches A's session or account.
-    _make_adult(db, "ownb@self.test")
-    token_b = _login(client, "ownb@self.test")
-    rb = client.post("/api/self/analyze", headers={"Authorization": f"Bearer {token_b}"}, json={"platform": "reddit"})
-    assert rb.status_code == 200, rb.text
-    assert rb.json()["session"]["status"] == "no_data"
-
-    # B cannot read A's session detail (IDOR).
-    resp = client.get(
-        f"/api/self/analysis-sessions/{sess_a['id']}",
-        headers={"Authorization": f"Bearer {token_b}"},
+    ra = client.post(
+        "/api/self/analyze",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"platform": "reddit"},
     )
-    assert resp.status_code == 404
+    assert ra.status_code == 403
 
 
 def test_mixed_platform_results_are_recorded_as_partial(db, client, monkeypatch):
     adult = _make_adult(db, "partial@self.test")
     _connect(db, adult["id"], "reddit", "partial-reddit")
-    _connect(db, adult["id"], "bluesky", "partial.bsky.social", {"app_password": "abcd"})
+    _connect(
+        db, adult["id"], "bluesky", "partial.bsky.social", {"app_password": "abcd"}
+    )
 
     async def fake_reddit(user_id):
         return {
             "platform": "reddit",
             "status": "ok",
             "message": "OK",
-            "posts": [{
-                "platform": "reddit",
-                "text": "I am having a difficult week but I am reaching out for support",
-                "risk_score": 0.25,
-                "level": "low",
-                "date": datetime.now(timezone.utc).isoformat(),
-                "url": "https://reddit.com/u/partial-reddit/1",
-            }],
+            "posts": [
+                {
+                    "platform": "reddit",
+                    "text": "I am having a difficult week but I am reaching out for support",
+                    "risk_score": 0.25,
+                    "level": "low",
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "url": "https://reddit.com/u/partial-reddit/1",
+                }
+            ],
         }
 
     async def fake_bluesky(user_id):
-        return {"platform": "bluesky", "status": "error", "message": "Authentication required."}
+        return {
+            "platform": "bluesky",
+            "status": "error",
+            "message": "Authentication required.",
+        }
 
-    monkeypatch.setattr(self_analysis, "_ANALYZERS", {"reddit": fake_reddit, "bluesky": fake_bluesky})
+    monkeypatch.setattr(
+        self_analysis, "_ANALYZERS", {"reddit": fake_reddit, "bluesky": fake_bluesky}
+    )
 
     token = _login(client, "partial@self.test")
-    resp = client.post("/api/self/analyze", headers={"Authorization": f"Bearer {token}"}, json={})
-    assert resp.status_code == 200, resp.text
-    session = resp.json()["session"]
-    assert session["status"] == "partial"
-    assert session["progress"]["platforms"]["bluesky"]["message"] == "Authentication required."
+    resp = client.post(
+        "/api/self/analyze", headers={"Authorization": f"Bearer {token}"}, json={}
+    )
+    assert resp.status_code == 403
 
 
 def test_targeted_analysis_rejects_another_connected_platform(db, client, monkeypatch):
@@ -219,8 +238,7 @@ def test_targeted_analysis_rejects_another_connected_platform(db, client, monkey
         headers={"Authorization": f"Bearer {token}"},
         json={"platform": "bluesky"},
     )
-    assert resp.status_code == 400
-    assert "Connect your bluesky account" in resp.text
+    assert resp.status_code == 403
 
 
 def test_guess_other_session_id_is_404(db, client):
@@ -238,7 +256,13 @@ def test_verify_writes_public_verification_status(db, client, monkeypatch):
     _connect(db, adult["id"], "reddit", "real-user")
 
     def fake_fetch(username: str):
-        return [{"text": "hello everyone this is a public post about a topic worth talking through", "date": datetime.now(timezone.utc).isoformat(), "url": "https://reddit.com/r/x/1"}]
+        return [
+            {
+                "text": "hello everyone this is a public post about a topic worth talking through",
+                "date": datetime.now(timezone.utc).isoformat(),
+                "url": "https://reddit.com/r/x/1",
+            }
+        ]
 
     import backend.main as main_mod
 
@@ -249,15 +273,8 @@ def test_verify_writes_public_verification_status(db, client, monkeypatch):
         "/api/self/social-accounts/reddit/verify",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["verified"] is True
-    assert body["verification_status"] == "verified"
-    assert body["verified_handle"] == "real-user"
-
-    accs = client.get("/api/self/social-accounts", headers={"Authorization": f"Bearer {token}"}).json()["accounts"]
-    assert accs[0]["verification_status"] == "verified"
-    assert accs[0]["verified_handle"] == "real-user"
+    assert resp.status_code == 400
+    assert "profile url" in resp.json()["detail"].lower()
 
 
 def test_not_retrievable_platform_analyzer_is_awaitable(db):
@@ -299,22 +316,34 @@ def test_self_history_excludes_non_self_sessions(db, client):
     )
 
     token = _login(client, "hist@self.test")
-    resp = client.get("/api/self/analysis-sessions", headers={"Authorization": f"Bearer {token}"})
+    resp = client.get(
+        "/api/self/analysis-sessions", headers={"Authorization": f"Bearer {token}"}
+    )
     assert resp.status_code == 200, resp.text
     ids = [s["id"] for s in resp.json()["sessions"]]
     assert own_self["id"] in ids
-    assert legacy["id"] not in ids, "counsellor_student sessions must not appear in self history"
+    assert legacy["id"] not in ids, (
+        "counsellor_student sessions must not appear in self history"
+    )
 
     detail = client.get(
         f"/api/self/analysis-sessions/{legacy['id']}",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert detail.status_code == 404, "counsellor_student session detail must 404 for the adult"
+    assert detail.status_code == 404, (
+        "counsellor_student session detail must 404 for the adult"
+    )
 
 
 def test_delete_wipes_credentials(db, client):
     adult = _make_adult(db, "del@self.test")
-    _connect(db, adult["id"], "bluesky", "del@del.bsky.social", {"app_password": "aaaa-bbbb-cccc-dddd"})
+    _connect(
+        db,
+        adult["id"],
+        "bluesky",
+        "del@del.bsky.social",
+        {"app_password": "aaaa-bbbb-cccc-dddd"},
+    )
     token = _login(client, "del@self.test")
 
     resp = client.delete(
