@@ -5679,6 +5679,45 @@ async def institution_student_status(user: dict = Depends(require_auth)):
     return result
 
 
+@app.get("/api/institution/student-home")
+async def institution_student_home(user: dict = Depends(require_auth)):
+    """Safe, student-facing status for an institution-managed account."""
+    if user.get("role_type") != "student":
+        raise HTTPException(403, "Student account required")
+    student = get_student_by_user_id(user["id"])
+    if not student or student.get("archived_at") or student.get("deleted_at"):
+        raise HTTPException(404, "This account is not an active institution student")
+    institution = get_institution_by_id(student["institution_id"]) or {}
+    consent = get_consent_by_id(student["current_consent_id"]) if student.get("current_consent_id") else None
+    from backend.database import get_db
+
+    conn = get_db()
+    assignment = conn.execute(
+        "SELECT c.name FROM counsellor_student_assignments a "
+        "JOIN users c ON c.id = a.counsellor_id "
+        "WHERE a.student_id = ? AND a.active = 1 LIMIT 1",
+        (user["id"],),
+    ).fetchone()
+    conn.close()
+    consent_accepted = bool(consent and consent.get("status") == "ACCEPTED")
+    is_minor = bool(student.get("is_minor"))
+    if consent_accepted:
+        access_status = "ready"
+    elif is_minor:
+        access_status = "guardian_consent_pending"
+    else:
+        access_status = "student_consent_pending"
+    return {
+        "institution_name": institution.get("name") or "Your institution",
+        "is_minor": is_minor,
+        "consent_status": consent.get("status") if consent else None,
+        "guardian_details_present": bool(student.get("parent_email_encrypted")),
+        "access_status": access_status,
+        "assigned_counsellor_name": assignment["name"] if assignment else None,
+        "support_active": bool(consent_accepted and assignment),
+    }
+
+
 @app.post("/api/institution/students/{student_id}/resend-invite")
 async def resend_student_invite(student_id: str, request: Request, user: dict = Depends(require_auth)):
     institution_id = _require_institution_admin(user)

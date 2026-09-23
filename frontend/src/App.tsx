@@ -51,6 +51,7 @@ import StaffProfilePage from './pages/StaffProfilePage'
 import InstitutionStudentsPage from './pages/InstitutionStudentsPage'
 import InstitutionAssignmentsPage from './pages/InstitutionAssignmentsPage'
 import InstitutionCounsellorsPage from './pages/InstitutionCounsellorsPage'
+import InstitutionStudentHomePage from './pages/InstitutionStudentHomePage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -153,6 +154,16 @@ function PageRouter() {
 
   if (userCategory === 'adult') {
     return <AdultPageRouter />
+  }
+
+  if (userCategory === 'institution_managed') {
+    switch (currentPage) {
+      case 'my-accounts': return <MyAccountsPage />
+      case 'communications': return <StudentCommunicationsPage />
+      case 'appointments': return <AppointmentsPage />
+      case 'resources': return <CrisisResourcesPage />
+      default: return <InstitutionStudentHomePage />
+    }
   }
 
   switch (currentPage) {
