@@ -50,6 +50,7 @@ import AdminInstitutionsPage from './pages/AdminInstitutionsPage'
 import StaffProfilePage from './pages/StaffProfilePage'
 import InstitutionStudentsPage from './pages/InstitutionStudentsPage'
 import InstitutionAssignmentsPage from './pages/InstitutionAssignmentsPage'
+import InstitutionCounsellorsPage from './pages/InstitutionCounsellorsPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -124,6 +125,7 @@ function PageRouter() {
     switch (currentPage) {
       case 'institution': return <InstitutionWorkspacePage />
       case 'institution-students': return <InstitutionStudentsPage />
+      case 'institution-counsellors': return <InstitutionCounsellorsPage />
       case 'assignments': return <InstitutionAssignmentsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />

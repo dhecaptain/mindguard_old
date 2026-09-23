@@ -76,11 +76,14 @@ export default function ConsentPortalPage({ token }: { token: string }) {
     setStatus('submitting')
     setMessage('')
     try {
-      // Build social handles object - only include platforms that were requested
+      // A guardian grants permission for the child. They must never be asked
+      // for, or accidentally attach, their own social-media accounts.
       const socialAccounts: Record<string, string> = {}
-      for (const platform of platforms) {
-        if (SOCIAL_PLATFORMS.includes(platform) && socialHandles[platform]) {
-          socialAccounts[platform] = normalizeHandle(platform, socialHandles[platform])
+      if (consent?.recipient_role === 'student') {
+        for (const platform of platforms) {
+          if (SOCIAL_PLATFORMS.includes(platform) && socialHandles[platform]) {
+            socialAccounts[platform] = normalizeHandle(platform, socialHandles[platform])
+          }
         }
       }
       const res = await fetch(`${apiBase}/v1/portal/consents/${token}/${action}`, {
@@ -126,7 +129,9 @@ export default function ConsentPortalPage({ token }: { token: string }) {
               <div>
                 <h1 className="text-[1.25rem] font-bold text-[#111827]">Review consent request</h1>
                 <p className="text-[0.9rem] text-[#64748b] mt-[6px]">
-                  A school counsellor is requesting permission to analyse selected public social media information for wellbeing support.
+                  {consent.recipient_role === 'parent'
+                    ? 'You are being asked to grant or decline permission for your child. Your decision controls whether the school counsellor can access protected wellbeing features.'
+                    : 'A school counsellor is requesting permission to analyse selected public social media information for wellbeing support.'}
                 </p>
               </div>
 
@@ -192,8 +197,7 @@ export default function ConsentPortalPage({ token }: { token: string }) {
                     />
                   </div>
 
-                  {/* Social media handles */}
-                  <div>
+                  {consent.recipient_role === 'student' && <div>
                     <div className="text-[0.78rem] uppercase font-bold text-[#0F766E] mb-[8px]">Your social media accounts (optional)</div>
                     <p className="text-[0.72rem] text-[#6b7280] mb-[12px]">
                       Add your usernames for the platforms above. This helps your counsellor support you better.
@@ -216,7 +220,7 @@ export default function ConsentPortalPage({ token }: { token: string }) {
                         </div>
                       ))}
                     </div>
-                  </div>
+                  </div>}
 
                   {message && (
                     <div role="alert" className="rounded-[8px] bg-[#fff7ed] text-[#9a3412] px-[12px] py-[10px] text-[0.84rem]">{message}</div>

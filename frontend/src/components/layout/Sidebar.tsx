@@ -49,6 +49,7 @@ const COUNSELLOR_NAV_BASE = [
 const SCHOOL_ADMIN_NAV_ITEMS = [
   { key: 'institution', icon: 'ti ti-building-community', label: 'Institution setup' },
   { key: 'institution-students', icon: 'ti ti-users', label: 'Student onboarding' },
+  { key: 'institution-counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'assignments', icon: 'ti ti-user-check', label: 'Assignments' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },

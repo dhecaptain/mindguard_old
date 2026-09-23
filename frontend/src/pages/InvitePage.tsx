@@ -103,7 +103,7 @@ export default function InvitePage() {
     <div className="min-h-screen bg-[#f7f9fb] flex items-center justify-center p-[20px]">
       <div className="bg-white rounded-xl border border-[#e5e7eb] p-[32px] max-w-[420px] w-full">
         <h2 className="text-[1.2rem] font-bold text-[#1f2937] mb-[4px]">Accept invitation</h2>
-        <p className="text-[0.82rem] text-[#6b7280] mb-[20px]">{email ? `For ${email}` : 'Set your password to activate your counsellor account.'}</p>
+        <p className="text-[0.82rem] text-[#6b7280] mb-[20px]">{email ? `For ${email}` : 'Set your password to activate your MindGuard account.'}</p>
 
         <div className="flex flex-col gap-[12px]">
           <div>
