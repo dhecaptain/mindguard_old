@@ -243,6 +243,7 @@ export interface InstitutionStaff {
   created_at: string
   invitation_pending: boolean
   profile_completed: boolean
+  active_assignment_count?: number
   profile: Record<string, string>
 }
 

@@ -38,6 +38,7 @@ from backend.database import (
     set_user_invitation,
     update_student,
     update_consent_status,
+    update_user_onboarding,
     write_audit,
 )
 from backend.config import CONSENT_EXPIRY_DAYS, CONSENT_REMINDER_DAYS
@@ -716,6 +717,9 @@ def _resolve_student_user(student: dict) -> str | None:
     except Exception:
         pass
     user = create_user(email, name, "", role_type="student", institution_id=student.get("institution_id"))
+    # Roster-created students already have an institutional context. They must
+    # not be diverted through the public role-selection journey.
+    update_user_onboarding(user["id"], "institution_managed", student.get("institution_id"))
     return user["id"]
 
 

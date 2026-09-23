@@ -57,6 +57,9 @@ def test_commit_dispatches_adult_to_student(db):
     assert consent is not None
     assert consent["recipient_role"] == "student"
     assert consent["status"] == "PENDING"
+    linked_student = db.get_student_by_id(summary["student_ids"][0])
+    linked_user = db.get_user_by_id(linked_student["user_id"])
+    assert linked_user["user_category"] == "institution_managed"
 
 
 def test_commit_dispatches_minor_to_parent_with_courtesy(db):

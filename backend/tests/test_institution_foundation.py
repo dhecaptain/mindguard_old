@@ -23,6 +23,15 @@ def test_roster_student_has_explicit_authenticated_user_link(db):
     assert db.get_student_by_user_id(user["id"])["id"] == student_id
 
 
+def test_school_admin_profile_does_not_require_counsellor_credentials(db):
+    institution = db.create_institution("Tenant A", "k12")
+    admin = db.create_user("school.admin@example.test", "School Admin", "hash", role_type="school_admin", institution_id=institution["id"])
+    updated = db.update_staff_profile(
+        admin["id"], phone="+254700000000", country="KE", address="Nairobi"
+    )
+    assert updated["profile_completed_at"] is not None
+
+
 def test_archive_student_removes_it_from_active_roster_and_blocks_user(db):
     institution = db.create_institution("Tenant A", "k12")
     user = db.create_user("student@example.test", "Student", "hash", role_type="student", institution_id=institution["id"])

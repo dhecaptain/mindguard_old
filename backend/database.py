@@ -503,7 +503,15 @@ def update_staff_profile(user_id: str, **fields) -> dict | None:
     if not updates:
         return get_user_by_id(user_id)
     values = dict(updates)
-    required = ("phone", "country", "address", "professional_title", "qualification")
+    current = get_user_by_id(user_id) or {}
+    # School administrators need a verified operational contact profile;
+    # counsellors additionally need professional credentials before carrying
+    # a wellbeing caseload.
+    required = (
+        ("phone", "country", "address", "professional_title", "qualification")
+        if current.get("role_type") == "counsellor"
+        else ("phone", "country", "address")
+    )
     complete = all(str(values.get(field) or "").strip() for field in required)
     conn = get_db()
     assignments = [f"{key} = ?" for key, _ in updates]

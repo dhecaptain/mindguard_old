@@ -84,13 +84,50 @@ export interface InstitutionStudentStatus {
   name: string
   email: string
   is_minor: boolean
+  guardian_details_present?: boolean
   grade_level?: string | null
   account_status?: string | null
   consent_status?: string | null
   counsellor_id?: string | null
   counsellor_name?: string | null
   invitation_pending: boolean
+  access_status?: string
   onboarding_state: string
+}
+
+export async function createInstitutionStudent(payload: Record<string, string>) {
+  const { data } = await api.post('/institution/students', payload)
+  return data
+}
+
+export async function updateInstitutionStudent(studentId: string, payload: Record<string, string>) {
+  const { data } = await api.patch(`/institution/students/${studentId}`, payload)
+  return data
+}
+
+export async function dispatchInstitutionStudentConsent(studentId: string) {
+  const { data } = await api.post(`/institution/students/${studentId}/dispatch-consent`)
+  return data
+}
+
+export async function archiveInstitutionStudent(studentId: string) {
+  const { data } = await api.post(`/institution/students/${studentId}/archive`)
+  return data
+}
+
+export async function continueInstitutionStudentIndependently(studentId: string) {
+  const { data } = await api.post(`/institution/students/${studentId}/continue-independently`)
+  return data
+}
+
+export async function updateInstitutionStaff(staffId: string, status: 'approved' | 'suspended' | 'revoked') {
+  const { data } = await api.patch(`/institution/staff/${staffId}`, { status })
+  return data
+}
+
+export async function resendInstitutionStaffInvite(staffId: string) {
+  const { data } = await api.post(`/institution/staff/${staffId}/resend-invite`)
+  return data
 }
 
 export interface InstitutionAssignment {
@@ -121,7 +158,7 @@ export async function getInstitutionAssignments(): Promise<InstitutionAssignment
 
 export async function getAssignableInstitutionUsers(): Promise<{
   counsellors: Array<{ id: string; name: string; email: string; status: string; profile_completed_at?: string }>
-  students: Array<{ id: string; name: string; email: string; status: string; assignment_id?: string; counsellor_id?: string; counsellor_name?: string }>
+  students: Array<{ id: string; account_id?: string | null; name: string; email: string; is_minor: boolean; status: string; access_status: string; assignment_id?: string; counsellor_id?: string; counsellor_name?: string }>
 }> {
   const { data } = await api.get('/institution/assignable')
   return data

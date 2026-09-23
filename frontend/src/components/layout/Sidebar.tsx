@@ -23,6 +23,14 @@ const ADULT_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = 
   ...STUDENT_NAV_ITEMS.slice(2),
 ]
 
+const INSTITUTION_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
+  { key: 'dashboard', icon: 'ti ti-heart-handshake', label: 'My wellbeing space' },
+  { key: 'my-accounts', icon: 'ti ti-link', label: 'Optional accounts' },
+  { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
+  { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
+  { key: 'resources', icon: 'ti ti-lifebuoy', label: 'Get support now' },
+]
+
 const COUNSELLOR_NAV_BASE = [
   { key: 'counsellor-dashboard', icon: 'ti ti-layout-dashboard', label: 'Dashboard' },
   { key: 'institution', icon: 'ti ti-building-community', label: 'Institution' },
@@ -49,6 +57,7 @@ const COUNSELLOR_NAV_BASE = [
 const SCHOOL_ADMIN_NAV_ITEMS = [
   { key: 'institution', icon: 'ti ti-building-community', label: 'Institution setup' },
   { key: 'institution-students', icon: 'ti ti-users', label: 'Student onboarding' },
+  { key: 'institution-counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'assignments', icon: 'ti ti-user-check', label: 'Assignments' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },
@@ -101,6 +110,7 @@ export default function Sidebar() {
   const isCounsellor = role === 'counsellor' || role === 'school_admin'
   const isAdmin = role === 'admin'
   const isAdult = user?.user_category === 'adult'
+  const isInstitutionStudent = user?.user_category === 'institution_managed'
   const isDesktop = useMediaQuery('(min-width: 768px)')
   const isCollapsed = isDesktop && sidebarCollapsed
 
@@ -116,7 +126,9 @@ export default function Sidebar() {
         )
       : isAdult
         ? ADULT_STUDENT_NAV_ITEMS
-        : STUDENT_NAV_ITEMS
+        : isInstitutionStudent
+          ? INSTITUTION_STUDENT_NAV_ITEMS
+          : STUDENT_NAV_ITEMS
 
   const analysedPlatforms: Record<string, boolean> = {
     reddit: Boolean(reddit),
