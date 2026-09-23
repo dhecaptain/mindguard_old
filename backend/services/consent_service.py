@@ -913,7 +913,7 @@ def _reminder_days_for_consent(consent: dict) -> list[int]:
     """Effective reminder schedule for a consent.
 
     Honors the institution's ``consent_reminder_days`` override (stored as a JSON
-    array string, e.g. ``"[3,7]"``); falls back to the global
+    array string, e.g. ``"[7,14]"``); falls back to the global
     ``CONSENT_REMINDER_DAYS`` when unset, unparsable, or empty.
     """
     inst_id = get_institution_id_for_consent(consent["id"])
@@ -935,7 +935,7 @@ def _reminder_days_for_consent(consent: dict) -> list[int]:
 
 
 def process_consent_reminders(now: datetime | None = None) -> dict:
-    """Send day-3/day-7 reminders for pending consents. Returns a summary.
+    """Send day-7/day-14 reminders for pending consents. Returns a summary.
 
     Reminder n is sent when ``dispatched_at`` is at least ``CONSENT_REMINDER_DAYS[n]``
     days old and fewer than n+1 reminders have already been sent. The effective

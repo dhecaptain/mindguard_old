@@ -1,7 +1,7 @@
 export type RiskLevel = 'low' | 'moderate' | 'high' | 'critical'
 export type Classification = 'Suicidal' | 'Non-Suicidal'
 export type InputMode = 'text' | 'image'
-export type RoleType = 'student' | 'counsellor' | 'school_admin' | 'admin'
+export type RoleType = 'student' | 'parent' | 'counsellor' | 'school_admin' | 'admin'
 
 export interface AnalysisResult {
   prob: number
@@ -244,6 +244,8 @@ export interface InstitutionStaff {
   invitation_pending: boolean
   profile_completed: boolean
   active_assignment_count?: number
+  max_caseload?: number | null
+  availability?: 'available' | 'at_capacity' | 'unavailable'
   profile: Record<string, string>
 }
 
