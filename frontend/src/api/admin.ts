@@ -85,6 +85,10 @@ export interface InstitutionStudentStatus {
   email: string
   is_minor: boolean
   guardian_details_present?: boolean
+  consent_recipient?: 'student' | 'parent' | null
+  consent_recipient_email?: string | null
+  consent_reminders_sent?: number
+  consent_dispatched_at?: string | null
   grade_level?: string | null
   account_status?: string | null
   consent_status?: string | null
@@ -110,6 +114,11 @@ export async function dispatchInstitutionStudentConsent(studentId: string) {
   return data
 }
 
+export async function remindInstitutionStudentConsent(studentId: string) {
+  const { data } = await api.post(`/institution/students/${studentId}/remind-consent`)
+  return data
+}
+
 export async function archiveInstitutionStudent(studentId: string) {
   const { data } = await api.post(`/institution/students/${studentId}/archive`)
   return data
@@ -120,8 +129,8 @@ export async function continueInstitutionStudentIndependently(studentId: string)
   return data
 }
 
-export async function updateInstitutionStaff(staffId: string, status: 'approved' | 'suspended' | 'revoked') {
-  const { data } = await api.patch(`/institution/staff/${staffId}`, { status })
+export async function updateInstitutionStaff(staffId: string, patch: { status?: 'approved' | 'suspended' | 'revoked'; max_caseload?: number | null }) {
+  const { data } = await api.patch(`/institution/staff/${staffId}`, patch)
   return data
 }
 
@@ -153,6 +162,21 @@ export async function resendStudentInvite(studentId: string) {
 
 export async function getInstitutionAssignments(): Promise<InstitutionAssignment[]> {
   const { data } = await api.get('/institution/assignments')
+  return data
+}
+
+export async function getInstitutionAssignmentHistory(): Promise<Array<InstitutionAssignment & { active: boolean; unassigned_at?: string | null }>> {
+  const { data } = await api.get('/institution/assignments/history')
+  return data
+}
+
+export async function getArchivedInstitutionStudents() {
+  const { data } = await api.get('/admin/institution-archives')
+  return data as Array<{ id: string; name: string; email: string; institution_name: string; archived_at: string; is_minor: boolean; account_status?: string | null }>
+}
+
+export async function restoreArchivedInstitutionStudent(studentId: string) {
+  const { data } = await api.post(`/admin/institution-archives/${studentId}/restore`, { confirmation: 'RESTORE' })
   return data
 }
 

@@ -53,4 +53,4 @@ RECAPTCHA_SECRET = get_secret("RECAPTCHA_SECRET")
 ENFORCE_CONSENT_ANALYSIS = os.getenv("ENFORCE_CONSENT_ANALYSIS", "true").strip().lower() == "true"
 
 CONSENT_EXPIRY_DAYS = int(os.getenv("CONSENT_EXPIRY_DAYS", "30"))
-CONSENT_REMINDER_DAYS = [int(d) for d in os.getenv("CONSENT_REMINDER_DAYS", "3,7").split(",") if d.strip().isdigit()]
+CONSENT_REMINDER_DAYS = [int(d) for d in os.getenv("CONSENT_REMINDER_DAYS", "7,14").split(",") if d.strip().isdigit()]

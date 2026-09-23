@@ -70,6 +70,7 @@ const ADMIN_NAV_ITEMS = [
   { key: 'counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'students', icon: 'ti ti-school', label: 'Students' },
+  { key: 'archived-students', icon: 'ti ti-archive', label: 'Archived students' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit' },
   { key: 'alert-queue', icon: 'ti ti-bell-ringing', label: 'Alert Queue' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },

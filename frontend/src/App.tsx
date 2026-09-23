@@ -52,6 +52,9 @@ import InstitutionStudentsPage from './pages/InstitutionStudentsPage'
 import InstitutionAssignmentsPage from './pages/InstitutionAssignmentsPage'
 import InstitutionCounsellorsPage from './pages/InstitutionCounsellorsPage'
 import InstitutionStudentHomePage from './pages/InstitutionStudentHomePage'
+import GuardianSetupPage from './pages/GuardianSetupPage'
+import GuardianDashboardPage from './pages/GuardianDashboardPage'
+import AdminArchivedStudentsPage from './pages/AdminArchivedStudentsPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -100,6 +103,7 @@ function PageRouter() {
       case 'assignments': return <AdminCounsellorsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
+      case 'archived-students': return <AdminArchivedStudentsPage />
       case 'batch': return <BatchAnalysisPage />
       case 'reddit': return <RedditPage />
       case 'video': return <VideoPage />
@@ -154,6 +158,10 @@ function PageRouter() {
 
   if (userCategory === 'adult') {
     return <AdultPageRouter />
+  }
+
+  if (userCategory === 'parent' || role === 'parent') {
+    return <GuardianDashboardPage />
   }
 
   if (userCategory === 'institution_managed') {
@@ -293,6 +301,10 @@ export default function App() {
   if (window.location.pathname.startsWith('/consent/')) {
     const token = window.location.pathname.split('/consent/')[1]?.split('/')[0] || ''
     return <ConsentPortalPage token={token} />
+  }
+
+  if (window.location.pathname === '/guardian/setup') {
+    return <GuardianSetupPage />
   }
 
   if (window.location.pathname === '/invite' || window.location.pathname.startsWith('/invite/')) {

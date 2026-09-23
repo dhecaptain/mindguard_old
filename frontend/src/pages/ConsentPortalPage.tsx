@@ -164,6 +164,11 @@ export default function ConsentPortalPage({ token }: { token: string }) {
                   <div role="status" aria-live="polite" className="rounded-[10px] bg-[#ecfdf5] text-[#065f46] px-[16px] py-[14px] font-semibold">
                     {message || `This request is already ${consent.status.toLowerCase()}.`}
                   </div>
+                  {consent.status === 'ACCEPTED' && consent.recipient_role === 'parent' && (
+                    <a href={`/guardian/setup?token=${encodeURIComponent(token)}`} className="rounded-[8px] border border-[#0F766E] px-[16px] py-[10px] text-center text-sm font-bold text-[#0F766E]">
+                      Create an optional guardian account
+                    </a>
+                  )}
                   {consent.status === 'ACCEPTED' && status !== 'submitting' && (
                     <div className="rounded-[10px] bg-white border border-[#fecaca] px-[16px] py-[14px]">
                       <p className="text-[0.84rem] text-[#6b7280] mb-[10px]">

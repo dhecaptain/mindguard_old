@@ -151,7 +151,7 @@ def upgrade() -> None:
     )
     _add_column_if_missing(
         "institutions",
-        sa.Column("consent_reminder_days", sa.Text(), server_default="[3,7]"),
+        sa.Column("consent_reminder_days", sa.Text(), server_default="[7,14]"),
     )
     _add_column_if_missing(
         "institutions",
