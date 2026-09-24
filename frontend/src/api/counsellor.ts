@@ -317,8 +317,12 @@ export async function getNotes(studentId: string): Promise<Note[]> {
   return data
 }
 
-export async function createNote(studentId: string, body: string): Promise<Note> {
-  const { data } = await api.post(`/v1/students/${studentId}/notes`, { body })
+export async function createNote(
+  studentId: string,
+  body: string,
+  options?: { share_with_student?: boolean; student_title?: string },
+): Promise<Note> {
+  const { data } = await api.post(`/v1/students/${studentId}/notes`, { body, ...options })
   return data
 }
 

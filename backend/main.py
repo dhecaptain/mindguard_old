@@ -143,6 +143,7 @@ from backend.database import (
     health_check,
     create_note,
     get_notes,
+    get_student_feedback,
     get_rolling_risk,
     get_rolling_risk_history,
     get_user_by_referral_code,
@@ -331,6 +332,20 @@ class SPAStaticFiles(StaticFiles):
 
 def _require_analysis_staff(user: dict) -> None:
     require_permission(user, PERM_ANALYSIS_RUN)
+
+
+def _block_direct_user_analysis(user: dict) -> None:
+    """Direct text/image analysis is not available to student accounts.
+
+    Counsellors analyse only an assigned student's verified account in the
+    institution workflow. This prevents a student from initiating an analysis
+    outside the assignment, consent, and audit controls.
+    """
+    if user.get("role_type") == "student":
+        raise HTTPException(
+            403,
+            "Analysis is performed only by your assigned counsellor after consent and account verification.",
+        )
 
 
 def _require_self_adult(user: dict) -> None:
@@ -1670,6 +1685,7 @@ def _normalize_mastodon_handle(
 
 @app.post("/api/analysis/text")
 async def analyze_text(req: TextAnalysisRequest, user: dict = Depends(require_auth)):
+    _block_direct_user_analysis(user)
     _check_analysis_rate_limit(user["id"])
     try:
         prob, ms = await predict_one(req.text)
@@ -1699,6 +1715,7 @@ async def analyze_text(req: TextAnalysisRequest, user: dict = Depends(require_au
 async def analyze_image(
     file: UploadFile = File(...), user: dict = Depends(require_auth)
 ):
+    _block_direct_user_analysis(user)
     _check_analysis_rate_limit(user["id"])
     MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
     try:
@@ -5250,8 +5267,18 @@ async def v1_create_note(
     if not body:
         raise HTTPException(400, "Note body cannot be empty")
 
+    share_with_student = bool(data.get("share_with_student"))
+    student_title = (data.get("student_title") or "").strip() or None
+    if student_title and len(student_title) > 120:
+        raise HTTPException(400, "Feedback title is too long")
     try:
-        note = create_note(student_id=student_id, author_id=user["id"], body=body)
+        note = create_note(
+            student_id=student_id,
+            author_id=user["id"],
+            body=body,
+            share_with_student=share_with_student,
+            student_title=student_title,
+        )
     except Exception as exc:
         logger.error("create_note error: %s", exc)
         raise HTTPException(500, "Failed to create note")
@@ -5265,6 +5292,13 @@ async def v1_create_note(
         payload={"student_id": student_id},
         ip=_client_ip(request),
     )
+    if share_with_student:
+        _safe_notify(
+            student_id,
+            "New update from your counsellor",
+            student_title or "Your counsellor has shared a wellbeing update.",
+            "system",
+        )
     return note
 
 
@@ -6492,7 +6526,30 @@ async def institution_student_home(user: dict = Depends(require_auth)):
         "access_status": access_status,
         "assigned_counsellor_name": assignment["name"] if assignment else None,
         "support_active": bool(consent_accepted and assignment),
+        "account_verification": {
+            "verified": sum(
+                1
+                for account in get_social_accounts(user["id"])
+                if account.get("verification_status") == "verified"
+            ),
+            "pending": sum(
+                1
+                for account in get_social_accounts(user["id"])
+                if account.get("verification_status") != "verified"
+            ),
+        },
     }
+
+
+@app.get("/api/institution/student-feedback")
+async def institution_student_feedback(user: dict = Depends(require_auth)):
+    """Student-safe feedback only; never returns private case notes or raw analysis."""
+    if user.get("role_type") != "student":
+        raise HTTPException(403, "Student account required")
+    student = get_student_by_user_id(user["id"])
+    if not student or student.get("archived_at") or student.get("deleted_at"):
+        raise HTTPException(404, "This account is not an active institution student")
+    return {"feedback": get_student_feedback(user["id"])}
 
 
 @app.post("/api/institution/students/{student_id}/resend-invite")

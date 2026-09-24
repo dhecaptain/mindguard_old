@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect */
 import { useEffect, useState, useRef } from 'react'
 import { getNotes, createNote } from '../../api/counsellor'
 import type { Note } from '../../types'
@@ -27,6 +28,8 @@ export default function StudentNotes({ studentId }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [body, setBody] = useState('')
+  const [shareWithStudent, setShareWithStudent] = useState(false)
+  const [studentTitle, setStudentTitle] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -60,9 +63,11 @@ export default function StudentNotes({ studentId }: Props) {
     setSubmitting(true)
     setSubmitError(null)
     try {
-      const note = await createNote(studentId, body.trim())
+      const note = await createNote(studentId, body.trim(), { share_with_student: shareWithStudent, student_title: studentTitle.trim() || undefined })
       setNotes((prev) => [note, ...prev])
       setBody('')
+      setStudentTitle('')
+      setShareWithStudent(false)
       setAdding(false)
     } catch (e: any) {
       setSubmitError(e.message)
@@ -102,6 +107,11 @@ export default function StudentNotes({ studentId }: Props) {
             placeholder="Write a note..."
             className="w-full rounded-[8px] border border-[#e5e7eb] px-[12px] py-[8px] text-[0.82rem] text-[#1f2937] placeholder-[#9ca3af] resize-none focus:outline-none focus:ring-2 focus:ring-[#0F766E] focus:border-transparent"
           />
+          <label className="flex items-start gap-2 rounded-[8px] border border-teal-100 bg-teal-50 px-3 py-2 text-[0.76rem] text-teal-900">
+            <input type="checkbox" checked={shareWithStudent} onChange={(e) => setShareWithStudent(e.target.checked)} className="mt-0.5" />
+            <span><b>Share a student-safe update</b><br />This sends a notification and shows this note in the student's Support & feedback space. Do not share clinical or safeguarding details.</span>
+          </label>
+          {shareWithStudent && <input value={studentTitle} onChange={(e) => setStudentTitle(e.target.value)} maxLength={120} placeholder="Student-facing title, e.g. Your next check-in" className="w-full rounded-[8px] border border-[#e5e7eb] px-[12px] py-[8px] text-[0.82rem]" />}
           {submitError && (
             <div className="text-[#ef4444] text-[0.78rem] flex items-center gap-[4px]">
               <i className="ti ti-alert-circle" /> {submitError}
@@ -121,7 +131,7 @@ export default function StudentNotes({ studentId }: Props) {
               {submitting ? 'Saving...' : 'Save note'}
             </button>
             <button
-              onClick={() => { setAdding(false); setBody(''); setSubmitError(null) }}
+              onClick={() => { setAdding(false); setBody(''); setStudentTitle(''); setShareWithStudent(false); setSubmitError(null) }}
               disabled={submitting}
               className="px-[12px] py-[6px] border border-[#e5e7eb] text-[#6b7280] rounded-[7px] text-[0.78rem] font-semibold cursor-pointer hover:bg-[#f9fafb] transition-colors bg-white disabled:opacity-50"
             >

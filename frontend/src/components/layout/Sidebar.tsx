@@ -10,7 +10,6 @@ import { NOTIFICATION_TYPE_LABELS, NOTIFICATION_TYPE_ICONS } from '../../types'
 const STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   { key: 'dashboard', icon: 'ti ti-brain', label: 'Dashboard' },
   { key: 'my-accounts', icon: 'ti ti-link', label: 'My Accounts' },
-  { key: 'text-image', icon: 'ti ti-photo-scan', label: 'Text / Image' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'resources', icon: 'ti ti-ambulance', label: 'Crisis Resources' },
@@ -19,7 +18,6 @@ const STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
 
 const ADULT_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   ...STUDENT_NAV_ITEMS.slice(0, 2),
-  { key: 'self-history', icon: 'ti ti-history', label: 'Analysis History' },
   ...STUDENT_NAV_ITEMS.slice(2),
 ]
 
