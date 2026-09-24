@@ -2449,13 +2449,30 @@ def get_all_audit_log(limit: int = 100, action: str | None = None) -> list:
 # ── Notes functions ───────────────────────────────────────────────────
 
 
-def create_note(student_id: str, author_id: str, body: str) -> dict:
+def create_note(
+    student_id: str,
+    author_id: str,
+    body: str,
+    *,
+    share_with_student: bool = False,
+    student_title: str | None = None,
+) -> dict:
     nid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
     conn.execute(
-        "INSERT INTO notes (id, student_id, author_id, body, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-        (nid, student_id, author_id, body, now, now),
+        "INSERT INTO notes (id, student_id, author_id, body, visibility, student_title, shared_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            nid,
+            student_id,
+            author_id,
+            body,
+            "student" if share_with_student else "private",
+            student_title,
+            now if share_with_student else None,
+            now,
+            now,
+        ),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM notes WHERE id = ?", (nid,)).fetchone()
@@ -2472,6 +2489,20 @@ def get_notes(student_id: str) -> list:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_student_feedback(student_id: str, limit: int = 8) -> list:
+    """Student-safe updates deliberately shared by the assigned counsellor."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT n.id, n.body, n.student_title, n.shared_at, n.created_at, u.name AS author_name "
+        "FROM notes n JOIN users u ON u.id = n.author_id "
+        "WHERE n.student_id = ? AND n.visibility = 'student' "
+        "ORDER BY n.shared_at DESC, n.created_at DESC LIMIT ?",
+        (student_id, max(1, min(limit, 30))),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 # ── Rolling risk functions ────────────────────────────────────────────

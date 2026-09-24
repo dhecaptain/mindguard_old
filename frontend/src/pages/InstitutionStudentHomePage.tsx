@@ -2,65 +2,27 @@ import { useEffect, useState } from 'react'
 import api from '../api/client'
 import { useUiStore } from '../store/uiStore'
 
-type StudentHome = {
-  institution_name: string
-  is_minor: boolean
-  consent_status: string | null
-  guardian_details_present: boolean
-  access_status: 'ready' | 'guardian_consent_pending' | 'student_consent_pending'
-  assigned_counsellor_name: string | null
-  support_active: boolean
-}
+type StudentHome = { institution_name: string; is_minor: boolean; consent_status: string | null; guardian_details_present: boolean; access_status: 'ready' | 'guardian_consent_pending' | 'student_consent_pending'; assigned_counsellor_name: string | null; support_active: boolean; account_verification: { verified: number; pending: number } }
+type Feedback = { id: string; body: string; student_title: string | null; shared_at: string | null; created_at: string; author_name: string }
+
+function friendlyDate(value: string | null) { return value ? new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recently' }
 
 export default function InstitutionStudentHomePage() {
   const setPage = useUiStore((state) => state.setPage)
   const [home, setHome] = useState<StudentHome | null>(null)
+  const [feedback, setFeedback] = useState<Feedback[]>([])
   const [error, setError] = useState('')
-
-  useEffect(() => {
-    api.get('/institution/student-home')
-      .then(({ data }) => setHome(data))
-      .catch(() => setError('We could not load your support status. Please refresh or contact your school administrator.'))
-  }, [])
-
-  if (error) return <div className="mx-auto max-w-[820px] p-6 md:p-9"><div className="rounded-2xl border border-red-100 bg-red-50 p-5 text-sm text-red-700">{error}</div></div>
+  useEffect(() => { Promise.all([api.get('/institution/student-home'), api.get('/institution/student-feedback')]).then(([homeRes, feedbackRes]) => { setHome(homeRes.data); setFeedback(feedbackRes.data.feedback || []) }).catch(() => setError('We could not load your support space. Please refresh or contact your school administrator.')) }, [])
+  if (error) return <div className="mx-auto max-w-[920px] p-6 md:p-9"><div className="rounded-2xl border border-red-100 bg-red-50 p-5 text-sm text-red-700">{error}</div></div>
   if (!home) return <div className="p-8 text-sm text-slate-500">Loading your wellbeing space…</div>
-
-  const waitingForGuardian = home.access_status === 'guardian_consent_pending'
-  const waitingForStudent = home.access_status === 'student_consent_pending'
-  const title = home.support_active
-    ? 'Your wellbeing support is active'
-    : waitingForGuardian
-      ? 'We are waiting for parent or guardian permission'
-      : waitingForStudent
-        ? 'Review your wellbeing permission'
-        : 'Your wellbeing space is being prepared'
-  const message = home.support_active
-    ? `Your support with ${home.institution_name} is ready. You can use the safe options below whenever you need them.`
-    : waitingForGuardian
-      ? home.guardian_details_present
-        ? 'We have emailed your parent or guardian. When they decide, we will let you know. You can still add optional social accounts below.'
-        : 'Your school needs a parent or guardian email address before wellbeing support can begin. Please ask your school administrator for help.'
-      : waitingForStudent
-        ? 'We emailed you a secure permission link. Please open that email and choose whether to give permission before your school counsellor can access protected wellbeing features.'
-        : 'Your school is preparing your wellbeing support. You can add optional social accounts while you wait.'
-
-  return <div className="mx-auto max-w-[920px] p-6 md:p-9">
-    <section className={`rounded-3xl border p-6 md:p-8 ${home.support_active ? 'border-emerald-200 bg-emerald-50' : waitingForGuardian ? 'border-amber-200 bg-amber-50' : 'border-teal-200 bg-teal-50'}`}>
-      <p className="text-xs font-bold uppercase tracking-widest text-[#0f766e]">{home.institution_name}</p>
-      <div className="mt-3 flex items-start gap-3"><div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${home.support_active ? 'bg-emerald-200 text-emerald-800' : 'bg-white text-[#0f766e]'}`}><i className={`ti ${home.support_active ? 'ti-circle-check' : waitingForGuardian ? 'ti-shield-clock' : 'ti-mail'} text-2xl`} /></div><div><h1 className="text-2xl font-bold text-slate-800">{title}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">{message}</p></div></div>
-    </section>
-
-    <section className="mt-6 grid gap-4 md:grid-cols-3">
-      <StatusCard icon="ti-user-check" title="Your account" detail="Your MindGuard account is active." complete />
-      <StatusCard icon="ti-shield-lock" title={home.is_minor ? 'Parent or guardian permission' : 'Your permission'} detail={home.access_status === 'ready' ? 'Permission accepted.' : waitingForGuardian ? 'Waiting for their decision.' : 'Check your email to decide.'} complete={home.access_status === 'ready'} />
-      <StatusCard icon="ti-heart-handshake" title="Counsellor support" detail={home.assigned_counsellor_name ? home.access_status === 'ready' ? `Your counsellor is ${home.assigned_counsellor_name}.` : 'A counsellor is assigned, but support starts after permission.' : 'Your school will match you with a counsellor.'} complete={home.support_active} />
-    </section>
-
-    <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-slate-800">What you can do now</h2><p className="mt-1 text-sm text-slate-500">Connecting accounts is optional. Leave anything blank if you do not use it.</p><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => setPage('my-accounts')} className="rounded-lg bg-[#0f766e] px-4 py-2.5 text-sm font-semibold text-white">Manage optional accounts</button><button onClick={() => setPage('resources')} className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700">Get immediate support</button></div>{waitingForGuardian && <p className="mt-4 text-xs leading-5 text-slate-500">Your parent or guardian controls this decision. MindGuard will not ask you to approve it for yourself.</p>}</section>
+  const waitingForGuardian = home.access_status === 'guardian_consent_pending'; const waitingForStudent = home.access_status === 'student_consent_pending'; const ready = home.access_status === 'ready'; const steps = [true, ready, Boolean(home.assigned_counsellor_name)]
+  const title = home.support_active ? 'Your wellbeing support is active' : waitingForGuardian ? 'We are waiting for parent or guardian permission' : waitingForStudent ? 'Your permission is waiting for you' : 'Your wellbeing space is being prepared'
+  const message = home.support_active ? `You have a private support space at ${home.institution_name}. Your counsellor reviews wellbeing information and shares only the updates that are helpful for you.` : waitingForGuardian ? (home.guardian_details_present ? 'We have emailed your parent or guardian. You can manage optional accounts while you wait.' : 'Your school needs a parent or guardian email before wellbeing support can begin.') : waitingForStudent ? 'Check your email for your secure permission link. Your counsellor cannot access protected information until you decide.' : 'Your school is preparing your wellbeing support. You can add optional accounts if you choose.'
+  return <div className="mx-auto max-w-[1000px] p-5 md:p-9">
+    <section className="relative overflow-hidden rounded-3xl border border-teal-100 bg-gradient-to-br from-teal-700 via-[#0f766e] to-cyan-700 p-6 text-white shadow-lg md:p-8"><div className="absolute -right-10 -top-12 h-48 w-48 rounded-full bg-cyan-300/20 blur-2xl animate-pulse" /><div className="relative flex flex-col gap-6 md:flex-row md:items-center md:justify-between"><div className="max-w-2xl"><p className="text-xs font-bold uppercase tracking-[0.18em] text-teal-100">{home.institution_name}</p><h1 className="mt-3 text-2xl font-bold md:text-3xl">{title}</h1><p className="mt-3 text-sm leading-6 text-teal-50">{message}</p></div><div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full border-[10px] border-white/20 bg-white/10 text-center shadow-inner"><div><div className="text-2xl font-bold">{steps.filter(Boolean).length}/3</div><div className="text-[10px] font-semibold uppercase tracking-wide text-teal-100">Support steps</div></div></div></div></section>
+    <section className="mt-5 grid gap-3 md:grid-cols-3">{[{ icon: 'ti-user-check', title: 'Your account', detail: 'Your MindGuard account is active.', done: true }, { icon: 'ti-shield-lock', title: home.is_minor ? 'Parent or guardian permission' : 'Your permission', detail: ready ? 'Permission accepted.' : waitingForGuardian ? 'Waiting for their decision.' : 'Check your email to decide.', done: ready }, { icon: 'ti-heart-handshake', title: 'Counsellor support', detail: home.assigned_counsellor_name ? ready ? `${home.assigned_counsellor_name} is part of your support team.` : 'A counsellor is assigned; support begins after permission.' : 'Your school will match you with a counsellor.', done: Boolean(home.assigned_counsellor_name) }].map(card => <div key={card.title} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><i className={`ti ${card.icon} text-xl ${card.done ? 'text-emerald-600' : 'text-amber-600'}`} /><h2 className="mt-2 font-bold text-slate-800">{card.title}</h2><p className="mt-1 text-sm leading-5 text-slate-500">{card.detail}</p></div>)}</section>
+    <section className="mt-5 grid gap-5 lg:grid-cols-[1.35fr_.65fr]"><div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between gap-3"><div><h2 className="font-bold text-slate-800">Updates from your counsellor</h2><p className="mt-1 text-sm text-slate-500">Only feedback your counsellor chooses to share appears here.</p></div><span className="rounded-full bg-teal-50 px-3 py-1 text-xs font-bold text-teal-700">{feedback.length} update{feedback.length === 1 ? '' : 's'}</span></div>{feedback.length === 0 ? <div className="mt-5 rounded-xl bg-slate-50 p-5 text-sm leading-6 text-slate-500">There are no shared updates yet. Your counsellor may share helpful feedback after a check-in or when there is a useful next step.</div> : <div className="mt-4 space-y-3">{feedback.slice(0, 3).map(item => <article key={item.id} className="rounded-xl border border-teal-100 bg-teal-50/50 p-4"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold text-slate-800">{item.student_title || 'A wellbeing update'}</h3><span className="text-xs text-slate-500">{friendlyDate(item.shared_at || item.created_at)}</span></div><p className="mt-2 text-sm leading-6 text-slate-600">{item.body}</p><p className="mt-3 text-xs font-medium text-teal-700">From {item.author_name}</p></article>)}</div>}</div>
+      <aside className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-slate-800">Your account privacy</h2><p className="mt-1 text-sm leading-5 text-slate-500">Only verified accounts can be considered by your assigned counsellor, and only when permission is active.</p><div className="mt-5 flex items-end gap-2"><div className="h-20 flex-1 rounded-t-lg bg-teal-500 transition-all duration-700" style={{ height: `${Math.max(18, home.account_verification.verified * 28)}px` }} /><div className="h-12 flex-1 rounded-t-lg bg-amber-300 transition-all duration-700" style={{ height: `${Math.max(12, home.account_verification.pending * 28)}px` }} /></div><div className="mt-2 flex justify-between text-xs text-slate-500"><span>{home.account_verification.verified} verified</span><span>{home.account_verification.pending} need action</span></div><button onClick={() => setPage('my-accounts')} className="mt-5 w-full rounded-lg bg-[#0f766e] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#115e59]">Manage optional accounts</button></aside></section>
+    <section className="mt-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-slate-800">What you can do now</h2><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => setPage('communications')} className="rounded-lg bg-slate-800 px-4 py-2.5 text-sm font-semibold text-white">Message your support team</button><button onClick={() => setPage('appointments')} className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700">View appointments</button><button onClick={() => setPage('resources')} className="rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700">Get immediate support</button></div></section>
   </div>
-}
-
-function StatusCard({ icon, title, detail, complete }: { icon: string; title: string; detail: string; complete: boolean }) {
-  return <div className="rounded-2xl border border-slate-200 bg-white p-5"><i className={`ti ${icon} text-xl ${complete ? 'text-emerald-600' : 'text-amber-600'}`} /><h2 className="mt-3 font-bold text-slate-800">{title}</h2><p className="mt-1 text-sm leading-5 text-slate-500">{detail}</p></div>
 }
