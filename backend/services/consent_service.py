@@ -32,6 +32,7 @@ from backend.database import (
     get_all_consents,
     get_institution_id_for_consent,
     get_institution_by_id,
+    get_assignments_for_student,
     get_active_consent_template,
     mark_analyses_consent_withdrawn,
     set_student_current_consent,
@@ -179,6 +180,7 @@ def _send_consent_email(consent: dict, reminder: bool = False, token: str | None
         "student_first_name": _student_first_name(consent),
         "parent_first_name": consent.get("recipient_role") == "parent" and _parent_first_name(consent) or "Parent/Guardian",
         "counsellor_email": _counsellor_email(consent),
+        "platforms": _consent_platforms(consent),
         "consent_url": url,
     }
     context.update(_footer_urls(token))
@@ -825,9 +827,32 @@ def _parent_first_name(consent: dict) -> str:
 def _counsellor_email(consent: dict) -> str:
     """Best-effort initiating counsellor email for email-template context."""
     admin = get_user_by_id(consent.get("counsellor_id") or "")
-    if admin and admin.get("email"):
+    # A student-requested platform add-on uses the student's id as the audit
+    # actor, not as the counsellor contact. Never expose the student's own
+    # email as the counsellor contact in that case.
+    if admin and admin.get("email") and admin.get("id") != consent.get("student_id"):
         return admin["email"]
-    return "counsellor@mindguard.app"
+    assignments = get_assignments_for_student(consent.get("student_id") or "", active_only=True)
+    for assignment in assignments:
+        if assignment.get("counsellor_email"):
+            return assignment["counsellor_email"]
+    institution_id = get_institution_id_for_consent(consent.get("id") or "")
+    institution = get_institution_by_id(institution_id) if institution_id else None
+    if institution and institution.get("contact_email"):
+        return institution["contact_email"]
+    if institution and institution.get("admin_email"):
+        return institution["admin_email"]
+    return "your school support team"
+
+
+def _consent_platforms(consent: dict) -> str:
+    """Human-readable exact platform scope for the consent email."""
+    try:
+        values = json.loads(consent.get("platforms_json") or "[]")
+    except (TypeError, ValueError):
+        values = []
+    names = [str(value).strip() for value in values if str(value).strip()]
+    return ", ".join(names) if names else "the selected platform(s)"
 
 
 def _reminder_day(consent: dict) -> int:

@@ -106,18 +106,19 @@ def student_consent_request(context: dict) -> tuple[str, str]:
         _p(f"Hi {first},")
         + _p(
             f"{institution} is using MindGuard, a decision-support tool that helps counsellors "
-            "identify early signs of mental distress in consented digital content. Your counsellor "
-            "would like your permission to include your opted-in content in this process."
+            "review consented wellbeing information. Your assigned counsellor is asking whether "
+            "you want to include the following platforms in that review: "
+            f"<strong>{_esc(context.get('platforms') or 'the selected platform(s)')}</strong>."
         )
         + _p("Before you decide, please review what this means:")
         + '<ul style="margin:0 0 16px;padding-left:20px;">'
-        + _li("Only content you explicitly share will be analysed")
-        + _li("Your data is never sold or shared outside your school")
+        + _li("Only public content from accounts you connect and successfully verify can be considered")
+        + _li("Consent covers only the platforms listed in this email and portal")
+        + _li("Your assigned counsellor reviews the results; MindGuard does not diagnose")
         + _li("You can withdraw your consent at any time")
-        + _li("MindGuard supports counsellors — it does not replace them")
         + "</ul>"
         + '<p style="margin:0 0 20px;">' + _button(context["consent_url"], "Review and respond") + "</p>"
-        + _p(f'This link expires in 30 days. If you have questions, contact your counsellor at {_esc(context["counsellor_email"])}.')
+        + _p(f'This link expires in 30 days. If you have questions, contact your counsellor or school support team at {_esc(context["counsellor_email"])}.')
         + _p(f"— The MindGuard Team at {institution}", size=13)
     )
     footer = _FOOTER.format(**context)
@@ -133,17 +134,17 @@ def parent_consent_request(context: dict) -> tuple[str, str]:
     body = (
         _p(f"Dear {parent},")
         + _p(
-            f"{institution} is inviting {student} to participate in MindGuard, a consent-first tool "
-            "that helps school counsellors identify early signs of mental distress in students' "
-            "opted-in digital content."
+            f"{institution} is asking for permission to include {student} in MindGuard's consent-first "
+            "wellbeing support process for these platforms: "
+            f"<strong>{_esc(context.get('platforms') or 'the selected platform(s)')}</strong>."
         )
         + _p(f"Because {student} is under 18, your consent is required before they can participate.")
         + _p("What MindGuard does:")
         + '<ul style="margin:0 0 16px;padding-left:20px;">'
-        + _li(f"Analyses only content that {student} explicitly shares")
+        + _li(f"Only public content from accounts that {student} connects and successfully verifies can be considered")
+        + _li("Consent applies only to the platforms listed above")
         + _li("Produces summaries that a trained counsellor reviews")
         + _li("Does not diagnose, monitor, or replace human care")
-        + _li("Never sells or shares your child's data outside the school")
         + "</ul>"
         + _p("You can:")
         + '<ul style="margin:0 0 16px;padding-left:20px;">'
@@ -169,6 +170,7 @@ _TEMPLATE_TOKENS = (
     "student_first_name",
     "parent_first_name",
     "counsellor_email",
+    "platforms",
     "consent_url",
     "privacy_url",
     "contact_url",
