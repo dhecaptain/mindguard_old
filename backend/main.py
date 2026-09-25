@@ -192,6 +192,7 @@ from backend.database import (
     create_social_account_claim,
     rotate_social_account_claim_code,
     mark_social_account_verified,
+    request_social_account_reverification,
     delete_social_account,
     assign_student_to_counsellor,
     unassign_student_from_counsellor,
@@ -304,7 +305,12 @@ async def inference_unavailable_handler(
     "service unavailable" instead of a misleading client error or an OOM kill.
     """
     return JSONResponse(
-        status_code=503, content={"detail": INFERENCE_UNAVAILABLE_MESSAGE}
+        status_code=503,
+        content={
+            "detail": INFERENCE_UNAVAILABLE_MESSAGE,
+            "error_code": "INFERENCE_UNAVAILABLE",
+            "request_id": getattr(request.state, "request_id", None),
+        },
     )
 
 
@@ -331,6 +337,12 @@ class SPAStaticFiles(StaticFiles):
 
 
 def _require_analysis_staff(user: dict) -> None:
+    if user.get("role_type") == "student":
+        raise HTTPException(
+            403,
+            "Analysis is performed only by your assigned counsellor after consent and account verification.",
+            headers={"X-Error-Code": "STUDENT_ANALYSIS_BLOCKED"},
+        )
     require_permission(user, PERM_ANALYSIS_RUN)
 
 
@@ -345,6 +357,7 @@ def _block_direct_user_analysis(user: dict) -> None:
         raise HTTPException(
             403,
             "Analysis is performed only by your assigned counsellor after consent and account verification.",
+            headers={"X-Error-Code": "STUDENT_ANALYSIS_BLOCKED"},
         )
 
 
@@ -604,6 +617,7 @@ async def request_logging_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
         status_code = response.status_code
+        response.headers["X-Request-ID"] = request_id
         return response
     finally:
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
@@ -3704,11 +3718,14 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
     if not student or student["role_type"] != "student":
         raise HTTPException(404, "Student not found")
     _require_counsellor_student_access(user, student_id, require_consent=False)
-    _require_counsellor_student_access(user, student_id)
     from backend.database import get_analyses
 
-    analyses = get_analyses(student_id, limit=50)
-    rolling = get_rolling_risk(student_id)
+    consent_status = consent_status_for_ui(student_id)
+    consent_active = bool(consent_status.get("active"))
+    # Assignment status is visible before consent; protected analysis data is
+    # never returned until consent is active.
+    analyses = get_analyses(student_id, limit=50) if consent_active else []
+    rolling = get_rolling_risk(student_id) if consent_active else None
     if analyses:
         latest_prob = analyses[0]["prob"]
         latest_label, latest_color, _ = risk_label(latest_prob)
@@ -3734,7 +3751,7 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
         },
         "rolling_risk": rolling,
         "analyses": analyses,
-        "consent_status": consent_status_for_ui(student_id),
+        "consent_status": consent_status,
     }
 
 
@@ -5269,8 +5286,16 @@ async def v1_create_note(
 
     share_with_student = bool(data.get("share_with_student"))
     student_title = (data.get("student_title") or "").strip() or None
+    student_message = (data.get("student_message") or "").strip() or None
     if student_title and len(student_title) > 120:
         raise HTTPException(400, "Feedback title is too long")
+    if share_with_student and not student_message:
+        raise HTTPException(
+            400,
+            "Provide a separate student-safe message before sharing this update.",
+        )
+    if student_message and len(student_message) > 2000:
+        raise HTTPException(400, "Feedback message is too long")
     try:
         note = create_note(
             student_id=student_id,
@@ -5278,6 +5303,7 @@ async def v1_create_note(
             body=body,
             share_with_student=share_with_student,
             student_title=student_title,
+            student_message=student_message,
         )
     except Exception as exc:
         logger.error("create_note error: %s", exc)
@@ -7282,6 +7308,13 @@ async def v1_student_analyze(
             403,
             "This account is not ownership-verified. Ask the student to complete account verification before analysis.",
         )
+    if account.get("availability_status") not in (None, "available") or account.get("reverification_required"):
+        raise HTTPException(403, "This social account is unavailable and must be verified again before analysis.")
+    requested_account_id = (data.get("account_id") or "").strip()
+    if not requested_account_id:
+        raise HTTPException(400, "account_id is required; select one of the student's verified accounts.")
+    if requested_account_id != account.get("id"):
+        raise HTTPException(400, "The selected account does not belong to this student.")
     # The client must not be able to switch the analysis target by supplying a
     # different handle. The target is always the student's verified account.
     data["platform"] = requested_platform
@@ -7314,15 +7347,23 @@ async def v1_student_analyze(
                     )
 
     try:
+        from backend.services.self_analysis import SelfAnalysisError, retrieve_verified_account
+        retrieved = await retrieve_verified_account(student_id, requested_platform)
+        if retrieved.get("status") not in ("ok", "no_data"):
+            raise HTTPException(422, retrieved.get("message") or "The verified account could not be retrieved.")
+        if not retrieved.get("posts"):
+            raise HTTPException(422, retrieved.get("message") or "No analyzable public content was available for this verified account.")
         result = run_consented_student_analysis(
             student_id=student_id,
-            posts=data.get("posts"),
+            posts=retrieved.get("posts"),
             platform=requested_platform,
             actor=user,
             ip=_client_ip(request),
         )
     except HTTPException:
         raise
+    except SelfAnalysisError as exc:
+        raise HTTPException(422, str(exc))
     except Exception as exc:
         raise inference_http_error(exc)
 
@@ -7336,7 +7377,7 @@ async def v1_student_analyze(
             else None,
             analysis_type="counsellor_student",
             platforms=[requested_platform],
-            findings={"posts": data.get("posts"), "result": result},
+            findings={"posts": retrieved.get("posts"), "result": result},
             risk_score=result.get("rolling_score"),
             insights=f"Rolling risk {result.get('rolling_score'):.2f} on {data.get('platform')}"
             if result.get("rolling_score") is not None
@@ -7347,6 +7388,35 @@ async def v1_student_analyze(
         logger.warning("analysis session persist failed: %s", e)
 
     return result
+
+
+@app.get("/api/v1/students/{student_id}/social-accounts")
+async def v1_student_social_accounts(student_id: str, user: dict = Depends(require_auth)):
+    student = get_user_by_id(student_id)
+    if not student or student.get("role_type") != "student":
+        raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, student_id, require_consent=False)
+    return {"accounts": get_social_accounts(student_id)}
+
+
+@app.post("/api/v1/students/{student_id}/social-accounts/{platform}/request-reverification")
+async def v1_request_student_account_reverification(
+    student_id: str, platform: str, request: Request, user: dict = Depends(require_auth)
+):
+    student = get_user_by_id(student_id)
+    if not student or student.get("role_type") != "student":
+        raise HTTPException(404, "Student not found")
+    _require_counsellor_student_access(user, student_id, require_consent=False)
+    from backend.services.platform_registry import normalize_platform
+    slug = normalize_platform(platform)
+    if not slug:
+        raise HTTPException(400, "Unknown platform")
+    account = request_social_account_reverification(student_id, slug)
+    if not account:
+        raise HTTPException(404, "Student account not found")
+    _safe_notify(student_id, "Account verification needed", f"Please review and verify your {slug} account before it can be used for wellbeing analysis.", "system")
+    write_audit(user["id"], user["role_type"], "SOCIAL_ACCOUNT_REVERIFICATION_REQUESTED", "social_account", account.get("id", slug), payload={"student_id": student_id, "platform": slug}, ip=_client_ip(request))
+    return {"ok": True, "account": account, "message": "The student was asked to verify this account again."}
 
 
 # ═════════════════════════════════════════════════════════════════════

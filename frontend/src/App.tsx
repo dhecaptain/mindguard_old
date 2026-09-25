@@ -14,12 +14,9 @@ import OnboardingPage from './pages/OnboardingPage'
 import MyAccountsPage from './pages/MyAccountsPage'
 import AdultDashboardPage from './pages/AdultDashboardPage'
 import AdultAccountsPage from './pages/AdultAccountsPage'
-import AnalysisHistoryPage from './pages/AnalysisHistoryPage'
-import AnalysisSessionPage from './pages/AnalysisSessionPage'
 import DemoRequestPage from './pages/DemoRequestPage'
 import DemoResponsePage from './pages/DemoResponsePage'
 import DashboardPage from './pages/DashboardPage'
-import TextImageAnalysisPage from './pages/TextImageAnalysisPage'
 import BatchAnalysisPage from './pages/BatchAnalysisPage'
 import RedditPage from './pages/RedditPage'
 import VideoPage from './pages/VideoPage'
@@ -145,21 +142,8 @@ function PageRouter() {
   if (role === 'counsellor') {
     switch (currentPage) {
       case 'institution': return <InstitutionWorkspacePage />
-      case 'institution-students': return <InstitutionStudentsPage />
-      case 'institution-counsellors': return <InstitutionCounsellorsPage />
-      case 'assignments': return <InstitutionAssignmentsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
-      case 'batch': return <BatchAnalysisPage />
-      case 'reddit': return <RedditPage />
-      case 'video': return <VideoPage />
-      case 'bluesky': return <BlueskyPage />
-      case 'mastodon': return <MastodonPage />
-      case 'youtube': return <YouTubePage />
-      case 'file': return <FileUploadPage />
-      case 'facebook': return <FacebookPage />
-      case 'twitter': return <TwitterPage />
-      case 'unified': return <MultiPlatformPage />
       case 'referrals': return <ReferralsPage />
       case 'communications': return <CommunicationsPage />
       case 'appointments': return <AppointmentsPage />
@@ -192,7 +176,6 @@ function PageRouter() {
 
   switch (currentPage) {
     case 'dashboard': return <DashboardPage />
-    case 'text-image': return <TextImageAnalysisPage />
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />
     case 'communications': return <StudentCommunicationsPage />
@@ -209,9 +192,6 @@ function AdultPageRouter() {
   switch (currentPage) {
     case 'dashboard': return <AdultDashboardPage />
     case 'my-accounts': return <AdultAccountsPage />
-    case 'self-history': return <AnalysisHistoryPage />
-    case 'self-session': return <AnalysisSessionPage />
-    case 'text-image': return <TextImageAnalysisPage />
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />
     case 'communications': return <StudentCommunicationsPage />

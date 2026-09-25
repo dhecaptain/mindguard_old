@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useAuthStore } from '../store'
 import { getInstitutionSetup, getInstitutionStaff, inviteInstitutionStaff, markInstitutionReady, commitRoster } from '../api/admin'
 import type { InstitutionSetup, InstitutionStaff } from '../types'
 
@@ -118,6 +119,8 @@ function downloadRosterTemplate() {
 }
 
 export default function InstitutionWorkspacePage() {
+  const role = useAuthStore((state) => state.user?.role_type?.toLowerCase())
+  const isCounsellor = role === 'counsellor'
   const [setup, setSetup] = useState<InstitutionSetup | null>(null)
   const [staff, setStaff] = useState<InstitutionStaff[]>([])
   const [error, setError] = useState('')
@@ -138,7 +141,9 @@ export default function InstitutionWorkspacePage() {
       setSetup(nextSetup); setStaff(nextStaff); setError('')
     } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load institution workspace') }
   }
-  useEffect(() => { load() }, [])
+  // This effect loads remote workspace state on mount.
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { void load() }, [])
   useEffect(() => () => {
     if (uploadProgressTimer.current) window.clearInterval(uploadProgressTimer.current)
   }, [])
@@ -202,6 +207,8 @@ export default function InstitutionWorkspacePage() {
 
   if (error && !setup) return <div className="p-8 text-red-700">{error}</div>
   if (!setup) return <div className="p-8 text-slate-500">Loading institution workspace…</div>
+
+  if (isCounsellor) return <div className="mx-auto max-w-[1200px] p-6 md:p-9"><div className="mb-7"><p className="text-xs font-bold uppercase tracking-[0.14em] text-[#0f766e]">My institution · read only</p><h1 className="mt-1 text-3xl font-bold text-[#172033]">{setup.institution.name}</h1><p className="mt-1 text-sm text-slate-500">Institution context, roster readiness and consent status. School administrators control setup and assignments.</p></div><div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">{Object.entries(setup.counts).map(([label, value]) => <div key={label} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><div className="text-2xl font-bold text-[#172033]">{value}</div><div className="mt-1 text-xs capitalize text-slate-500">{label.replaceAll('_', ' ')}</div></div>)}</div><div className="grid gap-6 lg:grid-cols-2"><section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-[#172033]">Readiness overview</h2><p className="mt-1 text-sm text-slate-500">{setup.next_action}</p><div className="mt-4 space-y-3">{setup.checks.map((check) => <div key={check.key} className="flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-3 text-sm"><span className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${check.complete ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{check.complete ? '✓' : '!'}</span><span className="text-slate-700">{check.label}</span></div>)}</div></section><section className="rounded-2xl border border-teal-100 bg-teal-50 p-5"><h2 className="font-bold text-teal-900">Your counsellor permissions</h2><ul className="mt-3 space-y-2 text-sm leading-6 text-teal-800"><li>✓ Manage and support students assigned to you</li><li>✓ Review consent and account-readiness status</li><li>✓ Run analysis only for assigned, consented students</li><li>✓ Share student-safe feedback</li><li>× Staff, roster, policy and assignment changes are managed by school administrators</li></ul></section></div></div>
 
   return (
     <div className="mx-auto max-w-[1200px] p-6 md:p-9">

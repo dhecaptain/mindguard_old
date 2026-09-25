@@ -76,6 +76,19 @@ export interface StudentAnalysisResult {
   crisis_escalation_eligible?: boolean
 }
 
+export interface StudentSocialAccount {
+  id: string
+  platform: string
+  handle?: string | null
+  profile_url?: string | null
+  platform_account_id?: string | null
+  verification_method?: string | null
+  verification_status?: string | null
+  last_verified_at?: string | null
+  reverification_required?: number | boolean
+  availability_status?: string | null
+}
+
 export interface Referral {
   id: string
   counsellor_id: string
@@ -133,7 +146,7 @@ export async function getStudentDetail(id: string): Promise<StudentDetail> {
 
 export async function analyzeStudent(
   studentId: string,
-  payload: { platform: string; posts: Array<{ risk_score: number; date?: string; text?: string }> }
+  payload: { platform: string; account_id: string }
 ): Promise<StudentAnalysisResult> {
   const { data } = await api.post(`/v1/students/${studentId}/analyze`, payload)
   return data
@@ -317,10 +330,19 @@ export async function getNotes(studentId: string): Promise<Note[]> {
   return data
 }
 
+export async function getStudentSocialAccounts(studentId: string): Promise<StudentSocialAccount[]> {
+  const { data } = await api.get<{ accounts: StudentSocialAccount[] }>(`/v1/students/${studentId}/social-accounts`)
+  return data.accounts ?? []
+}
+
+export async function requestAccountReverification(studentId: string, platform: string): Promise<void> {
+  await api.post(`/v1/students/${studentId}/social-accounts/${platform}/request-reverification`)
+}
+
 export async function createNote(
   studentId: string,
   body: string,
-  options?: { share_with_student?: boolean; student_title?: string },
+  options?: { share_with_student?: boolean; student_title?: string; student_message?: string },
 ): Promise<Note> {
   const { data } = await api.post(`/v1/students/${studentId}/notes`, { body, ...options })
   return data

@@ -2,10 +2,12 @@
 import { useState, useEffect } from 'react'
 import api from '../api/client'
 
-interface Account { platform: string; handle?: string; profile_url?: string; active: number; verification_status?: string; previous_handle?: string }
+interface Account { platform: string; handle?: string; profile_url?: string; active: number; verification_status?: string; previous_handle?: string; reverification_required?: number | boolean; availability_status?: string }
 const platforms = ['Instagram', 'X', 'Facebook', 'LinkedIn', 'TikTok', 'Mastodon', 'Bluesky', 'YouTube', 'Reddit']
 
 function accountStatus(account: Account) {
+  if (account.availability_status === 'unavailable') return { label: 'Unavailable — verification paused', colour: 'text-[#991b1b] bg-[#fee2e2]' }
+  if (account.reverification_required) return { label: 'Reverification required', colour: 'text-[#92400e] bg-[#fef3c7]' }
   if (account.verification_status === 'verified') return { label: 'Verified — ready when consent allows', colour: 'text-[#047857] bg-[#d1fae5]' }
   if (account.verification_status === 'legacy_unverified') return { label: 'Verification needed', colour: 'text-[#92400e] bg-[#fef3c7]' }
   return { label: 'Ownership verification pending', colour: 'text-[#9a3412] bg-[#ffedd5]' }

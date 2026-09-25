@@ -30,7 +30,7 @@ from backend.database import (
     set_social_account_verification,
 )
 from backend.services import insights
-from backend.services.platform_registry import get_platform
+from backend.services.platform_registry import get_platform, normalize_platform
 from backend.services.predictor import InferenceUnavailableError, predict_batch
 from backend.utils import calibrate_risk_score, clean_text, risk_label
 
@@ -326,6 +326,18 @@ async def run_self_analysis(user_id: str, platform_slugs: list[str]) -> dict[str
     platform_results: dict[str, dict[str, Any]] = {}
     progress: dict[str, Any] = {"requested": requested, "platforms": {}}
     for slug in requested:
+        spec = get_platform(slug) or {}
+        if spec.get("analyzable") is False:
+            platform_results[slug] = {
+                "platform": slug,
+                "status": "error",
+                "message": (spec.get("limitations") or "This platform is currently unavailable for analysis."),
+            }
+            progress["platforms"][slug] = {
+                "status": "error",
+                "message": platform_results[slug]["message"],
+            }
+            continue
         analyzer = _ANALYZERS.get(slug)
         if analyzer is None:
             progress["platforms"][slug] = {"status": "error", "message": "Unsupported platform."}
@@ -339,6 +351,27 @@ async def run_self_analysis(user_id: str, platform_slugs: list[str]) -> dict[str
             set_social_account_analysis_status(user_id, slug, "error")
 
     return _finalize_session(user_id, platform_results, progress, analysis_type="self")
+
+
+async def retrieve_verified_account(student_id: str, platform: str) -> dict[str, Any]:
+    """Retrieve only the account already claimed and verified by a student.
+
+    This is the counsellor workflow boundary: callers provide a student and a
+    platform, never a free-form handle or post list.
+    """
+    slug = normalize_platform(str(platform or "")) or str(platform or "").strip().lower()
+    spec = get_platform(slug) or {}
+    if spec.get("analyzable") is False:
+        raise SelfAnalysisError(spec.get("limitations") or "This platform is currently unavailable for analysis.")
+    account = next((row for row in get_social_accounts(student_id) if row.get("platform") == slug), None)
+    if not account or account.get("verification_status") != "verified":
+        raise SelfAnalysisError("The student's account is not ownership-verified.")
+    if account.get("availability_status") not in (None, "available") or account.get("reverification_required"):
+        raise SelfAnalysisError("The student's account requires reverification before retrieval.")
+    analyzer = _ANALYZERS.get(slug)
+    if analyzer is None:
+        raise SelfAnalysisError("This platform is not supported for verified retrieval.")
+    return await analyzer(student_id)
 
 
 def _finalize_session(

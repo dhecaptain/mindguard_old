@@ -2456,6 +2456,7 @@ def create_note(
     *,
     share_with_student: bool = False,
     student_title: str | None = None,
+    student_message: str | None = None,
 ) -> dict:
     nid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -2473,6 +2474,10 @@ def create_note(
             now,
             now,
         ),
+    )
+    conn.execute(
+        "UPDATE notes SET student_message = ? WHERE id = ?",
+        (student_message if share_with_student else None, nid),
     )
     conn.commit()
     row = conn.execute("SELECT * FROM notes WHERE id = ?", (nid,)).fetchone()
@@ -2495,9 +2500,9 @@ def get_student_feedback(student_id: str, limit: int = 8) -> list:
     """Student-safe updates deliberately shared by the assigned counsellor."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT n.id, n.body, n.student_title, n.shared_at, n.created_at, u.name AS author_name "
+        "SELECT n.id, n.student_message AS body, n.student_title, n.shared_at, n.created_at, u.name AS author_name "
         "FROM notes n JOIN users u ON u.id = n.author_id "
-        "WHERE n.student_id = ? AND n.visibility = 'student' "
+        "WHERE n.student_id = ? AND n.visibility = 'student' AND n.student_message IS NOT NULL "
         "ORDER BY n.shared_at DESC, n.created_at DESC LIMIT ?",
         (student_id, max(1, min(limit, 30))),
     ).fetchall()
@@ -3707,6 +3712,8 @@ def save_social_account(
             "verified_handle = CASE WHEN ? THEN NULL ELSE COALESCE(?, verified_handle) END, "
             "verified_profile_url = CASE WHEN ? THEN NULL ELSE COALESCE(?, verified_profile_url) END, "
             "analysis_status = CASE WHEN ? THEN 'blocked' ELSE analysis_status END, "
+            "reverification_required = CASE WHEN ? THEN 1 ELSE reverification_required END, "
+            "availability_status = CASE WHEN ? THEN 'available' ELSE availability_status END, "
             "previous_handle = CASE WHEN ? THEN ? ELSE previous_handle END, "
             "verification_code_hash = CASE WHEN ? THEN NULL ELSE verification_code_hash END "
             "WHERE student_id = ? AND platform = ?",
@@ -3720,6 +3727,8 @@ def save_social_account(
                 verified_handle,
                 changed,
                 verified_profile_url,
+                changed,
+                changed,
                 changed,
                 changed,
                 existing["handle"],
@@ -3840,7 +3849,8 @@ def mark_social_account_verified(student_id: str, platform: str) -> dict | None:
     cur = conn.execute(
         "UPDATE student_social_accounts SET verification_status = 'verified', verified_handle = handle, "
         "verified_profile_url = profile_url, verification_code_hash = NULL, last_verified_at = ?, "
-        "analysis_status = 'ready', updated_at = ? WHERE student_id = ? AND platform = ? AND active = 1",
+        "analysis_status = 'ready', availability_status = 'available', reverification_required = 0, updated_at = ? "
+        "WHERE student_id = ? AND platform = ? AND active = 1",
         (now, now, student_id, slug),
     )
     conn.commit()
@@ -3848,6 +3858,21 @@ def mark_social_account_verified(student_id: str, platform: str) -> dict | None:
         "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
         (student_id, slug),
     ).fetchone()
+    conn.close()
+    return _strip_credentials(dict(row)) if row and cur.rowcount else None
+
+
+def request_social_account_reverification(student_id: str, platform: str) -> dict | None:
+    slug = normalize_platform(platform) or platform.strip().lower()
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE student_social_accounts SET verification_status = 'pending', reverification_required = 1, "
+        "analysis_status = 'blocked', updated_at = ? WHERE student_id = ? AND platform = ? AND active = 1",
+        (now, student_id, slug),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?", (student_id, slug)).fetchone()
     conn.close()
     return _strip_credentials(dict(row)) if row and cur.rowcount else None
 
