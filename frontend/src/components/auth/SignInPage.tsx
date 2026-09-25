@@ -16,6 +16,7 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [showLoginPassword, setShowLoginPassword] = useState(false)
 
   const [regName, setRegName] = useState('')
   const [regEmail, setRegEmail] = useState('')
@@ -24,6 +25,7 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
   const [regParentEmail, setRegParentEmail] = useState('')
   const [regReferredBy, setRegReferredBy] = useState('')
   const [isMinor, setIsMinor] = useState(false)
+  const [showRegPassword, setShowRegPassword] = useState(false)
 
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -57,7 +59,11 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
 
   const handleRegister = async () => {
     setError('')
-    if (isMinor && !regParentEmail) {
+    if (!regName.trim() || !regEmail.trim() || !regDob || regPassword.length < 8) {
+      setError('Enter your name, email, date of birth, and a password of at least 8 characters.')
+      return
+    }
+    if (isMinor && !regParentEmail.trim()) {
       setError('A parent or guardian email is required for students under 18')
       return
     }
@@ -102,6 +108,21 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
     'w-full bg-[#fafbfc] border-[1.5px] border-[#e5e7eb] rounded-[8px] px-[14px] py-[10px] text-[0.9rem] text-[#4b5563] outline-none focus:border-[#0F766E] transition-colors'
   const labelClass =
     'text-[0.7rem] font-bold text-[#374151] uppercase tracking-[0.06em] mb-[6px] block'
+  const registrationPasswordScore = [
+    regPassword.length >= 8,
+    /[A-Z]/.test(regPassword),
+    /[0-9]/.test(regPassword),
+    /[^A-Za-z0-9]/.test(regPassword),
+  ].filter(Boolean).length
+  const calculateAge = (value: string) => {
+    if (!value) return null
+    const birth = new Date(`${value}T00:00:00`)
+    const today = new Date()
+    let age = today.getFullYear() - birth.getFullYear()
+    const birthdayPassed = today.getMonth() > birth.getMonth() || (today.getMonth() === birth.getMonth() && today.getDate() >= birth.getDate())
+    if (!birthdayPassed) age -= 1
+    return age
+  }
 
   return (
     <div className="min-h-screen bg-[#f7f9fb] flex items-center justify-center p-4 sm:p-6">
@@ -174,15 +195,20 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
                 />
               </div>
               <div>
-                <label className={labelClass}>Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-                  className={inputClass}
-                  placeholder="••••••••"
-                />
+                <label className={labelClass} htmlFor="login-password">Password</label>
+                <div className="relative">
+                  <input
+                    id="login-password"
+                    type={showLoginPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                    className={`${inputClass} pr-[42px]`}
+                    placeholder="••••••••"
+                    autoComplete="current-password"
+                  />
+                  <button type="button" aria-label={showLoginPassword ? 'Hide password' : 'Show password'} onClick={() => setShowLoginPassword((value) => !value)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-[#64748b] hover:bg-[#f1f5f9]"><i className={`ti ${showLoginPassword ? 'ti-eye-off' : 'ti-eye'} text-[16px]`} /></button>
+                </div>
               </div>
               <button
                 onClick={handleLogin}
@@ -218,43 +244,55 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
               )}
             </div>
           ) : (
-            <div className="space-y-3 max-h-[calc(100vh-280px)] sm:max-h-[500px] overflow-y-auto pr-1">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-5 max-h-[calc(100vh-250px)] sm:max-h-[620px] overflow-y-auto pr-1">
+              <div>
+                <p className="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[#0F766E]">Create your wellbeing space</p>
+                <h2 className="mt-1 text-[1.35rem] font-bold leading-tight text-[#17212b]">A thoughtful start matters.</h2>
+                <p className="mt-2 text-[0.8rem] leading-relaxed text-[#64748b]">Your details help us provide the right consent and support experience. You can update your profile later.</p>
+              </div>
+
+              <div className="rounded-xl border border-[#ccfbf1] bg-[#f0fdfa] p-3">
+                <div className="flex items-center gap-2 text-[0.78rem] font-semibold text-[#115e59]"><i className="ti ti-shield-check text-[17px]" /> Your information stays under your control</div>
+                <p className="mt-1 pl-[25px] text-[0.72rem] leading-relaxed text-[#0f766e]">We use your date of birth only to apply the correct adult or minor consent journey.</p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="sm:col-span-2">
-                  <label className={labelClass}>Full Name</label>
+                  <label className={labelClass} htmlFor="register-name">Full name</label>
                   <input
+                    id="register-name"
                     type="text"
                     value={regName}
                     onChange={(e) => setRegName(e.target.value)}
                     className={inputClass}
-                    placeholder="Jane Doe"
+                    placeholder="e.g. Jane Doe"
+                    autoComplete="name"
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>Email</label>
+                  <label className={labelClass} htmlFor="register-email">Email address</label>
                   <input
+                    id="register-email"
                     type="email"
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
                     className={inputClass}
                     placeholder="you@example.com"
+                    autoComplete="email"
                   />
                 </div>
                 <div>
-                  <label className={labelClass}>Password</label>
-                  <input
-                    type="password"
-                    value={regPassword}
-                    onChange={(e) => setRegPassword(e.target.value)}
-                    className={inputClass}
-                    placeholder="Min 8 characters"
-                  />
+                  <label className={labelClass} htmlFor="register-password">Password</label>
+                  <div className="relative">
+                    <input id="register-password" type={showRegPassword ? 'text' : 'password'} value={regPassword} onChange={(e) => setRegPassword(e.target.value)} className={`${inputClass} pr-[42px]`} placeholder="At least 8 characters" autoComplete="new-password" />
+                    <button type="button" aria-label={showRegPassword ? 'Hide password' : 'Show password'} onClick={() => setShowRegPassword((value) => !value)} className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-[#64748b] hover:bg-[#f1f5f9]"><i className={`ti ${showRegPassword ? 'ti-eye-off' : 'ti-eye'} text-[16px]`} /></button>
+                  </div>
+                  {regPassword && <div className="mt-2"><div className="flex gap-1">{[0, 1, 2, 3].map((item) => <span key={item} className={`h-1 flex-1 rounded-full ${item < registrationPasswordScore ? registrationPasswordScore >= 3 ? 'bg-[#0f766e]' : 'bg-[#f59e0b]' : 'bg-[#e5e7eb]'}`} />)}</div><p className="mt-1 text-[0.68rem] text-[#64748b]">Use 8+ characters with a capital letter, number, and symbol.</p></div>}
                 </div>
                 <div>
-                  <label className={labelClass}>
-                    Referral Code <span className="text-[#9ca3af] normal-case font-normal">(optional)</span>
-                  </label>
+                  <label className={labelClass} htmlFor="register-referral">Referral code <span className="text-[#9ca3af] normal-case font-normal">(optional)</span></label>
                   <input
+                    id="register-referral"
                     type="text"
                     value={regReferredBy}
                     onChange={(e) => setRegReferredBy(e.target.value.toUpperCase())}
@@ -263,50 +301,53 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
                     maxLength={8}
                   />
                 </div>
-                <div className="flex items-center gap-2 bg-[#eff6ff] border border-[#bfdbfe] rounded-lg px-3 py-2 text-[0.78rem] text-[#1e40af]">
-                  <i className="ti ti-school text-[14px] flex-shrink-0" />
-                  Counsellor and school-admin accounts are provisioned by your institution. Public registration is for students only.
-                </div>
               </div>
 
               <div>
-                <label className={labelClass}>Date of Birth</label>
+                <label className={labelClass} htmlFor="register-dob">Date of birth</label>
                 <input
+                  id="register-dob"
                   type="date"
                   value={regDob}
                   onChange={(e) => {
                     setRegDob(e.target.value)
-                    const birth = new Date(e.target.value)
-                    const age = new Date().getFullYear() - birth.getFullYear()
-                    setIsMinor(age < 18)
+                    const age = calculateAge(e.target.value)
+                    setIsMinor(age !== null && age < 18)
                   }}
                   className={inputClass}
+                  max={new Date().toISOString().slice(0, 10)}
+                  autoComplete="bday"
                 />
+                <p className="mt-1 text-[0.7rem] text-[#64748b]">This determines whether parent or guardian consent is required.</p>
               </div>
               {isMinor && (
                 <>
-                  <div className="flex items-start gap-2 bg-[#fef3c7] border border-[#fde68a] rounded-lg px-3 py-2 text-[0.78rem] text-[#92400e]">
+                  <div className="flex items-start gap-2 rounded-xl border border-[#fde68a] bg-[#fffbeb] px-3 py-3 text-[0.78rem] text-[#92400e]">
                     <i className="ti ti-info-circle text-[14px] mt-px flex-shrink-0" />
-                    A parent or guardian must provide consent for users under 18. A notification will be sent to their email.
+                    <span><b>Parent or guardian consent required.</b><br />We will email them a secure consent request. You can continue setting up your account, but protected wellbeing support stays locked until they respond.</span>
                   </div>
                   <div>
-                    <label className={labelClass}>
+                    <label className={labelClass} htmlFor="register-parent-email">
                       Parent/Guardian Email <span className="text-[#ef4444]">*</span>
                     </label>
                     <input
+                      id="register-parent-email"
                       type="email"
                       value={regParentEmail}
                       onChange={(e) => setRegParentEmail(e.target.value)}
                       className={inputClass}
                       placeholder="parent@example.com"
                       required
+                      autoComplete="email"
                     />
                   </div>
                 </>
               )}
+              {!isMinor && regDob && <div className="flex items-start gap-2 rounded-xl border border-[#bfdbfe] bg-[#eff6ff] px-3 py-3 text-[0.76rem] text-[#1e40af]"><i className="ti ti-user-check text-[15px] mt-px" /><span>Your account will follow the adult self-service wellbeing experience. You remain in control of any connected accounts.</span></div>}
+              <div className="flex items-start gap-2 rounded-lg bg-[#f8fafc] px-3 py-2 text-[0.72rem] text-[#64748b]"><i className="ti ti-school text-[14px] flex-shrink-0" />Counsellor and school-admin accounts are provisioned by an institution. Public registration is for personal student accounts.</div>
               <button
                 onClick={handleRegister}
-                disabled={!regName || !regEmail || !regPassword || loading}
+                disabled={!regName || !regEmail || !regPassword || !regDob || loading}
                 className="w-full bg-gradient-to-r from-[#0F766E] to-[#1D9E75] text-white rounded-lg py-[11px] text-[0.9rem] font-semibold cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed mt-1 transition-opacity"
               >
                 {loading ? 'Creating account…' : 'Create Account'}
