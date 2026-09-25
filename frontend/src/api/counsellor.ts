@@ -319,8 +319,40 @@ export async function disposeAlert(
 // ─── Timeline ─────────────────────────────────────────────────────────────────
 
 export async function getStudentTimeline(studentId: string): Promise<TimelineEntry[]> {
-  const { data } = await api.get(`/v1/students/${studentId}/timeline`)
-  return data
+  const { data } = await api.get<{
+    rolling_risk_history?: Array<{
+      computed_at: string
+      score: number
+      top_platform?: string | null
+      n_posts: number
+    }>
+    alert_markers?: Array<{
+      id: string
+      fired_at: string
+      risk_score: number
+      platform?: string | null
+      status: string
+    }>
+  }>(`/v1/students/${studentId}/timeline`)
+
+  const history = Array.isArray(data?.rolling_risk_history) ? data.rolling_risk_history : []
+  const markers = Array.isArray(data?.alert_markers) ? data.alert_markers : []
+
+  return history
+    .filter((entry) => entry && Number.isFinite(Number(entry.score)) && entry.computed_at)
+    .map((entry) => {
+      const date = entry.computed_at
+      const marker = markers.find((item) => item && item.fired_at?.slice(0, 10) === date.slice(0, 10))
+      return {
+        date,
+        score: Number(entry.score),
+        top_platform: entry.top_platform || undefined,
+        n_posts: Number(entry.n_posts) || 0,
+        // StudentTimeline only needs the marker's presence to render the
+        // alert state; keep the API's marker payload attached for that UI.
+        alert: marker as unknown as TimelineEntry['alert'],
+      }
+    })
 }
 
 // ─── Notes ────────────────────────────────────────────────────────────────────
