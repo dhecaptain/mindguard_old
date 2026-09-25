@@ -125,26 +125,38 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
   }
 
   return (
-    <div className="min-h-screen bg-[#f7f9fb] flex items-center justify-center p-4 sm:p-6">
-      <div className="flex flex-col sm:flex-row w-full max-w-[1060px] bg-white rounded-2xl overflow-hidden shadow-sm border border-[rgba(229,231,235,0.5)]">
+    <div className="relative min-h-screen overflow-hidden bg-[#eef5f4] flex items-center justify-center p-3 sm:p-5 lg:p-8">
+      <div className="pointer-events-none absolute -left-24 -top-24 h-80 w-80 rounded-full bg-[#b8e6dc]/50 blur-3xl motion-safe:animate-pulse" />
+      <div className="pointer-events-none absolute -bottom-32 -right-20 h-96 w-96 rounded-full bg-[#c8d9f3]/50 blur-3xl motion-safe:animate-pulse [animation-delay:1.5s]" />
+      <div className="relative flex min-h-[640px] w-full max-w-[1240px] flex-col overflow-hidden rounded-[24px] border border-white/80 bg-white shadow-[0_24px_80px_rgba(15,118,110,0.14)] sm:flex-row lg:min-h-[700px]">
 
         {/* Left panel — collapses to a compact banner on mobile */}
-        <div className="sm:w-[300px] lg:w-[380px] sm:flex-shrink-0 bg-gradient-to-br from-[#0a1f1d] to-[#0d322e] p-6 sm:p-8 lg:p-9 flex flex-col justify-between">
+        <div className="relative flex shrink-0 flex-col justify-between overflow-hidden bg-gradient-to-br from-[#061d1b] via-[#0a302c] to-[#0f554c] p-6 sm:w-[45%] sm:p-9 lg:w-[47%] lg:p-12">
+          <div className="pointer-events-none absolute -right-20 top-20 h-64 w-64 rounded-full border border-[#5eead4]/20 motion-safe:animate-[spin_18s_linear_infinite]" />
+          <div className="pointer-events-none absolute -right-8 top-32 h-40 w-40 rounded-full border border-[#5eead4]/20 motion-safe:animate-[spin_12s_linear_infinite_reverse]" />
+          <div className="pointer-events-none absolute bottom-20 right-16 h-3 w-3 rounded-full bg-[#6ee7b7] shadow-[0_0_28px_8px_rgba(110,231,183,0.35)] motion-safe:animate-ping" />
           <div>
-            <div className="flex items-center gap-3 mb-4 sm:mb-7">
-              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-gradient-to-br from-[#0F766E] to-[#1D9E75] flex items-center justify-center text-white font-extrabold text-[0.85rem]">
+            <div className="relative z-10 mb-6 flex items-center gap-3 sm:mb-12">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#2dd4bf] to-[#1D9E75] text-[0.85rem] font-extrabold text-white shadow-lg shadow-[#2dd4bf]/20 sm:h-12 sm:w-12">
                 MG
               </div>
-              <span className="text-white text-[1.05rem] sm:text-[1.1rem] font-bold">MindGuard</span>
+              <span className="text-[1.1rem] font-bold tracking-tight text-white sm:text-[1.2rem]">MindGuard</span>
             </div>
-            <h1 className="text-white text-[1.2rem] sm:text-[1.5rem] font-bold leading-snug mb-3 hidden sm:block">
+            <div className="relative z-10 hidden sm:block">
+            <p className="mb-3 text-[0.68rem] font-bold uppercase tracking-[0.2em] text-[#5eead4]">A calmer place to begin</p>
+            <h1 className="mb-4 max-w-[420px] text-[1.8rem] font-bold leading-[1.15] text-white lg:text-[2.35rem]">
               Consent-first clinical decision support
             </h1>
-            <p className="text-[#94a3b8] text-[0.82rem] leading-relaxed hidden sm:block">
-              Powered by Mental-RoBERTa. Human-in-the-loop. Research use only.
+            <p className="max-w-[390px] text-[0.9rem] leading-relaxed text-[#a7c5c1]">
+              A private, human-supported wellbeing space designed around consent, clarity, and the next useful step.
             </p>
+            <div className="mt-10 flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.06] p-4 backdrop-blur-sm">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[#5eead4]/15 text-[#5eead4]"><i className="ti ti-heart-handshake text-[22px]" /></div>
+              <div><p className="text-[0.78rem] font-semibold text-white">Human-in-the-loop support</p><p className="mt-1 text-[0.68rem] text-[#a7c5c1]">Your information is handled with care.</p></div>
+            </div>
+            </div>
           </div>
-          <div className="flex flex-wrap gap-2 mt-4 sm:mt-0">
+          <div className="relative z-10 mt-7 flex flex-wrap gap-2 sm:mt-0">
             {['HIPAA-aligned', '92.5% accuracy', '12.6K trained', 'Ethics approved'].map((pill) => (
               <span
                 key={pill}
@@ -157,14 +169,14 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
         </div>
 
         {/* Right panel */}
-        <div className="flex-1 p-6 sm:p-8 lg:p-11">
+        <div className="flex flex-1 flex-col justify-center p-6 sm:w-[55%] sm:p-10 lg:w-[53%] lg:px-16 lg:py-12">
           {/* Tabs */}
-          <div className="flex mb-6 border-b border-[#f1f5f9]">
+          <div className="mb-8 flex border-b border-[#e8eef0]">
             {(['signin', 'register'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => { setTab(t); setError('') }}
-                className={`pb-2.5 px-4 sm:px-5 text-[0.88rem] font-semibold border-b-2 transition-colors cursor-pointer ${
+                className={`px-4 pb-3 text-[0.88rem] font-semibold border-b-2 transition-colors cursor-pointer sm:px-5 ${
                   tab === t
                     ? 'text-[#0F766E] border-[#0F766E]'
                     : 'text-[#94a3b8] border-transparent hover:text-[#6b7280]'
