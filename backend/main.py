@@ -7659,7 +7659,18 @@ async def v1_request_student_account_reverification(
     account = request_social_account_reverification(student_id, slug)
     if not account:
         raise HTTPException(404, "Student account not found")
-    _safe_notify(student_id, "Account verification needed", f"Please review and verify your {slug} account before it can be used for wellbeing analysis.", "system")
+    # A reverification request must invalidate the previous proof. Rotate the
+    # public-profile code now; the student can retrieve the new one from their
+    # own account page, while the counsellor never receives the secret.
+    rotated = rotate_social_account_claim_code(student_id, slug)
+    if rotated:
+        account, _ = rotated
+    _safe_notify(
+        student_id,
+        "Account verification needed",
+        f"Your counsellor asked you to verify your {slug} account again. Open My Accounts, choose Get a new code, place it in the public profile bio/about section, then select Verify ownership.",
+        "system",
+    )
     write_audit(user["id"], user["role_type"], "SOCIAL_ACCOUNT_REVERIFICATION_REQUESTED", "social_account", account.get("id", slug), payload={"student_id": student_id, "platform": slug}, ip=_client_ip(request))
     return {"ok": True, "account": account, "message": "The student was asked to verify this account again."}
 
