@@ -11,8 +11,10 @@ interface Props {
   spec: PlatformSpec
   account: SelfSocialAccount | undefined
   busy: boolean
+  verificationCode?: string
   runningPlatforms: ReadonlySet<string>
   onVerify: (slug: string) => void
+  onGetCode: (slug: string) => void
   onAnalyse: (slug: string) => void
   onRemove: (slug: string) => void
 }
@@ -31,8 +33,10 @@ export default function AccountCard({
   spec,
   account,
   busy,
+  verificationCode,
   runningPlatforms,
   onVerify,
+  onGetCode,
   onAnalyse,
   onRemove,
 }: Props) {
@@ -77,6 +81,12 @@ export default function AccountCard({
         </div>
       )}
 
+      {account && account.verification_status === 'pending' && verificationCode ? (
+        <div className="px-[10px] py-[8px] rounded-[8px] bg-[#eff6ff] border border-[#bfdbfe] text-[0.73rem] text-[#1e3a5f] leading-relaxed">
+          Add this one-time code to the public bio/about section, then select Verify ownership: <code className="font-bold">{verificationCode}</code>
+        </div>
+      ) : null}
+
       {!spec.analyzable && (
         <div className="px-[10px] py-[7px] rounded-[8px] bg-[#f3f4f6] text-[0.73rem] text-[#4b5563] leading-relaxed">
           Read-only platform — MindGuard does not analyse public content on {spec.display_name}.
@@ -85,13 +95,22 @@ export default function AccountCard({
 
       <div className="flex items-center gap-[8px] flex-wrap pt-[2px]">
         {account && account.verification_status === 'pending' && spec.analyzable ? (
-          <button
-            onClick={() => onVerify(spec.key)}
-            disabled={busy}
-            className="px-[12px] py-[7px] rounded-[8px] bg-[#0F766E] text-white text-[0.78rem] font-semibold disabled:opacity-50 cursor-pointer hover:bg-[#115E59]"
-          >
-            {busy ? 'Verifying…' : 'Verify'}
-          </button>
+          <>
+            <button
+              onClick={() => onGetCode(spec.key)}
+              disabled={busy}
+              className="px-[12px] py-[7px] rounded-[8px] border border-[#0F766E] text-[#0F766E] text-[0.78rem] font-semibold disabled:opacity-50 cursor-pointer hover:bg-[#f0fdfa]"
+            >
+              {busy ? 'Preparing…' : 'Get a new code'}
+            </button>
+            <button
+              onClick={() => onVerify(spec.key)}
+              disabled={busy}
+              className="px-[12px] py-[7px] rounded-[8px] bg-[#0F766E] text-white text-[0.78rem] font-semibold disabled:opacity-50 cursor-pointer hover:bg-[#115E59]"
+            >
+              {busy ? 'Verifying…' : 'Verify ownership'}
+            </button>
+          </>
         ) : null}
 
         {readiness.ready && spec.analyzable && (

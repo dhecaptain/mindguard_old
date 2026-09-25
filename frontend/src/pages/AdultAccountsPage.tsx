@@ -15,6 +15,8 @@ export default function AdultAccountsPage() {
   const addAccount = useSelfStore((s) => s.addAccount)
   const removeAccount = useSelfStore((s) => s.removeAccount)
   const verifyAccount = useSelfStore((s) => s.verifyAccount)
+  const getVerificationCode = useSelfStore((s) => s.getVerificationCode)
+  const verificationCodes = useSelfStore((s) => s.verificationCodes)
   const runAnalysis = useSelfStore((s) => s.runAnalysis)
 
   const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null)
@@ -274,8 +276,10 @@ export default function AdultAccountsPage() {
                   spec={specItem}
                   account={account}
                   busy={Boolean(busy[account.platform])}
+                  verificationCode={verificationCodes[account.platform]}
                   runningPlatforms={runningPlatforms}
                   onVerify={verifyAccount}
+                  onGetCode={getVerificationCode}
                   onAnalyse={(slug) => runAnalysis([slug])}
                   onRemove={removeAccount}
                 />

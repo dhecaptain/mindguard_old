@@ -44,10 +44,12 @@ interface SelfState {
   run: RunState | null
   error: string | null
   busy: Record<string, boolean>
+  verificationCodes: Record<string, string>
   loadCatalog: () => Promise<void>
   addAccount: (payload: AddAccountPayload) => Promise<void>
   removeAccount: (platform: string) => Promise<void>
-  verifyAccount: (platform: string) => Promise<VerifyResult | null>
+  verifyAccount: (platform: string, verificationCode?: string) => Promise<VerifyResult | null>
+  getVerificationCode: (platform: string) => Promise<string | null>
   runAnalysis: (targets?: string[]) => Promise<AnalysisSession | null>
   openSession: (id: string) => Promise<AnalysisSession | null>
   clearError: () => void
@@ -79,6 +81,7 @@ export const useSelfStore = create<SelfState>((set, get) => {
     run: null,
     error: null,
     busy: {},
+    verificationCodes: {},
 
     loadCatalog: async () => {
       try {
@@ -103,7 +106,10 @@ export const useSelfStore = create<SelfState>((set, get) => {
     addAccount: async (payload) => {
       set({ busy: { ...get().busy, [payload.platform]: true }, error: null })
       try {
-        await selfApi.addSocialAccount(payload)
+        const result = await selfApi.addSocialAccount(payload)
+        if (result.verification_code) {
+          set({ verificationCodes: { ...get().verificationCodes, [payload.platform]: result.verification_code } })
+        }
         await refreshAccounts()
       } catch (e) {
         set({ error: messageFromError(e) })
@@ -126,12 +132,34 @@ export const useSelfStore = create<SelfState>((set, get) => {
       }
     },
 
-    verifyAccount: async (platform) => {
+    verifyAccount: async (platform, verificationCode) => {
       set({ busy: { ...get().busy, [platform]: true }, error: null })
       try {
-        const result = await selfApi.verifySocialAccount(platform)
+        const code = verificationCode || get().verificationCodes[platform]
+        if (!code) {
+          set({ error: `Get a new verification code for ${platform} first, add it to the public profile bio/about section, then verify.` })
+          return null
+        }
+        const result = await selfApi.verifySocialAccount(platform, code)
+        const nextCodes = { ...get().verificationCodes }
+        delete nextCodes[platform]
+        set({ verificationCodes: nextCodes })
         await refreshAccounts()
         return result
+      } catch (e) {
+        set({ error: messageFromError(e) })
+        return null
+      } finally {
+        set({ busy: { ...get().busy, [platform]: false } })
+      }
+    },
+
+    getVerificationCode: async (platform) => {
+      set({ busy: { ...get().busy, [platform]: true }, error: null })
+      try {
+        const result = await selfApi.rotateSocialAccountCode(platform)
+        set({ verificationCodes: { ...get().verificationCodes, [platform]: result.verification_code } })
+        return result.verification_code
       } catch (e) {
         set({ error: messageFromError(e) })
         return null

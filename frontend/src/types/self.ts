@@ -70,6 +70,8 @@ export interface SelfSocialAccount {
   verified_handle?: string | null
   verified_profile_url?: string | null
   last_verified_at?: string | null
+  reverification_required?: number | boolean
+  availability_status?: string | null
   analysis_status: AnalysisStatus | string
 }
 

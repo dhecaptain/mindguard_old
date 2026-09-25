@@ -19,8 +19,8 @@ export async function getSocialAccounts(): Promise<SelfSocialAccount[]> {
 
 export async function addSocialAccount(
   payload: AddAccountPayload,
-): Promise<{ ok: boolean; platform: string }> {
-  const { data } = await api.post<{ ok: boolean; platform: string }>('/self/social-accounts', payload)
+): Promise<{ ok: boolean; platform: string; verification_code?: string; verification_instructions?: string }> {
+  const { data } = await api.post<{ ok: boolean; platform: string; verification_code?: string; verification_instructions?: string }>('/self/social-accounts', payload)
   return data
 }
 
@@ -28,8 +28,13 @@ export async function deleteSocialAccount(platform: string): Promise<void> {
   await api.delete(`/self/social-accounts/${platform}`)
 }
 
-export async function verifySocialAccount(platform: string): Promise<VerifyResult> {
-  const { data } = await api.post<VerifyResult>(`/self/social-accounts/${platform}/verify`)
+export async function verifySocialAccount(platform: string, verificationCode: string): Promise<VerifyResult> {
+  const { data } = await api.post<VerifyResult>(`/self/social-accounts/${platform}/verify`, { verification_code: verificationCode })
+  return data
+}
+
+export async function rotateSocialAccountCode(platform: string): Promise<{ verification_code: string; verification_instructions?: string }> {
+  const { data } = await api.post<{ verification_code: string; verification_instructions?: string }>(`/self/social-accounts/${platform}/verification-code`)
   return data
 }
 
