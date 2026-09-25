@@ -182,7 +182,12 @@ def test_institution_roster_scope_allows_linked_account_with_missing_user_scope(
     db.assign_student_to_counsellor(
         counsellor["id"], student["id"], institution["id"], counsellor["id"]
     )
+    consent_owner = _make(db, "roster-scope-admin@school.edu", "school_admin")
+    consent = db.create_consent(
+        student["id"], consent_owner["id"], student["email"], "student", ["instagram"]
+    )
+    db.update_consent_status(consent["id"], "ACCEPTED")
 
     # Deliberately preserve the legacy blank user institution value.
     assert db.get_user_by_id(student["id"])["institution_id"] is None
-    _require_counsellor_student_access(counsellor, student["id"], require_consent=False)
+    _require_counsellor_student_access(counsellor, student["id"])

@@ -4589,7 +4589,15 @@ def _require_counsellor_student_access(
     ):
         raise HTTPException(403, "Assignment is not in your institution")
     if require_consent and not has_consent_relationship(student_id, user["id"]):
-        raise HTTPException(403, "No active consent for this student")
+        # Institution consent is student-scoped. The consent may have been
+        # dispatched by a school administrator or another authorized staff
+        # workflow before the primary counsellor was assigned. Once this
+        # counsellor has a verified active assignment in the same institution,
+        # an accepted, non-expired consent for the student is sufficient.
+        from backend.services.consent_gate import get_active_consent
+
+        if not get_active_consent(student_id):
+            raise HTTPException(403, "No active consent for this student")
 
 
 def _require_user_communication_access(user: dict, other_id: str) -> dict:
