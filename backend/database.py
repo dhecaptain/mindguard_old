@@ -1472,6 +1472,61 @@ def get_appointment(appointment_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def create_appointment_record(
+    appointment_id: str,
+    student_id: str,
+    counsellor_id: str,
+    private_summary: str,
+    student_message: str | None = None,
+    guardian_message: str | None = None,
+    referral_summary: str | None = None,
+    safeguarding_flag: bool = False,
+    follow_up_at: str | None = None,
+) -> dict:
+    record_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO appointment_records "
+        "(id, appointment_id, student_id, counsellor_id, private_summary, student_message, "
+        "guardian_message, referral_summary, safeguarding_flag, follow_up_at, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            record_id,
+            appointment_id,
+            student_id,
+            counsellor_id,
+            private_summary,
+            student_message,
+            guardian_message,
+            referral_summary,
+            1 if safeguarding_flag else 0,
+            follow_up_at,
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT r.*, u.name AS counsellor_name FROM appointment_records r "
+        "JOIN users u ON u.id = r.counsellor_id WHERE r.id = ?",
+        (record_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def get_appointment_record(appointment_id: str) -> dict | None:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT r.*, u.name AS counsellor_name FROM appointment_records r "
+        "JOIN users u ON u.id = r.counsellor_id WHERE r.appointment_id = ?",
+        (appointment_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def list_appointments(user_id: str | None = None, *, status: str | None = None) -> list:
     conn = get_db()
     clauses, params = [], []

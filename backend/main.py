@@ -109,6 +109,8 @@ from backend.database import (
     create_alert,
     create_appointment,
     get_appointment,
+    create_appointment_record,
+    get_appointment_record,
     list_appointments,
     update_appointment_status,
     send_message,
@@ -3973,7 +3975,7 @@ async def get_my_appointments(
 async def create_new_appointment(
     data: dict, request: Request, user: dict = Depends(require_auth)
 ):
-    if user["role_type"] not in ("counsellor", "school_admin", "admin"):
+    if user["role_type"] not in ("counsellor", "admin"):
         raise HTTPException(403, "Only counsellors can schedule appointments")
     student_id = data.get("student_id")
     title = (data.get("title") or "Wellbeing check-in").strip()
@@ -3994,6 +3996,30 @@ async def create_new_appointment(
         )
     if start <= datetime.now(timezone.utc):
         raise HTTPException(400, "Appointments must be scheduled in the future")
+    timezone_name = (data.get("timezone") or "UTC").strip()
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise HTTPException(400, "timezone must be a valid IANA timezone") from exc
+    mode = (data.get("mode") or "google_meet").strip().lower()
+    if mode not in {"google_meet", "in_person"}:
+        raise HTTPException(400, "mode must be google_meet or in_person")
+    location = (data.get("location") or "").strip()
+    if not location:
+        raise HTTPException(
+            400,
+            "Provide a Google Meet link for a Google Meet appointment or a physical location for an in-person appointment.",
+        )
+    if mode == "google_meet":
+        parsed_location = urlparse(location)
+        if parsed_location.scheme != "https" or (parsed_location.hostname or "").lower() not in {
+            "meet.google.com",
+        }:
+            raise HTTPException(400, "Google Meet appointments require an https://meet.google.com link")
+    elif urlparse(location).scheme in {"http", "https"}:
+        raise HTTPException(400, "In-person appointments require a physical location, not a web link")
     student = get_user_by_id(student_id)
     if not student or student.get("role_type") != "student":
         raise HTTPException(404, "Student not found")
@@ -4022,9 +4048,9 @@ async def create_new_appointment(
             title=title,
             start_at=start.isoformat(),
             end_at=end.isoformat(),
-            timezone_name=(data.get("timezone") or "UTC").strip(),
-            mode=(data.get("mode") or "video").strip(),
-            location=(data.get("location") or "").strip() or None,
+            timezone_name=timezone_name,
+            mode=mode,
+            location=location,
             notes=(data.get("notes") or "").strip() or None,
         )
     except ValueError as exc:
@@ -4035,6 +4061,22 @@ async def create_new_appointment(
         f"{counsellor.get('name', 'Your counsellor')} proposed a wellbeing appointment.",
         "appointment",
     )
+    email_sent, email_error = send_html_email(
+        student.get("email") or "",
+        "New MindGuard appointment request",
+        (
+            f"<p>Hello {html_lib.escape(student.get('name') or 'there')},</p>"
+            f"<p>{html_lib.escape(counsellor.get('name') or 'Your counsellor')} proposed a "
+            f"{html_lib.escape(mode.replace('_', ' '))} appointment.</p>"
+            f"<p><strong>When:</strong> {html_lib.escape(appointment['start_at'])} to "
+            f"{html_lib.escape(appointment['end_at'])} ({html_lib.escape(timezone_name)})<br>"
+            f"<strong>Location:</strong> {html_lib.escape(location)}</p>"
+            f"<p>Sign in to MindGuard to accept or decline this appointment.</p>"
+        ),
+        related_type="appointment",
+        related_id=appointment["id"],
+        metadata={"student_id": student_id, "mode": mode},
+    ) if student.get("email") else (False, "Student email is missing")
     write_audit(
         user["id"],
         user["role_type"],
@@ -4044,6 +4086,8 @@ async def create_new_appointment(
         payload={"student_id": student_id, "start_at": appointment["start_at"]},
         ip=_client_ip(request),
     )
+    appointment["email_sent"] = email_sent
+    appointment["email_error"] = email_error or None
     return appointment
 
 
@@ -4105,6 +4149,26 @@ async def change_appointment_status(
         f"Appointment status: {status.lower().replace('_', ' ')}.",
         "appointment",
     )
+    recipient_user = get_user_by_id(recipient)
+    if recipient_user and recipient_user.get("email"):
+        send_html_email(
+            recipient_user["email"],
+            "MindGuard appointment updated",
+            (
+                f"<p>Your MindGuard appointment <strong>{html_lib.escape(updated.get('title') or 'wellbeing check-in')}</strong> "
+                f"is now <strong>{html_lib.escape(status.lower().replace('_', ' '))}</strong>.</p>"
+                f"<p><strong>When:</strong> {html_lib.escape(updated.get('start_at') or '')} "
+                f"({html_lib.escape(updated.get('timezone') or 'UTC')})</p>"
+                + (
+                    f"<p><strong>Note:</strong> {html_lib.escape((data.get('reason') or '').strip())}</p>"
+                    if (data.get("reason") or "").strip()
+                    else ""
+                )
+            ),
+            related_type="appointment_update",
+            related_id=appointment_id,
+            metadata={"status": status, "recipient_id": recipient},
+        )
     write_audit(
         user["id"],
         user["role_type"],
@@ -4124,6 +4188,149 @@ async def get_one_appointment(appointment_id: str, user: dict = Depends(require_
         raise HTTPException(404, "Appointment not found")
     _appointment_actor_can_access(user, appointment)
     return appointment
+
+
+@app.get("/api/appointments/{appointment_id}/record")
+async def get_appointment_session_record(
+    appointment_id: str, user: dict = Depends(require_auth)
+):
+    appointment = get_appointment(appointment_id)
+    if not appointment:
+        raise HTTPException(404, "Appointment not found")
+    record = get_appointment_record(appointment_id)
+    if not record:
+        raise HTTPException(404, "A post-appointment record has not been completed")
+    if user.get("role_type") in {"counsellor", "admin"}:
+        _appointment_actor_can_access(user, appointment)
+        return record
+    if user.get("id") == appointment["student_id"]:
+        return {
+            "appointment_id": appointment_id,
+            "student_message": record.get("student_message"),
+            "shared_at": record.get("updated_at"),
+        }
+    student = get_user_by_id(appointment["student_id"])
+    if student and student.get("parent_guardian_id") == user.get("id"):
+        from backend.database import get_db
+
+        conn = get_db()
+        consent = conn.execute(
+            "SELECT 1 FROM consents WHERE student_id = ? AND recipient_role = 'parent' "
+            "AND status = 'ACCEPTED' AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?) LIMIT 1",
+            (student["id"], datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
+        conn.close()
+        if not consent:
+            raise HTTPException(403, "An active guardian consent relationship is required")
+        return {
+            "appointment_id": appointment_id,
+            "guardian_message": record.get("guardian_message"),
+            "shared_at": record.get("updated_at"),
+        }
+    raise HTTPException(403, "You do not have access to this session record")
+
+
+@app.post("/api/appointments/{appointment_id}/record", status_code=201)
+async def complete_appointment_with_record(
+    appointment_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    appointment = get_appointment(appointment_id)
+    if not appointment:
+        raise HTTPException(404, "Appointment not found")
+    _appointment_actor_can_access(user, appointment)
+    if user.get("role_type") not in {"counsellor", "admin"}:
+        raise HTTPException(403, "Only the counsellor can complete an appointment record")
+    if appointment.get("status") != "CONFIRMED":
+        raise HTTPException(409, "Only a confirmed appointment can be completed")
+    if get_appointment_record(appointment_id):
+        raise HTTPException(409, "This appointment already has a completed record")
+
+    private_summary = (data.get("private_summary") or "").strip()
+    student_message = (data.get("student_message") or "").strip() or None
+    guardian_message = (data.get("guardian_message") or "").strip() or None
+    referral_summary = (data.get("referral_summary") or "").strip() or None
+    if not private_summary:
+        raise HTTPException(400, "A private session summary is required")
+    if len(private_summary) > 8000 or len(student_message or "") > 2000:
+        raise HTTPException(400, "Session notes exceed the allowed length")
+    if len(guardian_message or "") > 2000 or len(referral_summary or "") > 4000:
+        raise HTTPException(400, "Shared or referral content exceeds the allowed length")
+
+    student = get_user_by_id(appointment["student_id"])
+    if not student:
+        raise HTTPException(404, "Student not found")
+    guardian_id = student.get("parent_guardian_id")
+    if guardian_message and not guardian_id:
+        raise HTTPException(400, "A linked guardian account is required before sharing with a parent or guardian")
+    if guardian_message and guardian_id:
+        from backend.database import get_db
+
+        conn = get_db()
+        consent = conn.execute(
+            "SELECT 1 FROM consents WHERE student_id = ? AND recipient_role = 'parent' "
+            "AND status = 'ACCEPTED' AND (expires_at IS NULL OR expires_at = '' OR expires_at > ?) LIMIT 1",
+            (student["id"], datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
+        conn.close()
+        if not consent:
+            raise HTTPException(403, "An active guardian consent relationship is required before sharing this update")
+
+    follow_up_at = (data.get("follow_up_at") or "").strip() or None
+    if follow_up_at:
+        try:
+            follow_up = datetime.fromisoformat(follow_up_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(400, "follow_up_at must be a valid ISO date") from exc
+        if follow_up.tzinfo is None:
+            raise HTTPException(400, "follow_up_at must include a timezone")
+    try:
+        record = create_appointment_record(
+            appointment_id=appointment_id,
+            student_id=appointment["student_id"],
+            counsellor_id=appointment["counsellor_id"],
+            private_summary=private_summary,
+            student_message=student_message,
+            guardian_message=guardian_message,
+            referral_summary=referral_summary,
+            safeguarding_flag=bool(data.get("safeguarding_flag")),
+            follow_up_at=follow_up_at,
+        )
+        updated = update_appointment_status(appointment_id, "COMPLETED")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if student_message:
+        _safe_notify(student["id"], "New update from your counsellor", "Your counsellor has shared a wellbeing update after your appointment.", "appointment")
+    if guardian_message and guardian_id:
+        _safe_notify(guardian_id, "A wellbeing update is available", "A counsellor has shared an update about the appointment.", "appointment")
+        guardian = get_user_by_id(guardian_id)
+        if guardian and guardian.get("email"):
+            send_html_email(
+                guardian["email"],
+                "A MindGuard wellbeing update is available",
+                f"<p>A counsellor has shared a wellbeing update for {html_lib.escape(student.get('name') or 'the student')}.</p><p>Sign in to the MindGuard guardian portal to view the update.</p>",
+                related_type="appointment_guardian_update",
+                related_id=appointment_id,
+                metadata={"student_id": student["id"]},
+            )
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "APPOINTMENT_COMPLETED_WITH_RECORD",
+        "appointment",
+        appointment_id,
+        payload={
+            "student_id": appointment["student_id"],
+            "student_shared": bool(student_message),
+            "guardian_shared": bool(guardian_message),
+            "referral_summary_present": bool(referral_summary),
+            "safeguarding_flag": bool(data.get("safeguarding_flag")),
+        },
+        ip=_client_ip(request),
+    )
+    return {"appointment": updated, "record": record}
 
 
 @app.get("/api/counsellor/dashboard")
@@ -4959,6 +5166,28 @@ async def guardian_consents(user: dict = Depends(require_auth)):
     ).fetchall()
     conn.close()
     return {"consents": [dict(row) for row in rows]}
+
+
+@app.get("/api/guardian/appointment-updates")
+async def guardian_appointment_updates(user: dict = Depends(require_auth)):
+    if user.get("role_type") != "parent" and user.get("user_category") != "parent":
+        raise HTTPException(403, "Guardian account required")
+    from backend.database import get_db
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT r.id, r.appointment_id, r.guardian_message, r.updated_at, "
+        "a.title, a.start_at, s.name AS student_name, i.name AS institution_name "
+        "FROM appointment_records r JOIN appointments a ON a.id = r.appointment_id "
+        "JOIN users s ON s.id = r.student_id LEFT JOIN institutions i ON i.id = s.institution_id "
+        "WHERE s.parent_guardian_id = ? AND r.guardian_message IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM consents c WHERE c.student_id = s.id AND c.recipient_role = 'parent' "
+        "AND c.status = 'ACCEPTED' AND (c.expires_at IS NULL OR c.expires_at = '' OR c.expires_at > ?)) "
+        "ORDER BY r.updated_at DESC LIMIT 30",
+        (user["id"], datetime.now(timezone.utc).isoformat()),
+    ).fetchall()
+    conn.close()
+    return {"updates": [dict(row) for row in rows]}
 
 
 @app.post("/api/guardian/consents/{consent_id}/revoke")
