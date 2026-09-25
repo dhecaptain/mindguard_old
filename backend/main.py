@@ -4572,6 +4572,14 @@ def _require_counsellor_student_access(
     counsellor_inst = user.get("institution_id")
     student = get_user_by_id(student_id)
     student_inst = student.get("institution_id") if student else None
+    # Institution-managed accounts can be linked to a roster row before the
+    # legacy/user institution column is backfilled. The roster is the
+    # institution's source of truth, so use it as a safe fallback instead of
+    # rejecting an otherwise valid assignment (appointments, notes,
+    # communications, and analysis all share this authorization guard).
+    if not student_inst:
+        roster_student = get_student_by_user_id(student_id)
+        student_inst = roster_student.get("institution_id") if roster_student else None
     if (counsellor_inst or student_inst) and (
         not counsellor_inst or not student_inst or counsellor_inst != student_inst
     ):

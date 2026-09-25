@@ -146,3 +146,43 @@ def test_unassigned_but_consented_denied(db, client, monkeypatch):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp3.status_code == 403
+
+
+def test_institution_roster_scope_allows_linked_account_with_missing_user_scope(db):
+    """Roster institution scope must backstop legacy user rows.
+
+    Institution-managed imports can leave users.institution_id empty while
+    the linked roster row and assignment already carry the correct tenant.
+    Shared counsellor authorization must not reject appointments or other
+    assigned-student actions in that state.
+    """
+    from backend.main import _require_counsellor_student_access
+
+    institution = db.create_institution("Roster Scope School", "k12")
+    counsellor = _make(db, "roster-scope-counsellor@school.edu", "counsellor")
+    student = _make(db, "roster-scope-student@school.edu", "student")
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE users SET institution_id = ? WHERE id = ?",
+        (institution["id"], counsellor["id"]),
+    )
+    conn.commit()
+    conn.close()
+    counsellor["institution_id"] = institution["id"]
+    db.create_student(
+        institution_id=institution["id"],
+        student_id_hash="roster-scope-student",
+        first_name_encrypted="Student",
+        email_encrypted=student["email"],
+        date_of_birth_encrypted="2005-01-01",
+        is_minor=False,
+        created_by=counsellor["id"],
+        user_id=student["id"],
+    )
+    db.assign_student_to_counsellor(
+        counsellor["id"], student["id"], institution["id"], counsellor["id"]
+    )
+
+    # Deliberately preserve the legacy blank user institution value.
+    assert db.get_user_by_id(student["id"])["institution_id"] is None
+    _require_counsellor_student_access(counsellor, student["id"], require_consent=False)
