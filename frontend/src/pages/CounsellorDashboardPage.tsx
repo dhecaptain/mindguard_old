@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useCounsellorStore } from '../store/counsellorStore'
-import { getDashboard } from '../api/counsellor'
+import { getDashboard, getStudentSocialAccounts, getStudents, type StudentDTO, type StudentSocialAccount } from '../api/counsellor'
 import { useUiStore } from '../store'
+
+type StudentWorkspaceItem = {
+  student: StudentDTO
+  accounts: StudentSocialAccount[]
+}
 
 function formatDate(d: string) {
   if (!d) return '—'
@@ -19,6 +24,8 @@ export default function CounsellorDashboardPage() {
   const { dashboard, setDashboard, setLoading, loading } = useCounsellorStore()
   const setPage = useUiStore((s) => s.setPage)
   const [error, setError] = useState<string | null>(null)
+  const [workspace, setWorkspace] = useState<StudentWorkspaceItem[]>([])
+  const [workspaceLoading, setWorkspaceLoading] = useState(true)
 
   useEffect(() => {
     loadDashboard()
@@ -27,13 +34,24 @@ export default function CounsellorDashboardPage() {
   const loadDashboard = async () => {
     setLoading(true)
     setError(null)
+    setWorkspaceLoading(true)
     try {
-      const data = await getDashboard()
+      const [data, assignedStudents] = await Promise.all([getDashboard(), getStudents()])
       setDashboard(data)
+      const workspaceItems = await Promise.all(assignedStudents.slice(0, 12).map(async (student) => {
+        try {
+          return { student, accounts: await getStudentSocialAccounts(student.id) }
+        } catch {
+          return { student, accounts: [] }
+        }
+      }))
+      setWorkspace(workspaceItems)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to load the dashboard.')
+    } finally {
+      setWorkspaceLoading(false)
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   if (loading && !dashboard) {
@@ -116,6 +134,42 @@ export default function CounsellorDashboardPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Assigned-student workspace */}
+      <div className="bg-white rounded-xl border border-[rgba(229,231,235,0.7)] overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-[10px] px-[20px] py-[14px] border-b border-[#f1f5f9]">
+          <div>
+            <h3 className="text-[0.9rem] font-bold text-[#1f2937]">Assigned student workspace</h3>
+            <p className="mt-[3px] text-[0.72rem] text-[#6b7280]">Monitor connected accounts and open a student case to review consent, run analysis, write notes, and share safe feedback.</p>
+          </div>
+          <button onClick={() => setPage('students')} className="text-[0.78rem] text-[#0F766E] font-semibold cursor-pointer bg-transparent border-none hover:underline">Open all students</button>
+        </div>
+        {workspaceLoading ? (
+          <div className="px-[20px] py-[28px] text-[0.8rem] text-[#94a3b8]">Loading assigned student accounts…</div>
+        ) : workspace.length === 0 ? (
+          <div className="px-[20px] py-[28px] text-center text-[0.8rem] text-[#94a3b8]">No assigned students yet. Students assigned to you will appear here.</div>
+        ) : (
+          <div className="divide-y divide-[#f1f5f9]">
+            {workspace.map(({ student, accounts }) => (
+              <div key={student.id} className="flex flex-wrap items-center gap-[12px] px-[20px] py-[13px] hover:bg-[#f8fafc]">
+                <div className="flex h-[36px] w-[36px] shrink-0 items-center justify-center rounded-full bg-[#dff7f2] text-[0.82rem] font-bold text-[#0f766e]">{student.name.charAt(0)}</div>
+                <div className="min-w-[180px] flex-1">
+                  <div className="text-[0.82rem] font-semibold text-[#1f2937]">{student.name}</div>
+                  <div className="mt-[2px] text-[0.7rem] text-[#94a3b8]">{student.email}</div>
+                </div>
+                <div className="flex min-w-[240px] flex-1 flex-wrap gap-[6px]">
+                  {accounts.length === 0 ? <span className="rounded-full bg-[#f1f5f9] px-[8px] py-[4px] text-[0.66rem] font-semibold text-[#64748b]">No connected accounts</span> : accounts.map((account) => {
+                    const verified = account.verification_status === 'verified' && !account.reverification_required && account.availability_status !== 'unavailable'
+                    const unavailable = account.availability_status === 'unavailable'
+                    return <span key={account.id} className={`rounded-full px-[8px] py-[4px] text-[0.66rem] font-semibold ${verified ? 'bg-[#d1fae5] text-[#065f46]' : unavailable ? 'bg-[#fee2e2] text-[#991b1b]' : 'bg-[#fef3c7] text-[#92400e]'}`} title={account.handle || account.profile_url || account.platform}>{account.platform}: {verified ? 'verified' : unavailable ? 'unavailable' : 'verification needed'}</span>
+                  })}
+                </div>
+                <button onClick={() => setPage('students')} className="rounded-[7px] border border-[#99d5ce] px-[10px] py-[7px] text-[0.72rem] font-semibold text-[#0f766e] hover:bg-[#f0fdfa]">Open workspace <i className="ti ti-arrow-up-right text-[12px]" /></button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Recent referrals */}

@@ -382,7 +382,7 @@ export default function StudentManagementPage() {
                   <th className="text-left py-[12px] px-[20px]">Email</th>
                   <th className="text-left py-[12px] px-[20px]">Status</th>
                   <th className="text-left py-[12px] px-[20px]">Joined</th>
-                  <th className="text-left py-[12px] px-[20px]">Actions</th>
+                  <th className="text-left py-[12px] px-[20px]">Case workspace</th>
                 </tr>
               </thead>
               <tbody>
@@ -405,6 +405,12 @@ export default function StudentManagementPage() {
                     </td>
                     <td className="py-[12px] px-[20px] text-[#6b7280]">{formatDate(student.created_at)}</td>
                     <td className="py-[12px] px-[20px]" onClick={(e) => e.stopPropagation()}>
+                      <button
+                        onClick={() => openDetail(student.id)}
+                        className="mr-[12px] text-[#0F766E] font-bold cursor-pointer hover:underline bg-transparent border-none text-[0.82rem]"
+                      >
+                        Open workspace
+                      </button>
                       {student.status === 'pending' ? (
                         <button
                           onClick={() => handleStatusChange(student.id, 'approve')}
