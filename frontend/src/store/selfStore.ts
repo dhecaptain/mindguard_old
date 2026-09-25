@@ -50,6 +50,7 @@ interface SelfState {
   removeAccount: (platform: string) => Promise<void>
   verifyAccount: (platform: string, verificationCode?: string) => Promise<VerifyResult | null>
   getVerificationCode: (platform: string) => Promise<string | null>
+  requestPlatformConsent: (platform: string) => Promise<void>
   runAnalysis: (targets?: string[]) => Promise<AnalysisSession | null>
   openSession: (id: string) => Promise<AnalysisSession | null>
   clearError: () => void
@@ -163,6 +164,19 @@ export const useSelfStore = create<SelfState>((set, get) => {
       } catch (e) {
         set({ error: messageFromError(e) })
         return null
+      } finally {
+        set({ busy: { ...get().busy, [platform]: false } })
+      }
+    },
+
+    requestPlatformConsent: async (platform) => {
+      set({ busy: { ...get().busy, [platform]: true }, error: null })
+      try {
+        await selfApi.requestPlatformConsent([platform])
+        await refreshAccounts()
+      } catch (e) {
+        set({ error: messageFromError(e) })
+        throw e
       } finally {
         set({ busy: { ...get().busy, [platform]: false } })
       }

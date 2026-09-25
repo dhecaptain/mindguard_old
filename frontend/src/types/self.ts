@@ -54,6 +54,9 @@ export interface PlatformSpec {
   analysis_status: AnalysisStatus | string
   handle?: string | null
   profile_url?: string | null
+  consented?: boolean
+  consent_pending?: boolean
+  consent_id?: string | null
 }
 
 export interface SelfSocialAccount {

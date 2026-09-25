@@ -2162,6 +2162,16 @@ def get_institution_id_for_consent(consent_id: str) -> str | None:
         "WHERE current_consent_id = ? AND deleted_at IS NULL LIMIT 1",
         (consent_id,),
     ).fetchone()
+    if not row:
+        # Add-on platform consent is pending before it becomes the current
+        # consent. Resolve the institution through the student identity so
+        # the correct school template and branding are still used.
+        row = conn.execute(
+            "SELECT s.institution_id FROM students s "
+            "JOIN consents c ON c.student_id = s.user_id "
+            "WHERE c.id = ? AND s.deleted_at IS NULL LIMIT 1",
+            (consent_id,),
+        ).fetchone()
     conn.close()
     return row["institution_id"] if row else None
 

@@ -132,6 +132,7 @@ from backend.database import (
     get_consent_with_student,
     get_audit_log_for_target,
     get_consent_events,
+    get_consents_by_student,
     create_linked_account,
     get_linked_accounts,
     revoke_linked_account,
@@ -229,7 +230,7 @@ from backend.services.crypto import (
     hash_student_id,
     hash_token,
 )
-from backend.services.consent_gate import consent_status_for_ui
+from backend.services.consent_gate import consent_status_for_ui, get_active_consent
 from backend.services.risk_policy import assess_risk
 from backend.services.demo_service import (
     demo_email_context,
@@ -1209,9 +1210,32 @@ async def complete_onboarding(
 @app.get("/api/self/platforms")
 async def self_platform_catalog(user: dict = Depends(require_auth)):
     _require_account_owner(user)
-    from backend.services.platform_registry import all_platforms
+    from backend.services.platform_registry import all_platforms, normalize_platform
 
     accounts = {a["platform"]: a for a in get_social_accounts(user["id"])}
+    active_consent = get_active_consent(user["id"])
+    consented = set()
+    if active_consent:
+        try:
+            consented = {
+                normalized
+                for value in json.loads(active_consent.get("platforms_json") or "[]")
+                if (normalized := normalize_platform(str(value)))
+            }
+        except (TypeError, ValueError):
+            consented = set()
+    pending_platforms = set()
+    for consent in get_consents_by_student(user["id"]):
+        if consent.get("status") not in {"PENDING", "VIEWED"}:
+            continue
+        try:
+            pending_platforms.update(
+                normalized
+                for value in json.loads(consent.get("platforms_json") or "[]")
+                if (normalized := normalize_platform(str(value)))
+            )
+        except (TypeError, ValueError):
+            continue
     platforms = []
     for spec in all_platforms():
         key = spec["key"]
@@ -1227,9 +1251,130 @@ async def self_platform_catalog(user: dict = Depends(require_auth)):
                 "analysis_status": (acc or {}).get("analysis_status") or "not_run",
                 "handle": (acc or {}).get("handle"),
                 "profile_url": (acc or {}).get("profile_url"),
+                "consented": key in consented,
+                "consent_pending": key in pending_platforms and key not in consented,
+                "consent_id": active_consent.get("id") if active_consent else None,
             }
         )
     return {"platforms": platforms}
+
+
+@app.post("/api/self/platform-consent/request")
+async def request_own_platform_consent(
+    data: dict, request: Request, user: dict = Depends(require_auth)
+):
+    """Request explicit consent before a student connects a new platform.
+
+    Adults receive an email to their own verified account. For minors, the
+    request is routed to the registered guardian and the existing consent
+    scope is preserved in the replacement consent record.
+    """
+    _require_account_owner(user)
+    from backend.services.platform_registry import get_platform, normalize_platform
+    raw_platforms = data.get("platforms")
+    if isinstance(raw_platforms, str):
+        raw_platforms = [raw_platforms]
+    if not isinstance(raw_platforms, list) or not raw_platforms:
+        raise HTTPException(400, "Select at least one platform.")
+    requested = {normalize_platform(str(value)) for value in raw_platforms}
+    requested.discard(None)
+    if not requested:
+        raise HTTPException(400, "Select a supported platform.")
+
+    active = get_active_consent(user["id"])
+    existing = set()
+    if active:
+        try:
+            existing = {
+                normalize_platform(str(value))
+                for value in json.loads(active.get("platforms_json") or "[]")
+            }
+            existing.discard(None)
+        except (TypeError, ValueError):
+            existing = set()
+    new_platforms = requested - existing
+    if not new_platforms:
+        return {"ok": True, "status": "already_consented", "platforms": sorted(existing)}
+
+    for consent in get_consents_by_student(user["id"]):
+        if consent.get("status") not in {"PENDING", "VIEWED"}:
+            continue
+        try:
+            pending = {
+                normalize_platform(str(value))
+                for value in json.loads(consent.get("platforms_json") or "[]")
+            }
+        except (TypeError, ValueError):
+            pending = set()
+        if new_platforms.issubset(pending):
+            return {
+                "ok": True,
+                "status": "pending",
+                "consent_id": consent.get("id"),
+                "platforms": sorted(new_platforms),
+            }
+
+    roster = get_student_by_user_id(user["id"])
+    is_minor = bool(roster and roster.get("is_minor")) or user.get("user_category") == "minor"
+    recipient_role = "parent" if is_minor else "student"
+    recipient_email = str(user.get("email") or "").strip()
+    if is_minor:
+        parent_encrypted = (roster or {}).get("parent_email_encrypted")
+        if parent_encrypted:
+            try:
+                recipient_email = decrypt_pii(parent_encrypted).strip()
+            except Exception:
+                recipient_email = ""
+        if not recipient_email:
+            raise HTTPException(
+                400,
+                "Add a parent or guardian email before requesting consent for another platform.",
+            )
+
+    all_platforms = existing | new_platforms
+    display_platforms = [
+        (get_platform(platform) or {}).get("display_name") or platform
+        for platform in sorted(all_platforms)
+    ]
+    try:
+        consent = create_consent(
+            student_id=user["id"],
+            counsellor_id=user["id"],
+            recipient_email=recipient_email,
+            recipient_role=recipient_role,
+            platforms=display_platforms,
+            mode="ON_DEMAND",
+        )
+        consent = dispatch_consent(
+            consent["id"], actor_id=user["id"], ip=_client_ip(request), actor_role="student"
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error("request_own_platform_consent error: %s", exc)
+        raise HTTPException(500, "Failed to send the platform consent request.")
+
+    write_audit(
+        user["id"], "student", "PLATFORM_CONSENT_REQUESTED", "consent", consent["id"],
+        payload={"platforms": sorted(new_platforms), "recipient_role": recipient_role},
+        ip=_client_ip(request),
+    )
+    _safe_notify(
+        user["id"],
+        "Additional platform consent requested",
+        "Review the consent email before connecting the new platform."
+        if not is_minor else "Your guardian has been asked to approve the additional platform.",
+        "consent",
+    )
+    return {
+        "ok": True,
+        "status": "sent",
+        "consent_id": consent.get("id"),
+        "recipient_role": recipient_role,
+        "platforms": sorted(new_platforms),
+        "email_sent": consent.get("email_sent"),
+        "consent_url": consent.get("consent_url"),
+    }
 
 
 @app.get("/api/self/social-accounts")
@@ -7574,6 +7719,11 @@ async def v1_student_analyze(
                 consented = set(_json.loads(consent.get("platforms_json") or "[]"))
             except Exception:
                 consented = set()
+            from backend.services.platform_registry import normalize_platform
+            consented = {
+                normalize_platform(str(value)) or str(value).strip().lower()
+                for value in consented
+            }
             if requested_platform and requested_platform not in consented:
                 raise HTTPException(
                     400,

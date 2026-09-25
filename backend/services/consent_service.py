@@ -241,7 +241,12 @@ def mark_consent_invalid(consent_id: str, reason: str | None = None) -> dict | N
     return updated
 
 
-def dispatch_consent(consent_id: str, actor_id: str, ip: str | None = None) -> dict:
+def dispatch_consent(
+    consent_id: str,
+    actor_id: str,
+    ip: str | None = None,
+    actor_role: str = "counsellor",
+) -> dict:
     """Transition DRAFT/DECLINED/EXPIRED/RENEWAL_DUE -> PENDING.
 
     Generates a fresh magic token, refreshes expires_at, and records dispatched_at.
@@ -268,7 +273,7 @@ def dispatch_consent(consent_id: str, actor_id: str, ip: str | None = None) -> d
     updated["magic_token"] = token
     write_audit(
         actor_id,
-        "counsellor",
+        actor_role,
         "CONSENT_DISPATCHED",
         "consent",
         consent_id,
@@ -278,7 +283,7 @@ def dispatch_consent(consent_id: str, actor_id: str, ip: str | None = None) -> d
     email_sent, email_error, url = _send_consent_email(updated)
     write_audit(
         actor_id,
-        "counsellor",
+        actor_role,
         "CONSENT_EMAIL_SENT" if email_sent else "CONSENT_EMAIL_FAILED",
         "consent",
         consent_id,
@@ -390,6 +395,12 @@ def accept_consent(
     )
     create_consent_event(consent_id, "accepted", actor_type="recipient",
                          metadata={"signature": signature_name, "ip": ip, "user_agent": user_agent})
+
+    # The newest accepted consent becomes the student's active scope. This is
+    # important for platform add-on consent: the replacement record contains
+    # the previous platforms plus the newly approved one.
+    if updated and updated.get("student_id"):
+        set_student_current_consent(updated["student_id"], consent_id)
     
     # Save social accounts if provided (only if consent is accepted)
     if social_accounts and consent.get("student_id"):

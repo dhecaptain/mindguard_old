@@ -16,6 +16,7 @@ export default function AdultAccountsPage() {
   const removeAccount = useSelfStore((s) => s.removeAccount)
   const verifyAccount = useSelfStore((s) => s.verifyAccount)
   const getVerificationCode = useSelfStore((s) => s.getVerificationCode)
+  const requestPlatformConsent = useSelfStore((s) => s.requestPlatformConsent)
   const verificationCodes = useSelfStore((s) => s.verificationCodes)
   const runAnalysis = useSelfStore((s) => s.runAnalysis)
 
@@ -24,6 +25,7 @@ export default function AdultAccountsPage() {
   const [credentialValues, setCredentialValues] = useState<Record<string, string>>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [consentNotice, setConsentNotice] = useState<string | null>(null)
 
   useEffect(() => {
     if (!catalogLoaded) loadCatalog()
@@ -55,6 +57,11 @@ export default function AdultAccountsPage() {
   const handleAdd = async () => {
     setFormError(null)
     if (!spec) return
+
+    if (!spec.consented) {
+      setFormError(`Consent for ${spec.display_name} is required before this account can be connected.`)
+      return
+    }
 
     const handle = isUrlOnly ? undefined : handleValue.trim()
     const profileUrl = isUrlOnly ? handleValue.trim() : undefined
@@ -102,6 +109,24 @@ export default function AdultAccountsPage() {
       setFormError(msg || 'Failed to add account. Please check the details and try again.')
     } finally {
       setAdding(false)
+    }
+  }
+
+  const handleRequestConsent = async () => {
+    if (!spec) return
+    setFormError(null)
+    setConsentNotice(null)
+    try {
+      await requestPlatformConsent(spec.key)
+      setConsentNotice(
+        spec.consent_pending
+          ? `Consent for ${spec.display_name} is already pending.`
+          : `A consent request for ${spec.display_name} was sent. Complete it from the email before adding the account.`,
+      )
+    } catch {
+      // The store exposes the structured API error in the shared error state;
+      // keep this panel focused on the selected platform.
+      setConsentNotice(null)
     }
   }
 
@@ -171,6 +196,28 @@ export default function AdultAccountsPage() {
                 <div className="text-[0.75rem] text-[#6b7280] leading-relaxed">{spec.blurb}</div>
               </div>
             </div>
+
+            {!spec.consented && (
+              <div className="mb-[14px] rounded-[10px] border border-amber-200 bg-amber-50 px-[12px] py-[10px] text-[0.78rem] text-amber-900 leading-relaxed">
+                <div className="font-semibold">Consent required before connecting this platform</div>
+                <p className="mt-[3px]">
+                  {spec.consent_pending
+                    ? 'A consent request is already pending. Check the student email or guardian inbox, then return here after it is accepted.'
+                    : 'This platform is not covered by your current consent. Request an add-on consent first. For a minor account, the request goes to the registered parent or guardian.'}
+                </p>
+                {!spec.consent_pending && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRequestConsent()}
+                    disabled={Boolean(busy[spec.key])}
+                    className="mt-[9px] rounded-[8px] bg-[#0F766E] px-[12px] py-[7px] text-[0.78rem] font-semibold text-white disabled:opacity-50"
+                  >
+                    {busy[spec.key] ? 'Sending…' : `Request ${spec.display_name} consent`}
+                  </button>
+                )}
+                {consentNotice && <div className="mt-[8px] text-emerald-800">{consentNotice}</div>}
+              </div>
+            )}
 
             <div className="flex flex-col gap-[10px] mb-[12px]">
               <div>
@@ -247,7 +294,7 @@ export default function AdultAccountsPage() {
             <div className="flex gap-[8px]">
               <button
                 onClick={handleAdd}
-                disabled={adding}
+                disabled={adding || !spec.consented}
                 className="px-[16px] py-[9px] rounded-[8px] bg-[#0F766E] text-white text-[0.82rem] font-semibold disabled:opacity-50 cursor-pointer hover:bg-[#115E59]"
               >
                 {adding ? 'Adding…' : `Add ${spec.display_name} account`}
@@ -280,6 +327,7 @@ export default function AdultAccountsPage() {
                   runningPlatforms={runningPlatforms}
                   onVerify={verifyAccount}
                   onGetCode={getVerificationCode}
+                  onRequestConsent={(slug) => void requestPlatformConsent(slug)}
                   onAnalyse={(slug) => runAnalysis([slug])}
                   onRemove={removeAccount}
                 />

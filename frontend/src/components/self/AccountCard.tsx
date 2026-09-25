@@ -15,6 +15,7 @@ interface Props {
   runningPlatforms: ReadonlySet<string>
   onVerify: (slug: string) => void
   onGetCode: (slug: string) => void
+  onRequestConsent: (slug: string) => void
   onAnalyse: (slug: string) => void
   onRemove: (slug: string) => void
 }
@@ -37,6 +38,7 @@ export default function AccountCard({
   runningPlatforms,
   onVerify,
   onGetCode,
+  onRequestConsent,
   onAnalyse,
   onRemove,
 }: Props) {
@@ -78,6 +80,23 @@ export default function AccountCard({
       {credential && account && (
         <div className="px-[10px] py-[7px] rounded-[8px] bg-[#f8fafc] border border-[#e5e7eb] text-[0.73rem] text-[#6b7280] leading-relaxed">
           {credential}
+        </div>
+      )}
+
+      {account && !spec.consented && (
+        <div className="px-[10px] py-[8px] rounded-[8px] bg-[#fffbeb] border border-[#fde68a] text-[0.73rem] text-[#92400e] leading-relaxed">
+          This account is connected, but {spec.display_name} is not covered by the current consent. Request platform consent before your counsellor can use it.
+          {!spec.consent_pending && (
+            <button
+              type="button"
+              onClick={() => onRequestConsent(spec.key)}
+              disabled={busy}
+              className="mt-[7px] block text-[#0F766E] font-semibold hover:underline disabled:opacity-50"
+            >
+              Request {spec.display_name} consent
+            </button>
+          )}
+          {spec.consent_pending && <div className="mt-[5px] text-[#92400e]">Consent request pending — check the student or guardian email.</div>}
         </div>
       )}
 

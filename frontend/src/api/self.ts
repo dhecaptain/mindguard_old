@@ -38,6 +38,16 @@ export async function rotateSocialAccountCode(platform: string): Promise<{ verif
   return data
 }
 
+export async function requestPlatformConsent(platforms: string[]): Promise<{
+  ok: boolean
+  status: 'sent' | 'pending' | 'already_consented'
+  recipient_role?: string
+  platforms?: string[]
+}> {
+  const { data } = await api.post('/self/platform-consent/request', { platforms })
+  return data
+}
+
 export async function analyzeSelfAll(): Promise<{ session: AnalysisSession }> {
   const { data } = await api.post<{ session: AnalysisSession }>('/self/analyze', {})
   return data
