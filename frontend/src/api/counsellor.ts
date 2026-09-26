@@ -1,4 +1,5 @@
 import api from './client'
+import { getToken } from '../lib/tokenStorage'
 import type {
   Consent, ConsentListResponse, ConsentDetail, LinkedAccount, Alert, AlertDisposition,
   AuditEvent, Note, TimelineEntry,
@@ -460,6 +461,49 @@ export async function markGroupRead(groupId: string): Promise<void> {
 export async function getMyConversations(): Promise<ConversationsResponse> {
   const { data } = await api.get('/messages/conversations')
   return data
+}
+
+export async function subscribeToMessageEvents(signal: AbortSignal, onChange: () => void, onStatus?: (connected: boolean) => void): Promise<void> {
+  const configuredBase = api.defaults.baseURL || `${window.location.origin}/api`
+  const base = new URL(configuredBase, window.location.origin)
+  const streamUrl = new URL(`${base.pathname.replace(/\/$/, '')}/messages/events`, base.origin)
+  let retryDelay = 1000
+  while (!signal.aborted) {
+    try {
+      const token = getToken()
+      if (!token) return
+      const response = await fetch(streamUrl, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' },
+        signal,
+      })
+      if (!response.ok || !response.body) throw new Error(`Messaging stream returned ${response.status}`)
+      onStatus?.(true)
+      retryDelay = 1000
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (!signal.aborted) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        let boundary = buffer.indexOf('\n\n')
+        while (boundary >= 0) {
+          const frame = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          if (frame.split('\n').some((line) => line === 'event: messages_changed')) onChange()
+          boundary = buffer.indexOf('\n\n')
+        }
+      }
+      if (!signal.aborted) onStatus?.(false)
+    } catch {
+      if (signal.aborted) return
+      onStatus?.(false)
+    }
+    if (!signal.aborted) {
+      await new Promise((resolve) => window.setTimeout(resolve, retryDelay))
+      retryDelay = Math.min(retryDelay * 2, 15000)
+    }
+  }
 }
 
 export async function sendDirectMessage(receiverId: string, message: string): Promise<DirectMessage> {

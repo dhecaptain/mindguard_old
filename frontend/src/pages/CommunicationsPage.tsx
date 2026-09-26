@@ -1,14 +1,17 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useAuthStore, useCounsellorStore, useNotificationStore } from '../store'
 import {
   getMyConversations, sendDirectMessage, getDirectConversation,
   getGroupMessages, sendGroupMessage, markGroupRead,
   getGroup, addGroupMembers, removeGroupMember,
+  subscribeToMessageEvents,
 } from '../api/counsellor'
 import GroupCreateDialog from '../components/counsellor/GroupCreateDialog'
 import GroupMemberList from '../components/counsellor/GroupMemberList'
 import NewMessageDialog from '../components/shared/NewMessageDialog'
 import type { GroupDetail } from '../types'
+import type { Message } from '../api/counsellor'
+import type { UserEntry } from '../components/shared/NewMessageDialog'
 
 function formatTime(d: string) {
   if (!d) return ''
@@ -44,22 +47,42 @@ export default function CommunicationsPage() {
   const [showMemberList, setShowMemberList] = useState(false)
   const [addMemberSearch, setAddMemberSearch] = useState('')
   const [addingMember, setAddingMember] = useState(false)
+  const [search, setSearch] = useState('')
+  const [pageError, setPageError] = useState('')
+  const [liveConnected, setLiveConnected] = useState(false)
+  const activeDirectMessages = useMemo(() => messages[activeConversation || ''] || [], [messages, activeConversation])
+  const activeGroupMessages = useMemo(() => groupMessages[activeGroupId || ''] || [], [groupMessages, activeGroupId])
 
   const loadData = useCallback(async () => {
     try {
       const convData = await getMyConversations()
       setConversations(convData.direct || [])
       setGroupConversations(convData.groups || [])
-    } catch {}
+    } catch (e) { setPageError(e instanceof Error ? e.message : 'Could not load conversations.') }
   }, [setConversations, setGroupConversations])
 
   useEffect(() => {
+    // Fetch the conversation list after mount; the request owns its loading/error updates.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData()
   }, [loadData])
 
   useEffect(() => {
+    const controller = new AbortController()
+    void subscribeToMessageEvents(controller.signal, () => {
+      void loadData()
+      if (chatMode === 'direct' && activeConversation) {
+        void getDirectConversation(activeConversation).then((data) => setMessages(activeConversation, data)).catch(() => {})
+      } else if (chatMode === 'group' && activeGroupId) {
+        void getGroupMessages(activeGroupId).then((data) => setGroupMessages(activeGroupId, data.messages || [])).catch(() => {})
+      }
+    }, setLiveConnected)
+    return () => controller.abort()
+  }, [activeConversation, activeGroupId, chatMode, loadData, setMessages, setGroupMessages])
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages[activeConversation || ''], groupMessages[activeGroupId || '']])
+  }, [activeDirectMessages, activeGroupMessages])
 
   // Load direct messages
   useEffect(() => {
@@ -69,11 +92,12 @@ export default function CommunicationsPage() {
       try {
         const data = await getDirectConversation(activeConversation)
         setMessages(activeConversation, data)
-      } catch {}
+        void loadData()
+      } catch (e) { setPageError(e instanceof Error ? e.message : 'Could not load this conversation.') }
       setLoading(false)
     }
     load()
-  }, [activeConversation, chatMode, setMessages, setLoading])
+  }, [activeConversation, chatMode, setMessages, setLoading, loadData])
 
   // Load group messages
   useEffect(() => {
@@ -87,7 +111,7 @@ export default function CommunicationsPage() {
         setGroupDetail(detail)
         markGroupRead(activeGroupId).catch(() => {})
         loadData()
-      } catch {}
+      } catch (e) { setPageError(e instanceof Error ? e.message : 'Could not load this group.') }
       setLoading(false)
     }
     load()
@@ -96,6 +120,7 @@ export default function CommunicationsPage() {
   const handleSend = async () => {
     if (!input.trim() || sending) return
     setSending(true)
+    setPageError('')
     try {
       if (chatMode === 'group' && activeGroupId) {
         const msg = await sendGroupMessage(activeGroupId, input.trim())
@@ -106,7 +131,7 @@ export default function CommunicationsPage() {
         loadData()
       }
       setInput('')
-    } catch {}
+    } catch (e) { setPageError(e instanceof Error ? e.message : 'Message could not be sent.') }
     setSending(false)
   }
 
@@ -130,7 +155,7 @@ export default function CommunicationsPage() {
       await removeGroupMember(activeGroupId, memberId)
       const detail = await getGroup(activeGroupId)
       setGroupDetail(detail)
-    } catch {}
+    } catch (e) { setPageError(e instanceof Error ? e.message : 'Could not update group members.') }
   }
 
   const handleAddMembers = async () => {
@@ -141,30 +166,37 @@ export default function CommunicationsPage() {
       const detail = await getGroup(activeGroupId)
       setGroupDetail(detail)
       setAddMemberSearch('')
-    } catch {}
+    } catch (e) { setPageError(e instanceof Error ? e.message : 'Could not add this member.') }
     setAddingMember(false)
   }
 
-  const currentDirectMessages = messages[activeConversation || ''] || []
-  const currentGroupMessages = groupMessages[activeGroupId || ''] || []
+  const currentDirectMessages = activeDirectMessages as Message[]
+  const currentGroupMessages = activeGroupMessages
   const activeConv = conversations.find((c) => c.other_id === activeConversation)
   const activeGroup = groupConversations.find((g) => g.group_id === activeGroupId)
+  const filteredConversations = conversations.filter((c) => `${c.other_name} ${c.last_message}`.toLowerCase().includes(search.toLowerCase()))
+  const filteredGroups = groupConversations.filter((g) => `${g.name} ${g.last_message}`.toLowerCase().includes(search.toLowerCase()))
 
-  const handleNewMessage = (selectedUser: any) => {
+  const handleNewMessage = (selectedUser: UserEntry) => {
     setShowNewMessage(false)
+    setConversations([
+      { other_id: selectedUser.id, other_name: selectedUser.name, other_email: selectedUser.email || '', last_message: '', last_time: '', unread: 0 },
+      ...conversations.filter((conversation) => conversation.other_id !== selectedUser.id),
+    ])
     handleSelectConversation(selectedUser.id)
   }
 
   return (
-    <div className="flex flex-col gap-[16px] h-[calc(100vh-130px)]">
-      <div className="flex items-center justify-between">
+    <div className="flex h-[calc(100dvh-150px)] min-h-[440px] flex-col gap-[12px] md:h-[calc(100vh-130px)] md:gap-[16px]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-[1.3rem] font-bold text-[#1f2937]">Communications</h2>
           <p className="text-[0.82rem] text-[#6b7280] mt-[2px]">
-            Message students and groups
+            Message students assigned to your caseload or groups you are authorised to manage.
           </p>
         </div>
-        <div className="flex gap-[8px]">
+        <div className="flex flex-wrap gap-[8px]">
+          <span className={`self-center rounded-full px-2 py-1 text-[0.68rem] font-semibold ${liveConnected ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}><i className={`ti ${liveConnected ? 'ti-broadcast' : 'ti-refresh'} mr-1`} />{liveConnected ? 'Live updates' : 'Reconnecting'}</span>
           <button
             onClick={() => setShowNewMessage(true)}
             className="px-[14px] py-[8px] bg-white text-[#0F766E] rounded-[8px] cursor-pointer hover:bg-[#f0fdfa] flex items-center gap-[6px] text-[0.82rem] font-semibold border border-[#0F766E]"
@@ -184,12 +216,17 @@ export default function CommunicationsPage() {
         </div>
       </div>
 
-      <div className="flex gap-[12px] flex-1 min-h-0">
+      {pageError && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{pageError}</div>}
+
+      <div className="flex min-h-0 flex-1 flex-col gap-[12px] md:flex-row">
         {/* Conversation list */}
-        <div className="w-[280px] flex-shrink-0 bg-white rounded-xl border border-[rgba(229,231,235,0.7)] flex flex-col">
+        <div className={`${activeConversation || activeGroupId ? 'hidden md:flex' : 'flex'} w-full min-h-0 flex-shrink-0 flex-col rounded-xl border border-[rgba(229,231,235,0.7)] bg-white md:w-[280px]`}>
           <div className="p-[12px] border-b border-[#f1f5f9]">
             <input
               placeholder="Search conversations..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              aria-label="Search conversations"
               className="w-full px-[10px] py-[7px] rounded-[7px] border border-[#e5e7eb] text-[0.78rem] outline-none focus:border-[#0F766E]"
             />
           </div>
@@ -207,7 +244,7 @@ export default function CommunicationsPage() {
                     <div className="text-[0.65rem] font-bold uppercase text-[#6b7280] tracking-wider">Direct Messages</div>
                   </div>
                 )}
-                {conversations.map((c) => (
+                {filteredConversations.map((c) => (
                   <div
                     key={c.other_id}
                     onClick={() => handleSelectConversation(c.other_id)}
@@ -245,7 +282,7 @@ export default function CommunicationsPage() {
                     <div className="text-[0.65rem] font-bold uppercase text-[#6b7280] tracking-wider">Groups</div>
                   </div>
                 )}
-                {groupConversations.map((g) => {
+                {filteredGroups.map((g) => {
                   const muted = isGroupMuted(g.group_id)
                   return (
                     <div
@@ -294,7 +331,7 @@ export default function CommunicationsPage() {
         </div>
 
         {/* Chat area */}
-        <div className="flex-1 bg-white rounded-xl border border-[rgba(229,231,235,0.7)] flex flex-col">
+        <div className={`${activeConversation || activeGroupId ? 'flex' : 'hidden md:flex'} min-h-0 w-full flex-1 flex-col rounded-xl border border-[rgba(229,231,235,0.7)] bg-white`}>
           {!activeConversation && !activeGroupId ? (
             <div className="flex flex-col items-center justify-center flex-1 text-[#9ca3af]">
               <i className="ti ti-message text-[40px] mb-[10px]" />
@@ -305,6 +342,7 @@ export default function CommunicationsPage() {
             <>
               {/* Group chat header */}
               <div className="px-[18px] py-[12px] border-b border-[#f1f5f9] flex items-center gap-[10px]">
+                <button type="button" onClick={() => { setActiveGroupId(null); setActiveConversation(null) }} className="mr-1 rounded-lg p-2 text-slate-600 hover:bg-slate-100 md:hidden" aria-label="Back to conversations"><i className="ti ti-arrow-left" /></button>
                 <div className="w-[34px] h-[34px] rounded-full bg-gradient-to-br from-[#7c3aed] to-[#a78bfa] flex items-center justify-center text-white font-bold text-[0.72rem]">
                   <i className="ti ti-users text-[15px]" />
                 </div>
@@ -327,7 +365,7 @@ export default function CommunicationsPage() {
                 </button>
               </div>
 
-              <div className="flex flex-1 min-h-0">
+              <div className="relative flex flex-1 min-h-0">
                 {/* Messages */}
                 <div className="flex-1 flex flex-col min-w-0">
                   <div className="flex-1 overflow-y-auto p-[18px] space-y-[8px]">
@@ -340,7 +378,7 @@ export default function CommunicationsPage() {
                         const isMyMessage = msg.sender_id === user?.id
                         return (
                           <div key={msg.id} className={`flex ${isMyMessage ? 'justify-end' : 'justify-start'}`}>
-                            <div className="max-w-[70%]">
+                            <div className="max-w-[85%] md:max-w-[70%]">
                               {!isMyMessage && (
                                 <div className="text-[0.68rem] font-medium text-[#4b5563] mb-[2px] ml-[2px]">
                                   {msg.sender_name}
@@ -372,6 +410,7 @@ export default function CommunicationsPage() {
                       value={input}
                       onChange={(e) => setInput(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                      maxLength={5000}
                       placeholder={`Message ${activeGroup?.name || 'group'}...`}
                       className="flex-1 px-[14px] py-[9px] rounded-[10px] border border-[#e5e7eb] text-[0.82rem] outline-none focus:border-[#0F766E]"
                     />
@@ -388,7 +427,7 @@ export default function CommunicationsPage() {
 
                 {/* Member list sidebar */}
                 {showMemberList && groupDetail && (
-                  <div className="w-[220px] border-l border-[#f1f5f9] flex flex-col">
+                  <div className="absolute inset-y-0 right-0 z-10 flex w-[85vw] max-w-[320px] flex-col border-l border-[#f1f5f9] bg-white shadow-xl md:static md:w-[220px] md:shadow-none">
                     <div className="px-[12px] py-[10px] border-b border-[#f1f5f9]">
                       <div className="text-[0.72rem] font-bold text-[#1f2937]">Members</div>
                       <div className="text-[0.62rem] text-[#6b7280]">{groupDetail.members?.length || 0} total</div>
@@ -428,6 +467,7 @@ export default function CommunicationsPage() {
             <>
               {/* Direct chat header */}
               <div className="px-[18px] py-[12px] border-b border-[#f1f5f9] flex items-center gap-[10px]">
+                <button type="button" onClick={() => { setActiveGroupId(null); setActiveConversation(null) }} className="mr-1 rounded-lg p-2 text-slate-600 hover:bg-slate-100 md:hidden" aria-label="Back to conversations"><i className="ti ti-arrow-left" /></button>
                 <div className="w-[34px] h-[34px] rounded-full bg-gradient-to-br from-[#0F766E] to-[#1D9E75] flex items-center justify-center text-white font-bold text-[0.72rem]">
                   {activeConv?.other_name?.charAt(0) || '?'}
                 </div>
@@ -444,12 +484,12 @@ export default function CommunicationsPage() {
                     No messages yet. Send a message to start the conversation.
                   </div>
                 ) : (
-                  currentDirectMessages.map((msg: any) => {
+                  currentDirectMessages.map((msg) => {
                     const isMyMessage = msg.sender_id !== activeConversation
                     return (
                       <div key={msg.id} className={`flex ${isMyMessage ? 'justify-end' : 'justify-start'}`}>
                         <div
-                          className={`max-w-[70%] px-[14px] py-[9px] rounded-[14px] text-[0.82rem] ${
+                          className={`max-w-[85%] break-words px-[14px] py-[9px] rounded-[14px] text-[0.82rem] md:max-w-[70%] ${
                             isMyMessage
                               ? 'bg-[#0F766E] text-white rounded-br-[4px]'
                               : 'bg-[#f3f4f6] text-[#1f2937] rounded-bl-[4px]'
@@ -473,6 +513,7 @@ export default function CommunicationsPage() {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                  maxLength={5000}
                   placeholder={`Message ${activeConv?.other_name || 'user'}...`}
                   className="flex-1 px-[14px] py-[9px] rounded-[10px] border border-[#e5e7eb] text-[0.82rem] outline-none focus:border-[#0F766E]"
                 />

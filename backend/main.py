@@ -27,7 +27,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Header, Request, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import (
@@ -203,6 +203,7 @@ from backend.database import (
     get_assignments_for_counsellor,
     get_assignments_for_student,
     consume_rate_limit,
+    get_db,
 )
 from backend.services.consent_service import (
     dispatch_consent,
@@ -4677,15 +4678,16 @@ async def get_user_directory(
     users = get_all_users()
     if role:
         users = [u for u in users if u["role_type"] == role]
+    allowed = [
+        candidate for candidate in users
+        if candidate.get("id") != user["id"]
+        and _communication_allowed(user, candidate.get("id", ""))
+    ]
     if user["role_type"] == "admin":
-        return users
+        return allowed
     return [
-        {
-            k: v
-            for k, v in u.items()
-            if k not in ("email", "password_hash", "dob", "parent_email")
-        }
-        for u in users
+        {"id": candidate["id"], "name": candidate.get("name") or "User", "role_type": candidate["role_type"]}
+        for candidate in allowed
     ]
 
 
@@ -4812,15 +4814,23 @@ def _require_user_communication_access(user: dict, other_id: str) -> dict:
         raise HTTPException(404, "Recipient not found")
     if other_id == user["id"]:
         raise HTTPException(400, "Cannot communicate with yourself")
-    if user.get("role_type") == "admin" or other.get("role_type") == "admin":
-        return other
+    active_statuses = {"active", "approved"}
+    if str(user.get("status") or "").lower() not in active_statuses or str(other.get("status") or "").lower() not in active_statuses:
+        raise HTTPException(403, "Messaging is available only between active accounts")
     user_role = user.get("role_type")
     other_role = other.get("role_type")
-    if user_role in ("counsellor", "school_admin") and other_role == "student":
-        _require_counsellor_student_access(user, other_id)
+    staff_roles = {"admin", "school_admin", "counsellor"}
+    if user_role == "admin":
         return other
-    if other_role in ("counsellor", "school_admin") and user_role == "student":
-        _require_counsellor_student_access(other, user["id"])
+    if other_role == "admin":
+        if user_role in staff_roles:
+            return other
+        raise HTTPException(403, "Students can message their assigned counsellor or linked guardian")
+    if user_role == "counsellor" and other_role == "student":
+        _require_counsellor_student_access(user, other_id, require_consent=False)
+        return other
+    if other_role == "counsellor" and user_role == "student":
+        _require_counsellor_student_access(other, user["id"], require_consent=False)
         return other
     user_is_parent = user_role == "parent" or user.get("user_category") == "parent"
     other_is_parent = other_role == "parent" or other.get("user_category") == "parent"
@@ -7941,7 +7951,7 @@ async def v1_create_group(req: CreateGroupRequest, user: dict = Depends(require_
             member_user = get_user_by_id(mid)
             if member_user and member_user["role_type"] == "student":
                 if user["role_type"] != "admin":
-                    _require_counsellor_student_access(user, mid)
+                    _require_counsellor_student_access(user, mid, require_consent=False)
                 add_group_member(group["id"], mid, role="member")
                 _safe_notify(
                     mid,
@@ -8052,7 +8062,7 @@ async def v1_add_group_members(
         member_user = get_user_by_id(uid)
         if member_user and member_user["role_type"] == "student":
             if user["role_type"] != "admin":
-                _require_counsellor_student_access(user, uid)
+                    _require_counsellor_student_access(user, uid, require_consent=False)
             result = add_group_member(group_id, uid, role="member")
             if result:
                 added.append(result)
@@ -8142,6 +8152,58 @@ async def v1_mark_group_read(group_id: str, user: dict = Depends(require_auth)):
 # ═════════════════════════════════════════════════════════════════════
 
 
+def _message_change_cursor(user_id: str) -> tuple[str, str, str, str]:
+    """Cheap cursor for the authenticated user's direct and group messages."""
+    conn = get_db()
+    direct = conn.execute(
+        "SELECT id, created_at FROM ("
+        "SELECT id, created_at FROM communications WHERE sender_id = ? UNION ALL "
+        "SELECT id, created_at FROM communications WHERE receiver_id = ?"
+        ") ORDER BY created_at DESC, id DESC LIMIT 1",
+        (user_id, user_id),
+    ).fetchone()
+    groups = conn.execute(
+        "SELECT m.id, m.created_at "
+        "FROM group_messages m JOIN group_members g ON g.group_id = m.group_id "
+        "WHERE g.user_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return (
+        str(direct["id"]) if direct else "",
+        str(direct["created_at"]) if direct else "",
+        str(groups["id"]) if groups else "",
+        str(groups["created_at"]) if groups else "",
+    )
+
+
+@app.get("/api/messages/events")
+async def stream_message_events(request: Request, user: dict = Depends(require_auth)):
+    """Authenticated SSE change signal; message bodies remain on scoped APIs."""
+    async def event_stream():
+        cursor = _message_change_cursor(user["id"])
+        yield "event: ready\ndata: {}\n\n"
+        keepalive = 0
+        while not await request.is_disconnected():
+            await asyncio.sleep(2)
+            next_cursor = _message_change_cursor(user["id"])
+            if next_cursor != cursor:
+                cursor = next_cursor
+                yield "event: messages_changed\ndata: {}\n\n"
+                keepalive = 0
+            else:
+                keepalive += 1
+                if keepalive >= 8:
+                    yield ": keepalive\n\n"
+                    keepalive = 0
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/messages/conversations")
 async def get_my_conversations(user: dict = Depends(require_auth)):
     conversations = get_conversations(user["id"])
@@ -8182,6 +8244,8 @@ async def send_message_any(
         raise HTTPException(400, "Receiver ID required")
     if not message:
         raise HTTPException(400, "Message cannot be empty")
+    if len(message) > 5000:
+        raise HTTPException(400, "Messages must be 5,000 characters or fewer")
     _require_user_communication_access(user, receiver_id)
     msg = send_message(user["id"], receiver_id, message)
     if should_notify(receiver_id, "message"):

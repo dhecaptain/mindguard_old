@@ -1,31 +1,33 @@
 import { useState, useEffect } from 'react'
 import api from '../../api/client'
 
-interface UserEntry {
+export interface UserEntry {
   id: string
   name: string
-  email: string
+  email?: string
   role_type: string
 }
 
 interface Props {
-  roleFilter: 'student' | 'counsellor'
+  roleFilter: 'student' | 'counsellor' | 'parent'
+  allowLinkedGuardian?: boolean
   excludeId?: string
   onSelect: (user: UserEntry) => void
   onClose: () => void
 }
 
-export default function NewMessageDialog({ roleFilter, excludeId, onSelect, onClose }: Props) {
+export default function NewMessageDialog({ roleFilter, allowLinkedGuardian = false, excludeId, onSelect, onClose }: Props) {
+  const [targetRole, setTargetRole] = useState<'student' | 'counsellor' | 'parent'>(roleFilter)
   const [users, setUsers] = useState<UserEntry[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/users/directory', { params: { role: roleFilter } })
+    api.get('/users/directory', { params: { role: targetRole } })
       .then((res) => setUsers(res.data || []))
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [roleFilter])
+  }, [targetRole])
 
   const filtered = users.filter(
     (u) =>
@@ -47,10 +49,17 @@ export default function NewMessageDialog({ roleFilter, excludeId, onSelect, onCl
           </button>
         </div>
 
+        {allowLinkedGuardian && <label className="mb-3 block text-xs font-semibold text-slate-600">Message
+          <select value={targetRole} onChange={(event) => setTargetRole(event.target.value as 'counsellor' | 'parent')} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+            <option value="counsellor">My assigned counsellor</option>
+            <option value="parent">My linked parent or guardian</option>
+          </select>
+        </label>}
+
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name or email..."
+        placeholder="Search by name..."
           className="w-full px-[12px] py-[8px] rounded-[8px] border border-[#e5e7eb] text-[0.82rem] outline-none focus:border-[#0F766E] mb-[12px]"
           autoFocus
         />

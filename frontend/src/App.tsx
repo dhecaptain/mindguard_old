@@ -162,7 +162,7 @@ function PageRouter() {
   }
 
   if (userCategory === 'parent' || role === 'parent') {
-    return <GuardianDashboardPage />
+    return currentPage === 'communications' ? <StudentCommunicationsPage /> : <GuardianDashboardPage />
   }
 
   if (userCategory === 'institution_managed') {
