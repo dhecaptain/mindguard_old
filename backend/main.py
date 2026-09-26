@@ -1524,7 +1524,7 @@ async def verify_own_social_account(
                 400,
                 "Enter the current verification code shown when you claimed this account.",
             )
-        verification_body = response.text
+        verification_bodies = [response.text]
         if slug == "mastodon":
             # Mastodon instances often render the profile shell without the
             # account note in the HTML. Use the instance's public lookup API
@@ -1547,11 +1547,33 @@ async def verify_own_social_account(
                         },
                     )
                 if lookup.status_code < 400:
-                    verification_body = lookup.text
-        if str(code).lower() not in verification_body.lower():
+                    # Mastodon returns the account bio as HTML in the JSON
+                    # `note` field. Inspect that field directly, and keep the
+                    # public profile HTML as a fallback because instances
+                    # differ in how they render profile metadata.
+                    try:
+                        lookup_payload = lookup.json()
+                    except ValueError:
+                        lookup_payload = None
+                    if isinstance(lookup_payload, dict):
+                        note = lookup_payload.get("note")
+                        if isinstance(note, str) and note:
+                            verification_bodies.append(note)
+                    verification_bodies.append(lookup.text)
+
+        normalized_code = str(code).strip().casefold()
+        if not any(
+            normalized_code in html_lib.unescape(body).casefold()
+            for body in verification_bodies
+        ):
+            logger.info(
+                "social account verification proof not visible platform=%s request_id=%s",
+                slug,
+                getattr(request.state, "request_id", "unknown"),
+            )
             raise HTTPException(
                 422,
-                "The verification code was not found on the public profile. Add it to the profile bio/about section, wait for it to be visible publicly, then try again.",
+                "The current verification code is not visible in the public profile bio/about yet. Make sure the bio contains the latest code shown by MindGuard, save the profile, wait for Mastodon to publish the change, then try again. If you generated another code, replace the old one with the newest code first.",
             )
     except HTTPException:
         raise
