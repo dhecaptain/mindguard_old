@@ -1538,13 +1538,14 @@ async def verify_own_social_account(
                     break
             if username:
                 lookup_url = f"{parsed.scheme}://{parsed.netloc}/api/v1/accounts/lookup?acct={quote(username)}"
-                lookup = await client.get(
-                    lookup_url,
-                    headers={
-                        "User-Agent": "MindGuard account-ownership verifier/1.0",
-                        "Accept": "application/json",
-                    },
-                )
+                async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as lookup_client:
+                    lookup = await lookup_client.get(
+                        lookup_url,
+                        headers={
+                            "User-Agent": "MindGuard account-ownership verifier/1.0",
+                            "Accept": "application/json",
+                        },
+                    )
                 if lookup.status_code < 400:
                     verification_body = lookup.text
         if str(code).lower() not in verification_body.lower():
