@@ -5,6 +5,7 @@ import type { Note } from '../../types'
 
 interface Props {
   studentId: string
+  draftText?: string
 }
 
 function formatTime(d: string) {
@@ -22,7 +23,7 @@ function formatTime(d: string) {
   return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-export default function StudentNotes({ studentId }: Props) {
+export default function StudentNotes({ studentId, draftText }: Props) {
   const [notes, setNotes] = useState<Note[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -52,6 +53,14 @@ export default function StudentNotes({ studentId }: Props) {
   useEffect(() => {
     load()
   }, [studentId])
+
+  useEffect(() => {
+    if (!draftText) return
+    setBody(draftText)
+    setAdding(true)
+    setShareWithStudent(false)
+    setSubmitError(null)
+  }, [draftText])
 
   useEffect(() => {
     if (adding && textareaRef.current) {

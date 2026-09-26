@@ -27,6 +27,7 @@ export default function AdultAccountsPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [consentNotice, setConsentNotice] = useState<string | null>(null)
+  const [verificationNotice, setVerificationNotice] = useState<{ tone: 'success' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
     if (!catalogLoaded) loadCatalog()
@@ -53,6 +54,17 @@ export default function AdultAccountsPage() {
     setHandleValue('')
     setCredentialValues({})
     setFormError(null)
+  }
+
+  const handleVerify = async (platform: string, code?: string) => {
+    setVerificationNotice(null)
+    const result = await verifyAccount(platform, code)
+    if (result?.verified) {
+      setVerificationNotice({ tone: 'success', text: result.message || `${platform} ownership verified successfully. The account is ready for counsellor review.` })
+      return
+    }
+    const latestError = useSelfStore.getState().error
+    setVerificationNotice({ tone: 'error', text: latestError || `We couldn't verify ${platform}. Check that the current code appears in the public profile bio/about, then try again.` })
   }
 
   const handleAdd = async () => {
@@ -142,7 +154,8 @@ export default function AdultAccountsPage() {
         </div>
       </div>
 
-      {error && (
+      {verificationNotice && <div role={verificationNotice.tone === 'error' ? 'alert' : 'status'} aria-live="polite" className={`rounded-[10px] border px-[12px] py-[10px] text-[0.8rem] ${verificationNotice.tone === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-[#fecaca] bg-[#fef2f2] text-[#991b1b]'}`}><i className={`ti ${verificationNotice.tone === 'success' ? 'ti-circle-check' : 'ti-alert-circle'} mr-2`} />{verificationNotice.text}</div>}
+      {error && !verificationNotice && (
         <div role="alert" className="rounded-[10px] border border-[#fecaca] bg-[#fef2f2] px-[12px] py-[10px] text-[0.8rem] text-[#991b1b]">
           {error}
         </div>
@@ -332,7 +345,7 @@ export default function AdultAccountsPage() {
                   busy={Boolean(busy[account.platform])}
                   verificationCode={verificationCodes[account.platform]}
                   runningPlatforms={runningPlatforms}
-                  onVerify={verifyAccount}
+                  onVerify={handleVerify}
                   onGetCode={getVerificationCode}
                   onRequestConsent={(slug) => void requestPlatformConsent(slug)}
                   onAnalyse={(slug) => runAnalysis([slug])}

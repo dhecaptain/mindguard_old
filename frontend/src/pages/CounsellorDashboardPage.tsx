@@ -21,15 +21,11 @@ function formatDate(d: string) {
 }
 
 export default function CounsellorDashboardPage() {
-  const { dashboard, setDashboard, setLoading, loading } = useCounsellorStore()
+  const { dashboard, setDashboard, setLoading, loading, requestStudentWorkspace } = useCounsellorStore()
   const setPage = useUiStore((s) => s.setPage)
   const [error, setError] = useState<string | null>(null)
   const [workspace, setWorkspace] = useState<StudentWorkspaceItem[]>([])
   const [workspaceLoading, setWorkspaceLoading] = useState(true)
-
-  useEffect(() => {
-    loadDashboard()
-  }, [])
 
   const loadDashboard = async () => {
     setLoading(true)
@@ -53,6 +49,11 @@ export default function CounsellorDashboardPage() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadDashboard()
+  }, [])
 
   if (loading && !dashboard) {
     return (
@@ -165,7 +166,7 @@ export default function CounsellorDashboardPage() {
                     return <span key={account.id} className={`rounded-full px-[8px] py-[4px] text-[0.66rem] font-semibold ${verified ? 'bg-[#d1fae5] text-[#065f46]' : unavailable ? 'bg-[#fee2e2] text-[#991b1b]' : 'bg-[#fef3c7] text-[#92400e]'}`} title={account.handle || account.profile_url || account.platform}>{account.platform}: {verified ? 'verified' : unavailable ? 'unavailable' : 'verification needed'}</span>
                   })}
                 </div>
-                <button onClick={() => setPage('students')} className="rounded-[7px] border border-[#99d5ce] px-[10px] py-[7px] text-[0.72rem] font-semibold text-[#0f766e] hover:bg-[#f0fdfa]">Open workspace <i className="ti ti-arrow-up-right text-[12px]" /></button>
+                <button onClick={() => { requestStudentWorkspace(student.id); setPage('students') }} className="rounded-[7px] border border-[#99d5ce] px-[10px] py-[7px] text-[0.72rem] font-semibold text-[#0f766e] hover:bg-[#f0fdfa]">Open workspace <i className="ti ti-arrow-up-right text-[12px]" /></button>
               </div>
             ))}
           </div>

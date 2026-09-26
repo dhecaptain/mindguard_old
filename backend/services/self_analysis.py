@@ -16,6 +16,7 @@ the platform APIs inside these functions.
 from __future__ import annotations
 
 import json
+import html as html_lib
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -178,8 +179,15 @@ async def _analyze_mastodon(user_id: str) -> dict[str, Any]:
                         created = datetime.now(timezone.utc)
                     if created < cutoff:
                         break
-                    text = re.sub(r"<[^>]+>", "", s.get("content", "") or "").strip()
-                    if len(text) <= 5:
+                    # Boosts may have empty outer content; analyse the original
+                    # post while retaining the public status URL/date.
+                    source = s.get("reblog") or s
+                    content = source.get("content", "") or ""
+                    text = html_lib.unescape(re.sub(r"<[^>]+>", " ", content))
+                    text = re.sub(r"\s+", " ", text).strip()
+                    spoiler = html_lib.unescape(re.sub(r"<[^>]+>", " ", source.get("spoiler_text", "") or ""))
+                    text = re.sub(r"\s+", " ", f"{spoiler} {text}").strip()
+                    if not text:
                         continue
                     raw_posts.append({"text": text, "date": s.get("created_at", ""), "url": s.get("url", "")})
                 max_id = statuses[-1]["id"]

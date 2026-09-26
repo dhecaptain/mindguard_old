@@ -3921,6 +3921,16 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
     # Assignment status is visible before consent; protected analysis data is
     # never returned until consent is active.
     analyses = get_analyses(student_id, limit=50) if consent_active else []
+    analysis_sessions = (
+        [
+            _decode_session_json(session)
+            for session in get_analysis_sessions_for_student(
+                student_id, limit=50, analysis_type="counsellor_student"
+            )
+        ]
+        if consent_active
+        else []
+    )
     rolling = get_rolling_risk(student_id) if consent_active else None
     if analyses:
         latest_prob = analyses[0]["prob"]
@@ -3942,11 +3952,12 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
             "latest_prob": latest_prob,
             "latest_label": latest_label,
             "latest_color": latest_color,
-            "total_analyses": len(analyses),
+            "total_analyses": max(len(analyses), len(analysis_sessions)),
             "high_risk_count": sum(1 for a in analyses if a["prob"] >= 0.75),
         },
         "rolling_risk": rolling,
         "analyses": analyses,
+        "analysis_sessions": analysis_sessions,
         "consent_status": consent_status,
     }
 
@@ -7834,6 +7845,12 @@ async def v1_student_analyze(
     except Exception as e:
         logger.warning("analysis session persist failed: %s", e)
 
+    result["posts"] = retrieved.get("posts", [])
+    result["analysis_summary"] = {
+        "analysed_posts": len(retrieved.get("posts", [])),
+        "platform": requested_platform,
+        "review_note": "This is a decision-support signal, not a diagnosis. Review the source content and discuss context with the student.",
+    }
     return result
 
 

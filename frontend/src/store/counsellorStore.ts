@@ -13,6 +13,7 @@ interface CounsellorState {
   referralCount: number
   loading: boolean
   error: string | null
+  requestedStudentId: string | null
 
   // Group messaging
   groups: Group[]
@@ -34,6 +35,7 @@ interface CounsellorState {
   updateStudentStatus: (id: string, status: string) => void
   setLoading: (v: boolean) => void
   setError: (e: string | null) => void
+  requestStudentWorkspace: (id: string | null) => void
 
   // Group actions
   setGroups: (groups: Group[]) => void
@@ -55,6 +57,7 @@ export const useCounsellorStore = create<CounsellorState>((set) => ({
   referralCount: 0,
   loading: false,
   error: null,
+  requestedStudentId: null,
 
   // Group messaging
   groups: [],
@@ -93,6 +96,7 @@ export const useCounsellorStore = create<CounsellorState>((set) => ({
     })),
   setLoading: (v) => set({ loading: v }),
   setError: (e) => set({ error: e }),
+  requestStudentWorkspace: (id) => set({ requestedStudentId: id }),
 
   // Group actions
   setGroups: (groups) => set({ groups }),

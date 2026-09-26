@@ -18,12 +18,14 @@ function riskTone(score: number): { color: string; label: string } {
   return { color: '#22c55e', label: 'Low risk' }
 }
 
-function RiskAnalysisPanel({ student, onAnalyzed }: { student: StudentDetail; onAnalyzed: () => void }) {
+function RiskAnalysisPanel({ student, onAnalyzed, onDraftNote }: { student: StudentDetail; onAnalyzed: () => void; onDraftNote: (text: string) => void }) {
   const [platform, setPlatform] = useState('')
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<StudentAnalysisResult | null>(null)
   const [error, setError] = useState('')
   const [accounts, setAccounts] = useState<StudentSocialAccount[]>([])
+  const [accountsLoading, setAccountsLoading] = useState(true)
+  const [accountsError, setAccountsError] = useState('')
 
   const available = accounts.filter((account) =>
     account.verification_status === 'verified' &&
@@ -42,6 +44,13 @@ function RiskAnalysisPanel({ student, onAnalyzed }: { student: StudentDetail; on
       if (!verifiedAccount) { setError('Select a verified student account before running analysis.'); return }
       const res = await analyzeStudent(student.id, { platform, account_id: verifiedAccount.id })
       setResult(res)
+      const posts = Array.isArray(res.posts) ? res.posts : []
+      const counts = posts.reduce<Record<string, number>>((acc, post) => {
+        const band = post.risk_score >= 0.75 ? 'high' : post.risk_score >= 0.5 ? 'elevated' : 'low'
+        acc[band] = (acc[band] || 0) + 1
+        return acc
+      }, {})
+      onDraftNote(`Analysis review — ${res.platform}\n${posts.length} post(s) reviewed. ${counts.high || 0} high, ${counts.elevated || 0} elevated, ${counts.low || 0} lower-indicator result(s).\nRolling risk signal: ${Number.isFinite(res.rolling_score) ? `${(res.rolling_score * 100).toFixed(0)}%` : 'not available'}.\n\nCounsellor interpretation and follow-up:\n`)
       onAnalyzed()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Analysis failed')
@@ -51,7 +60,16 @@ function RiskAnalysisPanel({ student, onAnalyzed }: { student: StudentDetail; on
     }
   }
 
-  useEffect(() => { getStudentSocialAccounts(student.id).then(setAccounts).catch(() => setAccounts([])) }, [student.id])
+  const loadAccounts = async () => {
+    setAccountsLoading(true)
+    setAccountsError('')
+    try { setAccounts(await getStudentSocialAccounts(student.id)) }
+    catch (err) { setAccountsError(err instanceof Error ? err.message : 'Could not load the student accounts.') }
+    finally { setAccountsLoading(false) }
+  }
+  // The account list is an external resource keyed by student; the loader owns loading/error state.
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(() => { void loadAccounts() }, [student.id])
 
   return (
     <div className="bg-white rounded-xl border border-[rgba(229,231,235,0.7)]">
@@ -67,6 +85,10 @@ function RiskAnalysisPanel({ student, onAnalyzed }: { student: StudentDetail; on
             This student has no active (accepted, non-expired) consent on record. Analysis is consent-gated —
             dispatch and obtain consent before running a rolling risk analysis.
           </div>
+        ) : accountsLoading ? (
+          <div className="text-[0.8rem] text-[#64748b]">Loading consented account status…</div>
+        ) : accountsError ? (
+          <div className="rounded-[7px] border border-[#fecaca] bg-[#fef2f2] px-[12px] py-[9px] text-[0.78rem] text-[#991b1b]" role="alert">{accountsError} <button onClick={() => void loadAccounts()} className="ml-2 font-bold underline">Retry</button></div>
         ) : available.length === 0 ? (
           <div className="text-[0.8rem] text-[#9ca3af]">
             No verified and available student accounts are ready for analysis. The student must complete ownership verification first; private, deleted or unavailable accounts remain blocked.
@@ -109,20 +131,32 @@ function RiskAnalysisPanel({ student, onAnalyzed }: { student: StudentDetail; on
               <div className="mt-[12px] rounded-[7px] border border-[#e5e7eb] bg-[#f8fafc] px-[14px] py-[12px]">
                 <div className="flex items-center justify-between gap-[10px]">
                   <div className="text-[0.8rem] font-bold text-[#1f2937]">
-                    Rolling risk: {(result.rolling_score * 100).toFixed(0)}%
+                    Rolling risk signal: {(Number(result.rolling_score || 0) * 100).toFixed(0)}%
                   </div>
                   <span className="text-[0.72rem] font-bold uppercase" style={{ color: riskTone(result.rolling_score).color }}>
                     {riskTone(result.rolling_score).label}
                   </span>
                 </div>
                 <div className="mt-[8px] text-[0.72rem] text-[#6b7280] space-y-[2px]">
-              <div>{result.n_posts} post(s) retrieved and analysed from the verified {result.platform} account</div>
+                  <div>{result.n_posts} post(s) retrieved and analysed from the verified {result.platform} account · Session {result.session_id ? result.session_id.slice(0, 8) : 'saved'}</div>
+                  <div className="mt-2 rounded-md bg-white p-2">This is a decision-support signal, not a diagnosis. Review the source content and discuss context with the student.</div>
                   <div>
                     {result.alert_created
                       ? <span className="text-[#b91c1c] font-semibold">Risk alert created and queued for follow-up.</span>
                       : 'No alert triggered — score below threshold.'}
                   </div>
                 </div>
+                {result.posts?.length ? <div className="mt-3 border-t border-[#e2e8f0] pt-3">
+                  <h4 className="mb-2 text-[0.75rem] font-bold text-[#334155]">What was reviewed</h4>
+                  <div className="max-h-[300px] space-y-2 overflow-y-auto">
+                    {result.posts.map((post, index) => <article key={`${post.url || ''}-${index}`} className="rounded-md border border-[#e2e8f0] bg-white p-3">
+                      <div className="mb-1 flex items-center justify-between gap-2 text-[0.68rem] text-[#64748b]"><span>{post.date ? formatDate(post.date) : result.platform}</span><span className="font-semibold capitalize">{post.level || 'review'}</span></div>
+                      <p className="whitespace-pre-wrap break-words text-[0.76rem] text-[#334155]">{post.text || 'No text content available.'}</p>
+                      {post.url && <a href={post.url} target="_blank" rel="noreferrer" className="mt-2 inline-block text-[0.7rem] font-semibold text-[#0f766e]">Open source post ↗</a>}
+                    </article>)}
+                  </div>
+                </div> : <div className="mt-2 text-[0.75rem] text-[#64748b]">Analysis completed, but no post-level details were returned.</div>}
+                <button onClick={() => onDraftNote(`Analysis review — ${result.platform}\n${result.n_posts} post(s) reviewed.\nRolling risk signal: ${(Number(result.rolling_score || 0) * 100).toFixed(0)}%.\n\nCounsellor interpretation and follow-up:\n`)} className="mt-3 rounded-md border border-[#0f766e] px-3 py-2 text-[0.72rem] font-semibold text-[#0f766e] hover:bg-teal-50">Draft a counsellor note from this analysis</button>
               </div>
             )}
           </>
@@ -157,6 +191,7 @@ function CollapsibleSection({ title, icon, children }: { title: string; icon: st
 }
 
 function StudentDetailView({ student, onBack, onRefresh }: { student: StudentDetail; onBack: () => void; onRefresh: () => void }) {
+  const [noteDraft, setNoteDraft] = useState('')
   const gaugeAngle = Math.min(student.risk_summary.latest_prob * 180, 180)
   const gaugeColor = student.risk_summary.latest_prob >= 0.75 ? '#ef4444' : student.risk_summary.latest_prob >= 0.5 ? '#f59e0b' : '#22c55e'
 
@@ -211,7 +246,7 @@ function StudentDetailView({ student, onBack, onRefresh }: { student: StudentDet
       </div>
 
       {/* Run rolling risk analysis (consent-gated) */}
-      <RiskAnalysisPanel student={student} onAnalyzed={onRefresh} />
+      <RiskAnalysisPanel student={student} onAnalyzed={onRefresh} onDraftNote={setNoteDraft} />
 
       <StudentAccounts studentId={student.id} />
 
@@ -220,10 +255,21 @@ function StudentDetailView({ student, onBack, onRefresh }: { student: StudentDet
         <div className="px-[20px] py-[14px] border-b border-[#f1f5f9]">
           <h3 className="text-[0.9rem] font-bold text-[#1f2937]">Analysis History</h3>
         </div>
-        {student.analyses.length === 0 ? (
+        {student.analyses.length === 0 && !student.analysis_sessions?.length ? (
           <div className="py-[40px] text-center text-[#9ca3af] text-[0.82rem]">No analyses recorded yet</div>
         ) : (
           <div className="divide-y divide-[#f1f5f9] max-h-[320px] overflow-y-auto">
+            {(student.analysis_sessions || []).map((session) => {
+              const score = Number(session.risk_score ?? 0)
+              const platforms = Array.isArray(session.platforms) ? session.platforms.join(', ') : 'platform analysis'
+              const insights = Array.isArray(session.insights) ? session.insights.join(' · ') : session.insights
+              return <div key={session.id} className="px-[20px] py-[11px] border-b border-[#f1f5f9]">
+                <div className="flex items-center justify-between gap-3"><span className="text-[0.8rem] font-semibold text-[#1f2937]">Counsellor analysis · {platforms}</span><span className="text-[0.76rem] font-bold text-[#0f766e]">{(score * 100).toFixed(0)}% signal</span></div>
+                <div className="mt-1 text-[0.7rem] text-[#64748b]">{formatDate(session.created_at)} · {(session.findings?.posts || []).length} posts reviewed</div>
+                {insights && <p className="mt-1 text-[0.74rem] text-[#475569]">{insights}</p>}
+                {session.findings?.posts?.length ? <details className="mt-2"><summary className="cursor-pointer text-[0.72rem] font-semibold text-[#0f766e]">View reviewed content</summary><div className="mt-2 space-y-2">{session.findings.posts.map((post, index) => <p key={index} className="rounded bg-[#f8fafc] p-2 text-[0.72rem] text-[#475569]">{post.text || 'Post content unavailable'}{post.url && <> · <a className="text-[#0f766e] underline" href={post.url} target="_blank" rel="noreferrer">Source</a></>}</p>)}</div></details> : null}
+              </div>
+            })}
             {student.analyses.map((a) => (
               <div key={a.id} className="px-[20px] py-[10px] flex items-center gap-[12px]">
                 <div className={`w-[8px] h-[8px] rounded-full flex-shrink-0 ${a.prob >= 0.75 ? 'bg-[#ef4444]' : a.prob >= 0.5 ? 'bg-[#f59e0b]' : 'bg-[#22c55e]'}`} />
@@ -247,17 +293,18 @@ function StudentDetailView({ student, onBack, onRefresh }: { student: StudentDet
 
       {/* Counsellor Notes */}
       <CollapsibleSection title="Counsellor Notes" icon="ti ti-notes">
-        <StudentNotes studentId={student.id} />
+      <StudentNotes studentId={student.id} draftText={noteDraft} />
       </CollapsibleSection>
     </div>
   )
 }
 
 export default function StudentManagementPage() {
-  const { students, loading, setStudents, updateStudentStatus, setLoading } = useCounsellorStore()
+  const { students, loading, setStudents, updateStudentStatus, setLoading, requestedStudentId, requestStudentWorkspace } = useCounsellorStore()
   const [detailId, setDetailId] = useState<string | null>(null)
   const [studentDetail, setStudentDetail] = useState<StudentDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
   const [notice, setNotice] = useState<{ tone: 'ok' | 'warn' | 'err'; text: string } | null>(null)
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null)
 
@@ -289,12 +336,13 @@ export default function StudentManagementPage() {
     try {
       const data = await getStudents()
       setStudents(data)
-    } catch { /* the page remains usable with the existing list */ }
-    setLoading(false)
+    } catch (e) { setNotice({ tone: 'err', text: e instanceof Error ? e.message : 'Could not load assigned students.' }) }
+    finally { setLoading(false) }
   }
 
   useEffect(() => {
     if (students.length === 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       void loadStudents()
     }
   }, [])
@@ -303,16 +351,30 @@ export default function StudentManagementPage() {
     setDetailId(id)
     setDetailLoading(true)
     setStudentDetail(null)
+    setDetailError('')
     try {
       const data = await getStudentDetail(id)
       setStudentDetail(data)
-    } catch { /* the detail view will remain empty and recover on retry */ }
-    setDetailLoading(false)
+    } catch (e) { setDetailError(e instanceof Error ? e.message : 'Could not load this student workspace.') }
+    finally { setDetailLoading(false) }
   }
+
+  const refreshDetail = async (id: string) => {
+    try { setStudentDetail(await getStudentDetail(id)) }
+    catch (e) { setDetailError(e instanceof Error ? e.message : 'Could not refresh this student workspace.') }
+  }
+
+  useEffect(() => {
+    if (!requestedStudentId) return
+    requestStudentWorkspace(null)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void openDetail(requestedStudentId)
+  }, [requestedStudentId])
 
   const closeDetail = () => {
     setDetailId(null)
     setStudentDetail(null)
+    setDetailError('')
   }
 
   if (detailId) {
@@ -325,8 +387,9 @@ export default function StudentManagementPage() {
       )
     }
     if (studentDetail) {
-      return <StudentDetailView student={studentDetail} onBack={closeDetail} onRefresh={() => openDetail(detailId!)} />
+      return <StudentDetailView student={studentDetail} onBack={closeDetail} onRefresh={() => refreshDetail(detailId!)} />
     }
+    if (detailError) return <div className="rounded-xl border border-[#fecaca] bg-white p-6 text-[#991b1b]" role="alert"><p className="font-semibold">Could not open this student workspace</p><p className="mt-1 text-sm">{detailError}</p><div className="mt-4 flex gap-3"><button onClick={() => void openDetail(detailId)} className="rounded bg-[#0f766e] px-3 py-2 text-sm font-semibold text-white">Retry</button><button onClick={closeDetail} className="text-sm font-semibold underline">Back to students</button></div></div>
   }
 
   return (

@@ -45,6 +45,14 @@ export interface StudentDetail {
     label: string
     created_at: string
   }>
+  analysis_sessions?: Array<{
+    id: string
+    created_at: string
+    platforms: string[]
+    risk_score?: number | null
+    insights?: string | string[] | null
+    findings?: { posts?: Array<{ platform?: string; text?: string; risk_score?: number; level?: string; date?: string; url?: string }>; result?: Record<string, unknown> } | null
+  }>
   consent_status?: {
     enforced: boolean
     active: boolean
@@ -74,6 +82,9 @@ export interface StudentAnalysisResult {
   risk_tier?: 'low' | 'moderate' | 'high' | 'critical'
   alert_eligible?: boolean
   crisis_escalation_eligible?: boolean
+  session_id?: string
+  posts?: Array<{ platform: string; text: string; risk_score: number; level: string; date?: string | null; url?: string | null }>
+  analysis_summary?: { analysed_posts: number; platform: string; review_note: string }
 }
 
 export interface StudentSocialAccount {
@@ -358,8 +369,8 @@ export async function getStudentTimeline(studentId: string): Promise<TimelineEnt
 // ─── Notes ────────────────────────────────────────────────────────────────────
 
 export async function getNotes(studentId: string): Promise<Note[]> {
-  const { data } = await api.get(`/v1/students/${studentId}/notes`)
-  return data
+  const { data } = await api.get<{ notes?: Note[] } | Note[]>(`/v1/students/${studentId}/notes`)
+  return Array.isArray(data) ? data : Array.isArray(data?.notes) ? data.notes : []
 }
 
 export async function getStudentSocialAccounts(studentId: string): Promise<StudentSocialAccount[]> {
