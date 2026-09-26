@@ -18,6 +18,7 @@ export default function AdultAccountsPage() {
   const getVerificationCode = useSelfStore((s) => s.getVerificationCode)
   const requestPlatformConsent = useSelfStore((s) => s.requestPlatformConsent)
   const verificationCodes = useSelfStore((s) => s.verificationCodes)
+  const error = useSelfStore((s) => s.error)
   const runAnalysis = useSelfStore((s) => s.runAnalysis)
 
   const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null)
@@ -140,6 +141,12 @@ export default function AdultAccountsPage() {
           </p>
         </div>
       </div>
+
+      {error && (
+        <div role="alert" className="rounded-[10px] border border-[#fecaca] bg-[#fef2f2] px-[12px] py-[10px] text-[0.8rem] text-[#991b1b]">
+          {error}
+        </div>
+      )}
 
       <div className="bg-[#f0fdfa] rounded-xl border border-[#a7f3d0] px-[14px] py-[10px] flex items-start gap-[8px]">
         <i className="ti ti-shield-check text-[16px] text-[#059669] mt-[1px] flex-shrink-0" />

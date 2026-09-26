@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urlparse, quote
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -1500,7 +1500,10 @@ async def verify_own_social_account(
         async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
             response = await client.get(
                 profile_url,
-                headers={"User-Agent": "MindGuard account-ownership verifier/1.0"},
+                headers={
+                    "User-Agent": "MindGuard account-ownership verifier/1.0",
+                    "Accept": "text/html,application/xhtml+xml,application/json",
+                },
             )
         if response.status_code >= 400:
             raise HTTPException(
@@ -1521,7 +1524,30 @@ async def verify_own_social_account(
                 400,
                 "Enter the current verification code shown when you claimed this account.",
             )
-        if str(code).lower() not in response.text.lower():
+        verification_body = response.text
+        if slug == "mastodon":
+            # Mastodon instances often render the profile shell without the
+            # account note in the HTML. Use the instance's public lookup API
+            # as the canonical verification source, while retaining the HTML
+            # response as a compatibility fallback.
+            path_parts = [part for part in parsed.path.split("/") if part]
+            username = ""
+            for part in path_parts:
+                if part.startswith("@"):
+                    username = part.lstrip("@").split("@", 1)[0]
+                    break
+            if username:
+                lookup_url = f"{parsed.scheme}://{parsed.netloc}/api/v1/accounts/lookup?acct={quote(username)}"
+                lookup = await client.get(
+                    lookup_url,
+                    headers={
+                        "User-Agent": "MindGuard account-ownership verifier/1.0",
+                        "Accept": "application/json",
+                    },
+                )
+                if lookup.status_code < 400:
+                    verification_body = lookup.text
+        if str(code).lower() not in verification_body.lower():
             raise HTTPException(
                 422,
                 "The verification code was not found on the public profile. Add it to the profile bio/about section, wait for it to be visible publicly, then try again.",
