@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../../api/client'
+import { useUiStore } from '../../store/uiStore'
 
 type FeedbackItem = {
   id: string
@@ -16,7 +17,8 @@ function formatDate(value: string | null) {
   return Number.isNaN(date.getTime()) ? 'Recently' : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
-export default function StudentFeedbackPanel() {
+export default function StudentFeedbackPanel({ limit = 8, compact = false }: { limit?: number; compact?: boolean }) {
+  const setPage = useUiStore((state) => state.setPage)
   const [items, setItems] = useState<FeedbackItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -25,16 +27,20 @@ export default function StudentFeedbackPanel() {
     setLoading(true)
     setError('')
     try {
-      const { data } = await api.get<{ feedback?: FeedbackItem[] }>('/institution/student-feedback')
+      const { data } = await api.get<{ feedback?: FeedbackItem[] }>(`/institution/student-feedback?limit=${limit}`)
       setItems(Array.isArray(data.feedback) ? data.feedback : [])
     } catch {
       setError('Shared updates could not be loaded. Please try again.')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [limit])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    // Fetch and synchronize this panel with the server when its requested history size changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load()
+  }, [load])
 
   return <section className="rounded-2xl border border-teal-100 bg-white p-5 shadow-sm" aria-live="polite">
     <div className="flex items-center justify-between gap-3">
@@ -49,5 +55,6 @@ export default function StudentFeedbackPanel() {
         <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{item.body}</p>
         <p className="mt-3 text-xs font-medium text-teal-700">From {item.author_name || 'Your counsellor'}</p>
       </article>)}</div>}
+    {compact && <div className="mt-4 border-t border-slate-100 pt-3"><button type="button" onClick={() => setPage('feedback')} className="text-sm font-semibold text-teal-700 hover:underline">View all shared updates →</button></div>}
   </section>
 }

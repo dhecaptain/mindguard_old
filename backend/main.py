@@ -7018,7 +7018,9 @@ async def institution_student_home(user: dict = Depends(require_auth)):
 
 
 @app.get("/api/institution/student-feedback")
-async def institution_student_feedback(user: dict = Depends(require_auth)):
+async def institution_student_feedback(
+    limit: int = 8, user: dict = Depends(require_auth)
+):
     """Student-safe feedback only; never returns private case notes or raw analysis."""
     if user.get("role_type") != "student":
         raise HTTPException(403, "Student account required")
@@ -7029,7 +7031,7 @@ async def institution_student_feedback(user: dict = Depends(require_auth)):
     # explicitly shared by their counsellor.
     if student and (student.get("archived_at") or student.get("deleted_at")):
         return {"feedback": []}
-    return {"feedback": get_student_feedback(user["id"])}
+    return {"feedback": get_student_feedback(user["id"], limit=max(1, min(limit, 30)))}
 
 
 @app.post("/api/institution/students/{student_id}/resend-invite")

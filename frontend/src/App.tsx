@@ -49,6 +49,7 @@ import InstitutionStudentsPage from './pages/InstitutionStudentsPage'
 import InstitutionAssignmentsPage from './pages/InstitutionAssignmentsPage'
 import InstitutionCounsellorsPage from './pages/InstitutionCounsellorsPage'
 import InstitutionStudentHomePage from './pages/InstitutionStudentHomePage'
+import StudentUpdatesPage from './pages/StudentUpdatesPage'
 import GuardianSetupPage from './pages/GuardianSetupPage'
 import GuardianDashboardPage from './pages/GuardianDashboardPage'
 import AdminArchivedStudentsPage from './pages/AdminArchivedStudentsPage'
@@ -166,6 +167,7 @@ function PageRouter() {
 
   if (userCategory === 'institution_managed') {
     switch (currentPage) {
+      case 'feedback': return <StudentUpdatesPage />
       case 'my-accounts': return <MyAccountsPage />
       case 'communications': return <StudentCommunicationsPage />
       case 'appointments': return <AppointmentsPage />
@@ -176,6 +178,7 @@ function PageRouter() {
 
   switch (currentPage) {
     case 'dashboard': return <DashboardPage />
+    case 'feedback': return <StudentUpdatesPage />
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />
     case 'communications': return <StudentCommunicationsPage />
@@ -191,6 +194,7 @@ function AdultPageRouter() {
 
   switch (currentPage) {
     case 'dashboard': return <AdultDashboardPage />
+    case 'feedback': return <StudentUpdatesPage />
     case 'my-accounts': return <AdultAccountsPage />
     case 'resources': return <CrisisResourcesPage />
     case 'team': return <TeamPage />

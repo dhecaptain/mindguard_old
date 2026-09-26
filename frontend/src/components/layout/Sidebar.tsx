@@ -9,6 +9,7 @@ import { NOTIFICATION_TYPE_LABELS, NOTIFICATION_TYPE_ICONS } from '../../types'
 
 const STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   { key: 'dashboard', icon: 'ti ti-brain', label: 'Dashboard' },
+  { key: 'feedback', icon: 'ti ti-message-check', label: 'Counsellor updates' },
   { key: 'my-accounts', icon: 'ti ti-link', label: 'My Accounts' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
@@ -23,6 +24,7 @@ const ADULT_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = 
 
 const INSTITUTION_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   { key: 'dashboard', icon: 'ti ti-heart-handshake', label: 'My wellbeing space' },
+  { key: 'feedback', icon: 'ti ti-message-check', label: 'Counsellor updates' },
   { key: 'my-accounts', icon: 'ti ti-link', label: 'Optional accounts' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },

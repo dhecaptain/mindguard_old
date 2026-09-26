@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { PlatformResult, VideoResult, Notification } from '../types'
 
 export type PageKey =
-  | 'dashboard' | 'text-image' | 'batch' | 'reddit' | 'video' | 'bluesky' | 'mastodon'
+  | 'dashboard' | 'feedback' | 'text-image' | 'batch' | 'reddit' | 'video' | 'bluesky' | 'mastodon'
   | 'youtube' | 'file' | 'facebook' | 'twitter' | 'unified'
   | 'resources' | 'team'
   | 'students' | 'referrals' | 'communications' | 'counsellor-dashboard'
