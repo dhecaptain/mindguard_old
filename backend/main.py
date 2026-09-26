@@ -7023,8 +7023,12 @@ async def institution_student_feedback(user: dict = Depends(require_auth)):
     if user.get("role_type") != "student":
         raise HTTPException(403, "Student account required")
     student = get_student_by_user_id(user["id"])
-    if not student or student.get("archived_at") or student.get("deleted_at"):
-        raise HTTPException(404, "This account is not an active institution student")
+    # The dashboard endpoint is shared by institution-managed and independent
+    # student accounts. Archived institution students must not retain access to
+    # school feedback, while independent students can still receive updates
+    # explicitly shared by their counsellor.
+    if student and (student.get("archived_at") or student.get("deleted_at")):
+        return {"feedback": []}
     return {"feedback": get_student_feedback(user["id"])}
 
 

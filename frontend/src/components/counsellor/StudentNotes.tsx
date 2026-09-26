@@ -34,6 +34,7 @@ export default function StudentNotes({ studentId, draftText }: Props) {
   const [studentMessage, setStudentMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const load = async () => {
@@ -72,6 +73,7 @@ export default function StudentNotes({ studentId, draftText }: Props) {
     if (!body.trim()) return
     setSubmitting(true)
     setSubmitError(null)
+    setSaveNotice(null)
     try {
       if (shareWithStudent && !studentMessage.trim()) {
         setSubmitError('Write the separate student-safe message before sharing.')
@@ -84,6 +86,9 @@ export default function StudentNotes({ studentId, draftText }: Props) {
       setStudentMessage('')
       setShareWithStudent(false)
       setAdding(false)
+      setSaveNotice(shareWithStudent
+        ? 'Saved and shared. The student can now see the separate student-safe message in their support dashboard.'
+        : 'Private counsellor note saved. The student cannot see this note.')
     } catch (e: any) {
       setSubmitError(e.message)
     } finally {
@@ -111,6 +116,7 @@ export default function StudentNotes({ studentId, draftText }: Props) {
 
   return (
     <div className="flex flex-col gap-[10px]">
+      {saveNotice && <div role="status" aria-live="polite" className="rounded-[8px] border border-emerald-200 bg-emerald-50 px-3 py-2 text-[0.76rem] text-emerald-800">{saveNotice}</div>}
       {/* Add note area */}
       {adding ? (
         <div className="flex flex-col gap-[8px]">
@@ -124,7 +130,7 @@ export default function StudentNotes({ studentId, draftText }: Props) {
           />
           <label className="flex items-start gap-2 rounded-[8px] border border-teal-100 bg-teal-50 px-3 py-2 text-[0.76rem] text-teal-900">
             <input type="checkbox" checked={shareWithStudent} onChange={(e) => setShareWithStudent(e.target.checked)} className="mt-0.5" />
-            <span><b>Share a student-safe update</b><br />This sends a notification and shows this note in the student's Support & feedback space. Do not share clinical or safeguarding details.</span>
+            <span><b>Share a student-safe update</b><br />This shares only the separate message below—not the private case note—and shows it in the student's Support & feedback area. A separate message is required. Do not include clinical or safeguarding details.</span>
           </label>
           {shareWithStudent && <input value={studentTitle} onChange={(e) => setStudentTitle(e.target.value)} maxLength={120} placeholder="Student-facing title, e.g. Your next check-in" className="w-full rounded-[8px] border border-[#e5e7eb] px-[12px] py-[8px] text-[0.82rem]" />}
           {shareWithStudent && <textarea value={studentMessage} onChange={(e) => setStudentMessage(e.target.value)} maxLength={2000} rows={3} placeholder="Student-safe message. Avoid raw posts, scores, diagnoses, alerts, or safeguarding details." className="w-full rounded-[8px] border border-teal-200 bg-teal-50/30 px-[12px] py-[8px] text-[0.82rem] resize-none" />}
