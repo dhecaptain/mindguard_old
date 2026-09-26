@@ -25,13 +25,16 @@ export interface RunState {
   final: Record<string, { status?: string; message?: string }> | null
 }
 
-function messageFromError(e: unknown): string {
+function messageFromError(e: unknown, fallback = 'Request failed. Please try again.'): string {
   if (typeof e === 'object' && e !== null && 'response' in e) {
-    const payload = (e as { response?: { data?: { detail?: { message?: string }; message?: string } } })
+    const payload = (e as { response?: { data?: { detail?: { message?: string } | string; message?: string } } })
       .response?.data
-    return payload?.detail?.message || payload?.message || 'Analysis failed. Please try again.'
+    const detail = payload?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    if (detail && typeof detail === 'object' && detail.message) return detail.message
+    return payload?.message || fallback
   }
-  return 'Analysis failed. Please try again.'
+  return fallback
 }
 
 interface SelfState {
@@ -279,7 +282,7 @@ export const useSelfStore = create<SelfState>((set, get) => {
               phase: 'Analysis failed',
               final: null,
             },
-            error: messageFromError(e),
+            error: messageFromError(e, 'Analysis failed. Please try again.'),
           })
         }
         return null
