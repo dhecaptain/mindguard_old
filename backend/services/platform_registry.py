@@ -31,6 +31,8 @@ PLATFORM_ALIASES: dict[str, str] = {
     "ig": "instagram",
     "twitter": "twitter",
     "x": "twitter",
+    "x (twitter)": "twitter",
+    "twitter/x": "twitter",
     "facebook": "facebook",
     "fb": "facebook",
     "linkedin": "linkedin",

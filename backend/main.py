@@ -7730,11 +7730,14 @@ async def v1_student_analyze(
                     f"Platform {requested_platform} not in consented platforms: {', '.join(sorted(consented)) if consented else 'none'}",
                 )
             if data.get("platforms"):
-                req_set = set(
-                    data.get("platforms")
-                    if isinstance(data.get("platforms"), list)
-                    else []
-                )
+                req_set = {
+                    normalize_platform(str(value)) or str(value).strip().lower()
+                    for value in (
+                        data.get("platforms")
+                        if isinstance(data.get("platforms"), list)
+                        else []
+                    )
+                }
                 extra = req_set - consented
                 if extra:
                     raise HTTPException(
