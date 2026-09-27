@@ -1987,6 +1987,8 @@ def update_consent_status(consent_id: str, status: str, **kwargs) -> dict | None
         "response_user_agent",
         "template_version",
         "notes",
+        "recipient_email",
+        "recipient_email_hash",
     }
     updates = ["status = ?", "updated_at = ?"]
     params = [status, now]

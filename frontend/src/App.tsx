@@ -53,6 +53,7 @@ import StudentUpdatesPage from './pages/StudentUpdatesPage'
 import GuardianSetupPage from './pages/GuardianSetupPage'
 import GuardianDashboardPage from './pages/GuardianDashboardPage'
 import AdminArchivedStudentsPage from './pages/AdminArchivedStudentsPage'
+import InstitutionPolicyPage from './pages/InstitutionPolicyPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -129,6 +130,7 @@ function PageRouter() {
       case 'institution': return <InstitutionWorkspacePage />
       case 'institution-students': return <InstitutionStudentsPage />
       case 'institution-counsellors': return <InstitutionCounsellorsPage />
+      case 'institution-policy': return <InstitutionPolicyPage />
       case 'assignments': return <InstitutionAssignmentsPage />
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />

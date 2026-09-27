@@ -43,7 +43,7 @@ from backend.database import (
     write_audit,
 )
 from backend.config import CONSENT_EXPIRY_DAYS, CONSENT_REMINDER_DAYS
-from backend.services.crypto import create_signed_token, hash_token, verify_signed_token, decrypt_pii
+from backend.services.crypto import create_signed_token, hash_token, hash_email, encrypt_pii, verify_signed_token, decrypt_pii
 from backend.services.email_sender import send_html_email
 from backend.services.email_templates import (
     admin_consent_notification,
@@ -325,6 +325,73 @@ def remind_consent(consent_id: str, actor_id: str, ip: str | None = None) -> dic
     consent["email_error"] = email_error
     consent["consent_url"] = url
     return consent
+
+
+def correct_guardian_recipient_and_resend(
+    consent_id: str,
+    recipient_email: str,
+    actor_id: str,
+    actor_role: str,
+    ip: str | None = None,
+) -> dict:
+    """Replace a pending guardian recipient and invalidate the old portal link."""
+    consent = get_consent_by_id(consent_id)
+    if not consent:
+        raise ValueError("Consent not found")
+    if consent.get("recipient_role") != "parent":
+        raise ValueError("Only parent/guardian consent recipients can be changed")
+    if consent.get("status") not in ("PENDING", "VIEWED", "EXPIRED", "INVALID"):
+        raise ValueError("Only unanswered guardian requests can be corrected")
+
+    now = datetime.now(timezone.utc)
+    token = create_signed_token(consent_id)
+    expires_at = (now + timedelta(days=CONSENT_EXPIRY_DAYS)).isoformat()
+    updated = update_consent_status(
+        consent_id,
+        "PENDING",
+        recipient_email=encrypt_pii(recipient_email),
+        recipient_email_hash=hash_email(recipient_email),
+        signed_token_hash=hash_token(token),
+        magic_token=None,
+        magic_token_expires_at=expires_at,
+        expires_at=expires_at,
+        dispatched_at=now.isoformat(),
+        viewed_at=None,
+        reminders_sent=0,
+    )
+    if not updated:
+        raise ValueError("Consent request could not be updated")
+    updated["magic_token"] = token
+    write_audit(
+        actor_id,
+        actor_role,
+        "GUARDIAN_CONSENT_RECIPIENT_CORRECTED",
+        "consent",
+        consent_id,
+        payload={"student_id": consent["student_id"], "recipient_role": "parent", "link_reissued": True},
+        ip=ip,
+    )
+    create_consent_event(
+        consent_id,
+        "recipient_corrected_and_resent",
+        actor_type=actor_role,
+        actor_id=actor_id,
+        metadata={"recipient_role": "parent", "link_reissued": True},
+    )
+    email_sent, email_error, url = _send_consent_email(updated)
+    write_audit(
+        actor_id,
+        actor_role,
+        "CONSENT_EMAIL_SENT" if email_sent else "CONSENT_EMAIL_FAILED",
+        "consent",
+        consent_id,
+        payload={"recipient_role": "parent", "error": email_error},
+        ip=ip,
+    )
+    updated["email_sent"] = email_sent
+    updated["email_error"] = email_error
+    updated["consent_url"] = url
+    return updated
 
 
 def record_view(consent_id: str, ip: str | None = None, user_agent: str | None = None) -> dict:

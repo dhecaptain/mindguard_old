@@ -49,6 +49,7 @@ const SCHOOL_ADMIN_NAV_ITEMS = [
   { key: 'institution-students', icon: 'ti ti-users', label: 'Student onboarding' },
   { key: 'institution-counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'assignments', icon: 'ti ti-user-check', label: 'Assignments' },
+  { key: 'institution-policy', icon: 'ti ti-settings', label: 'Institution policy' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },

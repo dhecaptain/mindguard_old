@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   commitRoster,
-  createInstitution,
   getInstitutions,
   getRosterStudents,
   runConsentMaintenance,
@@ -33,9 +32,6 @@ export default function RosterPanel() {
   const [sendOnUpload, setSendOnUpload] = useState(false)
   const [maintaining, setMaintaining] = useState(false)
   const [maintenanceMsg, setMaintenanceMsg] = useState<string | null>(null)
-  const [newInstitutionName, setNewInstitutionName] = useState('')
-  const [creatingInstitution, setCreatingInstitution] = useState(false)
-  const [showAddInstitution, setShowAddInstitution] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const loadInstitutions = useCallback(async () => {
@@ -91,27 +87,6 @@ export default function RosterPanel() {
     }
   }
 
-  const handleCreateInstitution = async () => {
-    const name = newInstitutionName.trim()
-    if (!name) {
-      setError('Enter an institution name.')
-      return
-    }
-    setCreatingInstitution(true)
-    setError(null)
-    try {
-      const institution = await createInstitution(name)
-      setInstitutions((current) => [...current, institution].sort((a, b) => a.name.localeCompare(b.name)))
-      setInstitutionId(institution.id)
-      setNewInstitutionName('')
-      setShowAddInstitution(false)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create the institution.')
-    } finally {
-      setCreatingInstitution(false)
-    }
-  }
-
   const handleMaintenance = async () => {
     setMaintaining(true)
     setMaintenanceMsg(null)
@@ -163,42 +138,7 @@ export default function RosterPanel() {
           {institutions.length === 0 && (
             <p className="text-[0.72rem] text-[#92400e] mt-[4px]">No institutions yet — add one below to upload a roster.</p>
           )}
-          {showAddInstitution || institutions.length === 0 ? (
-            <div className="mt-[6px] flex gap-[6px]">
-              <input
-                value={newInstitutionName}
-                onChange={(e) => setNewInstitutionName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCreateInstitution() } }}
-                placeholder="Institution name"
-                className="min-w-0 flex-1 rounded-[7px] border border-[#e5e7eb] px-[8px] py-[6px] text-[0.78rem]"
-              />
-              <button
-                type="button"
-                onClick={handleCreateInstitution}
-                disabled={creatingInstitution}
-                className="rounded-[7px] bg-[#0F766E] px-[9px] py-[6px] text-[0.74rem] font-semibold text-white disabled:opacity-50"
-              >
-                {creatingInstitution ? '...' : 'Add'}
-              </button>
-              {institutions.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => { setShowAddInstitution(false); setNewInstitutionName('') }}
-                  className="rounded-[7px] border border-[#e5e7eb] bg-white px-[9px] py-[6px] text-[0.74rem] font-semibold text-[#6b7280]"
-                >
-                  Cancel
-                </button>
-              )}
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setShowAddInstitution(true)}
-              className="mt-[6px] text-[0.74rem] font-semibold text-[#0F766E] bg-transparent border-none cursor-pointer hover:underline"
-            >
-              + Add new institution
-            </button>
-          )}
+          {institutions.length === 0 && <p className="mt-1 text-xs text-amber-800">No institutions yet. Create one from Global Admin → Institutions before importing a roster.</p>}
         </div>
           <div>
             <label className="block text-[0.78rem] font-semibold text-[#374151] mb-[4px]">CSV file</label>

@@ -3,6 +3,7 @@ import type {
   AuditEvent,
   DemoRequest,
   DemoRequestStatus,
+  Consent,
   Institution,
   RosterCommitResult,
   RosterStudent,
@@ -29,6 +30,42 @@ export async function createInstitution(
 ): Promise<Institution> {
   const { data } = await api.post('/v1/admin/institutions', { name, type })
   return data
+}
+
+export interface InstitutionPolicy {
+  id: string
+  name: string
+  type?: string
+  retention_days?: number
+  alert_threshold?: number
+  confidence_floor?: number
+  minor_age_threshold?: number
+  consent_template_id?: string | null
+  consent_reminder_days?: number[] | string
+  consent_expiry_days?: number
+  settings_version?: number
+}
+
+export async function getInstitutionPolicy(): Promise<InstitutionPolicy> {
+  const { data } = await api.get('/institution/settings')
+  return {
+    ...data,
+    consent_reminder_days: typeof data.consent_reminder_days === 'string'
+      ? JSON.parse(data.consent_reminder_days || '[]')
+      : data.consent_reminder_days,
+  }
+}
+
+export async function updateInstitutionPolicy(
+  policy: Partial<Omit<InstitutionPolicy, 'id' | 'settings_version'>>,
+): Promise<InstitutionPolicy> {
+  const { data } = await api.patch('/institution/settings', policy)
+  return {
+    ...data,
+    consent_reminder_days: typeof data.consent_reminder_days === 'string'
+      ? JSON.parse(data.consent_reminder_days || '[]')
+      : data.consent_reminder_days,
+  }
 }
 
 export async function updateInstitution(id: string, patch: { status?: string; name?: string; type?: string }): Promise<Institution> {
@@ -123,6 +160,11 @@ export async function dispatchInstitutionStudentConsent(studentId: string) {
 export async function remindInstitutionStudentConsent(studentId: string) {
   const { data } = await api.post(`/institution/students/${studentId}/remind-consent`)
   return data
+}
+
+export async function updateInstitutionGuardianConsentRecipient(consentId: string, recipientEmail: string) {
+  const { data } = await api.patch(`/institution/consents/${consentId}/guardian-recipient`, { recipient_email: recipientEmail })
+  return data as { consent: Consent; email_sent: boolean; email_error?: string | null }
 }
 
 export async function archiveInstitutionStudent(studentId: string) {

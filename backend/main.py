@@ -219,6 +219,7 @@ from backend.services.consent_service import (
     process_expired_consents,
     dispatch_consents_for_students,
     consents_to_csv,
+    correct_guardian_recipient_and_resend,
 )
 from backend.services.analysis_service import (
     INFERENCE_UNAVAILABLE_MESSAGE,
@@ -6222,10 +6223,15 @@ async def patch_institution_settings(
         or not 1 <= updates["consent_expiry_days"] <= 365
     ):
         raise HTTPException(400, "consent_expiry_days must be between 1 and 365")
+    if "minor_age_threshold" in updates and (
+        not isinstance(updates["minor_age_threshold"], int)
+        or not 13 <= updates["minor_age_threshold"] <= 21
+    ):
+        raise HTTPException(400, "minor_age_threshold must be between 13 and 21")
     if "consent_reminder_days" in updates:
         reminders = updates["consent_reminder_days"]
         if not isinstance(reminders, list) or any(
-            not isinstance(day, int) or day < 1 for day in reminders
+            not isinstance(day, int) or day < 1 or day > 365 for day in reminders
         ):
             raise HTTPException(
                 400, "consent_reminder_days must be a list of positive integers"
@@ -6332,6 +6338,66 @@ async def list_institution_consents(
     ).fetchall()
     conn.close()
     return {"consents": [dict(row) for row in rows], "total": total}
+
+
+@app.patch("/api/institution/consents/{consent_id}/guardian-recipient")
+async def correct_institution_guardian_recipient(
+    consent_id: str,
+    data: dict,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    if user.get("role_type") != "school_admin":
+        raise HTTPException(403, "Only the school administrator can correct a guardian recipient")
+    institution_id = _require_institution_admin(user)
+    consent = get_consent_by_id(consent_id)
+    if not consent or consent.get("recipient_role") != "parent":
+        raise HTTPException(404, "Guardian consent request not found")
+    student = get_student_by_user_id(consent["student_id"])
+    if not student or student.get("institution_id") != institution_id:
+        raise HTTPException(404, "Guardian consent request not found")
+    if not student.get("is_minor"):
+        raise HTTPException(400, "Guardian recipient corrections are only available for minor students")
+    if consent.get("status") not in ("PENDING", "VIEWED", "EXPIRED", "INVALID"):
+        raise HTTPException(400, "Only unanswered guardian requests can be corrected")
+
+    recipient_email = str(data.get("recipient_email") or "").strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient_email):
+        raise HTTPException(400, "Enter a valid parent or guardian email")
+    student_account = get_user_by_id(consent["student_id"])
+    if student_account and recipient_email == str(student_account.get("email") or "").strip().lower():
+        raise HTTPException(400, "A minor cannot receive their own guardian consent link")
+    existing_recipient = get_user_by_email(recipient_email)
+    if existing_recipient and (
+        existing_recipient.get("role_type") != "parent"
+        and existing_recipient.get("user_category") != "parent"
+    ):
+        raise HTTPException(409, "That email belongs to a non-guardian account. Confirm the guardian's own email address.")
+    if student_account and student_account.get("parent_guardian_id"):
+        linked_guardian = get_user_by_id(student_account["parent_guardian_id"])
+        linked_email = str((linked_guardian or {}).get("email") or "").strip().lower()
+        if recipient_email != linked_email:
+            raise HTTPException(409, "This student has a linked guardian account. Update the guardian account through the verified guardian-linking process.")
+    if not student.get("id"):
+        raise HTTPException(404, "Institution roster record not found")
+
+    update_student(student["id"], parent_email_encrypted=encrypt_pii(recipient_email))
+    try:
+        updated = correct_guardian_recipient_and_resend(
+            consent_id,
+            recipient_email,
+            actor_id=user["id"],
+            actor_role=user["role_type"],
+            ip=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    safe_consent = {key: value for key, value in updated.items() if key != "magic_token"}
+    return {
+        "consent": safe_consent,
+        "email_sent": bool(updated.get("email_sent")),
+        "email_error": updated.get("email_error"),
+    }
 
 
 @app.get("/api/institution/assignments")

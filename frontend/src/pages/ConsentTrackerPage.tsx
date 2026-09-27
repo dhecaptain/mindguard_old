@@ -6,6 +6,8 @@ import ConsentDetailDrawer from '../components/consent/ConsentDetailDrawer'
 import BulkConsentUpload from '../components/consent/BulkConsentUpload'
 import type { Consent, ConsentStatus } from '../types'
 import type { StudentDTO } from '../api/counsellor'
+import { updateInstitutionGuardianConsentRecipient } from '../api/admin'
+import { useAuthStore } from '../store'
 
 function formatDate(d?: string) {
   if (!d) return '—'
@@ -284,6 +286,7 @@ function NewConsentModal({ students, onClose, onCreated, onDispatched }: NewCons
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function ConsentTrackerPage() {
+  const role = useAuthStore((state) => state.user?.role_type?.toLowerCase())
   const [tab, setTab] = useState<'consents' | 'roster'>('consents')
   const [filterTab, setFilterTab] = useState('all')
   const [consents, setConsents] = useState<Consent[]>([])
@@ -304,6 +307,9 @@ export default function ConsentTrackerPage() {
   const [detailConsentId, setDetailConsentId] = useState<string | null>(null)
   const [decideConsentId, setDecideConsentId] = useState<string | null>(null)
   const [decideSignature, setDecideSignature] = useState('')
+  const [guardianEditConsentId, setGuardianEditConsentId] = useState<string | null>(null)
+  const [guardianEmailDraft, setGuardianEmailDraft] = useState('')
+  const [guardianNotice, setGuardianNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => { setSearch(searchInput); setPage(0) }, 300)
@@ -350,6 +356,29 @@ export default function ConsentTrackerPage() {
     } finally {
       setActionLoading(null)
     }
+  }
+
+  const saveGuardianEmail = async (consent: Consent) => {
+    const email = guardianEmailDraft.trim().toLowerCase()
+    if (!email) {
+      setGuardianNotice({ type: 'error', text: 'Enter the parent or guardian email address.' })
+      return
+    }
+    setActionLoading(consent.id); setGuardianNotice(null)
+    try {
+      const result = await updateInstitutionGuardianConsentRecipient(consent.id, email)
+      setGuardianEditConsentId(null)
+      setGuardianEmailDraft('')
+      setGuardianNotice({
+        type: result.email_sent ? 'success' : 'error',
+        text: result.email_sent
+          ? `Guardian address updated and a fresh consent link sent to ${email}. The previous link is no longer valid.`
+          : `Guardian address updated, but email delivery was not confirmed${result.email_error ? `: ${result.email_error}` : '.'} Use Remind to retry after checking the address.`,
+      })
+      await load()
+    } catch (e) {
+      setGuardianNotice({ type: 'error', text: e instanceof Error ? e.message : 'Unable to update guardian address.' })
+    } finally { setActionLoading(null) }
   }
 
   const handleExport = async () => {
@@ -528,6 +557,8 @@ export default function ConsentTrackerPage() {
         </div>
       )}
 
+      {guardianNotice && <div role={guardianNotice.type === 'error' ? 'alert' : 'status'} className={`rounded-[10px] border px-[16px] py-[10px] text-[0.82rem] ${guardianNotice.type === 'error' ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>{guardianNotice.text}</div>}
+
       {selected.size > 0 && (
         <div className="flex items-center gap-[10px] rounded-[10px] bg-[#f0fdfa] border border-[#99f6e4] px-[16px] py-[10px]">
           <span className="text-[0.82rem] font-semibold text-[#134e4a]">{selected.size} selected</span>
@@ -656,7 +687,13 @@ export default function ConsentTrackerPage() {
                         {consent.student_name || consent.student_id}
                       </td>
                       <td className="py-[12px] px-[20px]">
-                        <div className="text-[#1f2937]">{consent.recipient_email}</div>
+                        {guardianEditConsentId === consent.id ? (
+                          <div className="min-w-[220px] space-y-2">
+                            <input type="email" value={guardianEmailDraft} onChange={(e) => setGuardianEmailDraft(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void saveGuardianEmail(consent) }} placeholder="parent@example.org" className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" aria-label="Correct parent or guardian email" />
+                            <div className="flex gap-2"><button onClick={() => void saveGuardianEmail(consent)} disabled={isActing} className="rounded-md bg-teal-800 px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-50">{isActing ? 'Sending…' : 'Save & send new link'}</button><button onClick={() => { setGuardianEditConsentId(null); setGuardianEmailDraft('') }} className="text-xs font-semibold text-slate-500">Cancel</button></div>
+                            <p className="text-[0.68rem] text-amber-800">The previous link will be invalidated.</p>
+                          </div>
+                        ) : <div className="flex items-center gap-2"><span className="text-[#1f2937]">{consent.recipient_email}</span>{role === 'school_admin' && consent.recipient_role === 'parent' && ['PENDING', 'VIEWED', 'EXPIRED', 'INVALID'].includes(consent.status) && <button onClick={() => { setGuardianEditConsentId(consent.id); setGuardianEmailDraft(consent.recipient_email) }} className="text-xs font-semibold text-teal-800 underline">Edit email</button>}</div>}
                         <div className="text-[0.7rem] text-[#9ca3af] capitalize">{consent.recipient_role}</div>
                       </td>
                       <td className="py-[12px] px-[20px] text-[#6b7280]">

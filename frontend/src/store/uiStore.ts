@@ -9,7 +9,7 @@ export type PageKey =
   | 'appointments'
   | 'alert-queue' | 'consent-tracker' | 'audit-log'
   | 'admin' | 'counsellors' | 'institutions' | 'assignments' | 'my-accounts'
-  | 'institution' | 'institution-students' | 'institution-counsellors' | 'archived-students'
+  | 'institution' | 'institution-students' | 'institution-counsellors' | 'institution-policy' | 'archived-students'
   | 'notification-preferences'
   | 'profile'
   | 'self-history' | 'self-session'
