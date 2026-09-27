@@ -26,6 +26,7 @@ export default function DemoRequestsPanel() {
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [assignees, setAssignees] = useState<AssignableUser[]>([])
   const [converting, setConverting] = useState<string | null>(null)
   const [scheduling, setScheduling] = useState<string | null>(null)
@@ -82,9 +83,13 @@ export default function DemoRequestsPanel() {
 
   const handleConvert = async (id: string) => {
     setConverting(id)
+    setNotice(null)
     try {
       const result = await convertDemoRequest(id)
       setRequests((rs) => rs.map((r) => r.id === id ? result.demo_request : r))
+      setNotice(result.email_sent
+        ? `Institution provisioned and school-admin invitation queued for ${result.staff.email}.`
+        : `Institution provisioned, but the school-admin invitation email was not confirmed${result.email_error ? `: ${result.email_error}` : '. Check email delivery and resend the invitation.'}`)
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -149,6 +154,11 @@ export default function DemoRequestsPanel() {
       {error && (
         <div className="mx-[20px] my-[12px] rounded-[8px] bg-[#fee2e2] border border-[#fca5a5] px-[12px] py-[8px] text-[0.78rem] text-[#991b1b]">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div role="status" className="mx-[20px] my-[12px] rounded-[8px] border border-[#fcd34d] bg-[#fffbeb] px-[12px] py-[8px] text-[0.78rem] text-[#92400e]">
+          {notice}
         </div>
       )}
 

@@ -3180,15 +3180,26 @@ async def institution_setup(user: dict = Depends(require_auth)):
     institution = get_institution_by_id(institution_id)
     conn = __import__("backend.database", fromlist=["get_db"]).get_db()
     staff_rows = conn.execute(
-        "SELECT role_type, status FROM users WHERE institution_id = ? AND role_type IN ('school_admin','counsellor')",
+        "SELECT role_type, status, profile_completed_at FROM users WHERE institution_id = ? AND role_type IN ('school_admin','counsellor')",
         (institution_id,),
     ).fetchall()
     student_count = conn.execute(
-        "SELECT COUNT(*) FROM students WHERE institution_id = ? AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM students WHERE institution_id = ? AND deleted_at IS NULL AND archived_at IS NULL",
         (institution_id,),
     ).fetchone()[0]
     assignment_count = conn.execute(
         "SELECT COUNT(*) FROM counsellor_student_assignments WHERE institution_id = ? AND active = 1",
+        (institution_id,),
+    ).fetchone()[0]
+    students_without_operational_assignment = conn.execute(
+        "SELECT COUNT(*) FROM students s "
+        "WHERE s.institution_id = ? AND s.deleted_at IS NULL AND s.archived_at IS NULL "
+        "AND (s.user_id IS NULL OR NOT EXISTS ("
+        "SELECT 1 FROM counsellor_student_assignments a "
+        "JOIN users c ON c.id = a.counsellor_id "
+        "WHERE a.student_id = s.user_id AND a.institution_id = s.institution_id AND a.active = 1 "
+        "AND c.role_type = 'counsellor' AND c.status IN ('approved','active') "
+        "AND c.profile_completed_at IS NOT NULL))",
         (institution_id,),
     ).fetchone()[0]
     consent_pending = conn.execute(
@@ -3207,7 +3218,9 @@ async def institution_setup(user: dict = Depends(require_auth)):
     active_counsellors = sum(
         1
         for row in staff_rows
-        if row["role_type"] == "counsellor" and row["status"] in ("approved", "active")
+        if row["role_type"] == "counsellor"
+        and row["status"] in ("approved", "active")
+        and row["profile_completed_at"]
     )
     checks = [
         {
@@ -3217,7 +3230,7 @@ async def institution_setup(user: dict = Depends(require_auth)):
         },
         {
             "key": "counsellor",
-            "label": "Invite at least one counsellor",
+            "label": "Activate an operational counsellor with a complete profile",
             "complete": active_counsellors > 0,
         },
         {
@@ -3228,7 +3241,7 @@ async def institution_setup(user: dict = Depends(require_auth)):
         {
             "key": "assignments",
             "label": "Assign students to counsellors",
-            "complete": student_count == 0 or assignment_count >= student_count,
+            "complete": student_count > 0 and students_without_operational_assignment == 0,
         },
     ]
     next_action = next(
@@ -6360,6 +6373,27 @@ async def list_institution_assignment_history(user: dict = Depends(require_auth)
     return [dict(row) for row in rows]
 
 
+def _institution_student_access_status(
+    *,
+    account_id: str | None,
+    account_status: str | None,
+    invitation_pending: bool,
+    assigned: bool,
+    is_minor: bool,
+    consent_active: bool,
+) -> str:
+    """Return the first blocking condition before counsellor access is ready."""
+    if not account_id:
+        return "account_link_pending"
+    if invitation_pending or account_status not in ("approved", "active"):
+        return "account_activation_pending"
+    if not assigned:
+        return "counsellor_assignment_pending"
+    if not consent_active:
+        return "guardian_consent_pending" if is_minor else "student_consent_pending"
+    return "ready"
+
+
 @app.get("/api/institution/assignable")
 async def list_institution_assignable(user: dict = Depends(require_auth)):
     institution_id = _require_institution_admin(user)
@@ -6391,18 +6425,15 @@ async def list_institution_assignable(user: dict = Depends(require_auth)):
             if row["current_consent_id"]
             else None
         )
-        if not row["user_id"]:
-            access_status = "account_link_pending"
-        elif row["is_minor"] and (not consent or consent.get("status") != "ACCEPTED"):
-            access_status = "guardian_consent_pending"
-        elif (
-            not row["current_consent_id"]
-            or not consent
-            or consent.get("status") != "ACCEPTED"
-        ):
-            access_status = "student_consent_pending"
-        else:
-            access_status = "ready"
+        consent_active = bool(row["user_id"] and get_active_consent(row["user_id"]))
+        access_status = _institution_student_access_status(
+            account_id=row["user_id"],
+            account_status=row["account_status"],
+            invitation_pending=bool(row["invitation_token_hash"]),
+            assigned=bool(row["assignment_id"]),
+            is_minor=bool(row["is_minor"]),
+            consent_active=consent_active,
+        )
         student_items.append(
             {
                 "id": row["roster_id"],
@@ -6415,6 +6446,8 @@ async def list_institution_assignable(user: dict = Depends(require_auth)):
                 "counsellor_id": row["counsellor_id"],
                 "counsellor_name": row["counsellor_name"],
                 "access_status": access_status,
+                "counsellor_access_ready": access_status == "ready",
+                "consent_active": consent_active,
             }
         )
     counsellor_items = []
@@ -6959,12 +6992,22 @@ async def institution_student_status(user: dict = Depends(require_auth)):
                 "counsellor_id": row["counsellor_id"],
                 "counsellor_name": row["counsellor_name"],
                 "invitation_pending": invitation_pending,
-                "access_status": "ready"
-                if consent and consent.get("status") == "ACCEPTED"
-                else (
-                    "guardian_consent_pending"
-                    if row["is_minor"]
-                    else "student_consent_pending"
+                "access_status": _institution_student_access_status(
+                    account_id=row["account_id"],
+                    account_status=row["account_status"],
+                    invitation_pending=invitation_pending,
+                    assigned=bool(row["counsellor_id"]),
+                    is_minor=bool(row["is_minor"]),
+                    consent_active=bool(
+                        row["account_id"] and get_active_consent(row["account_id"])
+                    ),
+                ),
+                "counsellor_access_ready": bool(
+                    row["account_id"]
+                    and not invitation_pending
+                    and row["account_status"] in ("approved", "active")
+                    and row["counsellor_id"]
+                    and get_active_consent(row["account_id"])
                 ),
                 "onboarding_state": state,
             }

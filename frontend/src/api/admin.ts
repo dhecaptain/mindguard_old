@@ -68,7 +68,11 @@ export async function getInstitutionStaff(): Promise<InstitutionStaff[]> {
   return data
 }
 
-export async function inviteInstitutionStaff(payload: { name: string; email: string; role_type: 'school_admin' | 'counsellor'; institution_id?: string }) {
+export async function inviteInstitutionStaff(payload: { name: string; email: string; role_type: 'school_admin' | 'counsellor'; institution_id?: string }): Promise<{
+  email_sent: boolean
+  email_error?: string | null
+  staff: { id: string; email: string; name: string; role_type: string; status?: string }
+}> {
   const { data } = await api.post('/institution/staff', payload)
   return data
 }
@@ -96,6 +100,8 @@ export interface InstitutionStudentStatus {
   counsellor_name?: string | null
   invitation_pending: boolean
   access_status?: string
+  counsellor_access_ready?: boolean
+  consent_active?: boolean
   onboarding_state: string
 }
 
