@@ -39,33 +39,44 @@ PERM_DEMO_MANAGE = "demo.manage"
 # View the full compliance / audit trail.
 PERM_AUDIT_VIEW = "audit.view"
 
-ALL_PERMISSIONS = frozenset({
-    PERM_ANALYSIS_RUN,
-    PERM_ROSTER_UPLOAD,
-    PERM_STUDENTS_VIEW,
-    PERM_CONSENT_MANAGE,
-    PERM_CONSENT_RESPOND,
-    PERM_DEMO_MANAGE,
-    PERM_AUDIT_VIEW,
-})
+ALL_PERMISSIONS = frozenset(
+    {
+        PERM_ANALYSIS_RUN,
+        PERM_ROSTER_UPLOAD,
+        PERM_STUDENTS_VIEW,
+        PERM_CONSENT_MANAGE,
+        PERM_CONSENT_RESPOND,
+        PERM_DEMO_MANAGE,
+        PERM_AUDIT_VIEW,
+    }
+)
 
 
 # ── Role → permission matrix ───────────────────────────────────────────
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
+    # Workplace roles use their own endpoint guards in backend.routes.workplace.
+    # They intentionally inherit no school/counsellor permission grants.
+    "company_admin": frozenset(),
+    "workplace_employee": frozenset(),
+    "workplace_provider": frozenset(),
     "student": frozenset({PERM_CONSENT_RESPOND}),
-    "counsellor": frozenset({
-        PERM_ANALYSIS_RUN,
-        PERM_STUDENTS_VIEW,
-        PERM_CONSENT_MANAGE,
-    }),
+    "counsellor": frozenset(
+        {
+            PERM_ANALYSIS_RUN,
+            PERM_STUDENTS_VIEW,
+            PERM_CONSENT_MANAGE,
+        }
+    ),
     # School admin = counsellor duties + roster/bulk-consent workflow (Brief §1.1/§2.5).
-    "school_admin": frozenset({
-        PERM_ANALYSIS_RUN,
-        PERM_STUDENTS_VIEW,
-        PERM_CONSENT_MANAGE,
-        PERM_ROSTER_UPLOAD,
-    }),
+    "school_admin": frozenset(
+        {
+            PERM_ANALYSIS_RUN,
+            PERM_STUDENTS_VIEW,
+            PERM_CONSENT_MANAGE,
+            PERM_ROSTER_UPLOAD,
+        }
+    ),
     "admin": frozenset(ALL_PERMISSIONS),
 }
 

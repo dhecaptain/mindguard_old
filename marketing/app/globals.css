@@ -48,7 +48,7 @@ body {
 }
 
 .mg-eyebrow {
-  @apply text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-forest-500;
+  @apply text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-[#28664f];
 }
 
 .mg-card {

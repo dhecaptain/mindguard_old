@@ -18,7 +18,10 @@ test.describe('Marketing demo request (Delivery Brief §5.5)', () => {
     await page.getByPlaceholder('Jordan Blake').fill('E2E Test Person')
     await page.getByPlaceholder('jordan@yourschool.edu').fill(DEMO_EMAIL)
     await page.getByPlaceholder('Riverside High').fill('E2E Test Academy')
-    await page.getByLabel(/I consent to MindGuard contacting me/).check()
+    await page.getByPlaceholder('Head of Pastoral Care').fill('School Counsellor')
+    await page.getByPlaceholder('UK').fill('Kenya')
+    await page.getByLabel('Student population *').selectOption('Under 500')
+    await page.getByLabel(/I agree to be contacted by MindGuard/).check()
     await page.getByRole('button', { name: 'Request demo' }).click()
 
     await page.waitForURL('**/thank-you')

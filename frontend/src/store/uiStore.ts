@@ -11,6 +11,8 @@ export type PageKey =
   | 'admin' | 'counsellors' | 'institutions' | 'assignments' | 'my-accounts'
   | 'institution' | 'institution-students' | 'institution-counsellors' | 'institution-policy' | 'archived-students'
   | 'notification-preferences'
+  | 'workplace'
+  | 'workplace-admin'
   | 'profile'
   | 'self-history' | 'self-session'
 

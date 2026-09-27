@@ -263,6 +263,7 @@ from backend.logging_setup import (
     set_request_context,
     setup_logging,
 )
+from backend.routes.workplace import router as workplace_router
 
 _background_tasks: list[asyncio.Task] = []
 
@@ -297,6 +298,8 @@ if _SENTRY_DSN:
 
 
 app = FastAPI(title="MindGuard API", version="2.0.0")
+
+app.include_router(workplace_router)
 
 
 @app.exception_handler(InferenceUnavailableError)
@@ -390,6 +393,12 @@ def _require_account_owner(user: dict) -> None:
 
 
 def _auth_user_category(user: dict) -> str:
+    if user.get("role_type") == "workplace_employee":
+        return "workplace_employee"
+    if user.get("role_type") == "company_admin":
+        return "company_staff"
+    if user.get("role_type") == "workplace_provider":
+        return "workplace_provider"
     if user.get("role_type") in {"admin", "school_admin", "counsellor"}:
         return "staff"
     return user.get("user_category") or "pending"
@@ -1273,6 +1282,7 @@ async def request_own_platform_consent(
     """
     _require_account_owner(user)
     from backend.services.platform_registry import get_platform, normalize_platform
+
     raw_platforms = data.get("platforms")
     if isinstance(raw_platforms, str):
         raw_platforms = [raw_platforms]
@@ -1296,7 +1306,11 @@ async def request_own_platform_consent(
             existing = set()
     new_platforms = requested - existing
     if not new_platforms:
-        return {"ok": True, "status": "already_consented", "platforms": sorted(existing)}
+        return {
+            "ok": True,
+            "status": "already_consented",
+            "platforms": sorted(existing),
+        }
 
     for consent in get_consents_by_student(user["id"]):
         if consent.get("status") not in {"PENDING", "VIEWED"}:
@@ -1317,7 +1331,9 @@ async def request_own_platform_consent(
             }
 
     roster = get_student_by_user_id(user["id"])
-    is_minor = bool(roster and roster.get("is_minor")) or user.get("user_category") == "minor"
+    is_minor = (
+        bool(roster and roster.get("is_minor")) or user.get("user_category") == "minor"
+    )
     recipient_role = "parent" if is_minor else "student"
     recipient_email = str(user.get("email") or "").strip()
     if is_minor:
@@ -1348,7 +1364,10 @@ async def request_own_platform_consent(
             mode="ON_DEMAND",
         )
         consent = dispatch_consent(
-            consent["id"], actor_id=user["id"], ip=_client_ip(request), actor_role="student"
+            consent["id"],
+            actor_id=user["id"],
+            ip=_client_ip(request),
+            actor_role="student",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -1357,7 +1376,11 @@ async def request_own_platform_consent(
         raise HTTPException(500, "Failed to send the platform consent request.")
 
     write_audit(
-        user["id"], "student", "PLATFORM_CONSENT_REQUESTED", "consent", consent["id"],
+        user["id"],
+        "student",
+        "PLATFORM_CONSENT_REQUESTED",
+        "consent",
+        consent["id"],
         payload={"platforms": sorted(new_platforms), "recipient_role": recipient_role},
         ip=_client_ip(request),
     )
@@ -1365,7 +1388,8 @@ async def request_own_platform_consent(
         user["id"],
         "Additional platform consent requested",
         "Review the consent email before connecting the new platform."
-        if not is_minor else "Your guardian has been asked to approve the additional platform.",
+        if not is_minor
+        else "Your guardian has been asked to approve the additional platform.",
         "consent",
     )
     return {
@@ -1540,7 +1564,9 @@ async def verify_own_social_account(
                     break
             if username:
                 lookup_url = f"{parsed.scheme}://{parsed.netloc}/api/v1/accounts/lookup?acct={quote(username)}"
-                async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as lookup_client:
+                async with httpx.AsyncClient(
+                    timeout=12.0, follow_redirects=True
+                ) as lookup_client:
                     lookup = await lookup_client.get(
                         lookup_url,
                         headers={
@@ -3242,7 +3268,8 @@ async def institution_setup(user: dict = Depends(require_auth)):
         {
             "key": "assignments",
             "label": "Assign students to counsellors",
-            "complete": student_count > 0 and students_without_operational_assignment == 0,
+            "complete": student_count > 0
+            and students_without_operational_assignment == 0,
         },
     ]
     next_action = next(
@@ -4234,12 +4261,18 @@ async def create_new_appointment(
         )
     if mode == "google_meet":
         parsed_location = urlparse(location)
-        if parsed_location.scheme != "https" or (parsed_location.hostname or "").lower() not in {
+        if parsed_location.scheme != "https" or (
+            parsed_location.hostname or ""
+        ).lower() not in {
             "meet.google.com",
         }:
-            raise HTTPException(400, "Google Meet appointments require an https://meet.google.com link")
+            raise HTTPException(
+                400, "Google Meet appointments require an https://meet.google.com link"
+            )
     elif urlparse(location).scheme in {"http", "https"}:
-        raise HTTPException(400, "In-person appointments require a physical location, not a web link")
+        raise HTTPException(
+            400, "In-person appointments require a physical location, not a web link"
+        )
     student = get_user_by_id(student_id)
     if not student or student.get("role_type") != "student":
         raise HTTPException(404, "Student not found")
@@ -4281,22 +4314,26 @@ async def create_new_appointment(
         f"{counsellor.get('name', 'Your counsellor')} proposed a wellbeing appointment.",
         "appointment",
     )
-    email_sent, email_error = send_html_email(
-        student.get("email") or "",
-        "New MindGuard appointment request",
-        (
-            f"<p>Hello {html_lib.escape(student.get('name') or 'there')},</p>"
-            f"<p>{html_lib.escape(counsellor.get('name') or 'Your counsellor')} proposed a "
-            f"{html_lib.escape(mode.replace('_', ' '))} appointment.</p>"
-            f"<p><strong>When:</strong> {html_lib.escape(appointment['start_at'])} to "
-            f"{html_lib.escape(appointment['end_at'])} ({html_lib.escape(timezone_name)})<br>"
-            f"<strong>Location:</strong> {html_lib.escape(location)}</p>"
-            f"<p>Sign in to MindGuard to accept or decline this appointment.</p>"
-        ),
-        related_type="appointment",
-        related_id=appointment["id"],
-        metadata={"student_id": student_id, "mode": mode},
-    ) if student.get("email") else (False, "Student email is missing")
+    email_sent, email_error = (
+        send_html_email(
+            student.get("email") or "",
+            "New MindGuard appointment request",
+            (
+                f"<p>Hello {html_lib.escape(student.get('name') or 'there')},</p>"
+                f"<p>{html_lib.escape(counsellor.get('name') or 'Your counsellor')} proposed a "
+                f"{html_lib.escape(mode.replace('_', ' '))} appointment.</p>"
+                f"<p><strong>When:</strong> {html_lib.escape(appointment['start_at'])} to "
+                f"{html_lib.escape(appointment['end_at'])} ({html_lib.escape(timezone_name)})<br>"
+                f"<strong>Location:</strong> {html_lib.escape(location)}</p>"
+                f"<p>Sign in to MindGuard to accept or decline this appointment.</p>"
+            ),
+            related_type="appointment",
+            related_id=appointment["id"],
+            metadata={"student_id": student_id, "mode": mode},
+        )
+        if student.get("email")
+        else (False, "Student email is missing")
+    )
     write_audit(
         user["id"],
         user["role_type"],
@@ -4441,7 +4478,9 @@ async def get_appointment_session_record(
         ).fetchone()
         conn.close()
         if not consent:
-            raise HTTPException(403, "An active guardian consent relationship is required")
+            raise HTTPException(
+                403, "An active guardian consent relationship is required"
+            )
         return {
             "appointment_id": appointment_id,
             "guardian_message": record.get("guardian_message"),
@@ -4462,7 +4501,9 @@ async def complete_appointment_with_record(
         raise HTTPException(404, "Appointment not found")
     _appointment_actor_can_access(user, appointment)
     if user.get("role_type") not in {"counsellor", "admin"}:
-        raise HTTPException(403, "Only the counsellor can complete an appointment record")
+        raise HTTPException(
+            403, "Only the counsellor can complete an appointment record"
+        )
     if appointment.get("status") != "CONFIRMED":
         raise HTTPException(409, "Only a confirmed appointment can be completed")
     if get_appointment_record(appointment_id):
@@ -4477,14 +4518,19 @@ async def complete_appointment_with_record(
     if len(private_summary) > 8000 or len(student_message or "") > 2000:
         raise HTTPException(400, "Session notes exceed the allowed length")
     if len(guardian_message or "") > 2000 or len(referral_summary or "") > 4000:
-        raise HTTPException(400, "Shared or referral content exceeds the allowed length")
+        raise HTTPException(
+            400, "Shared or referral content exceeds the allowed length"
+        )
 
     student = get_user_by_id(appointment["student_id"])
     if not student:
         raise HTTPException(404, "Student not found")
     guardian_id = student.get("parent_guardian_id")
     if guardian_message and not guardian_id:
-        raise HTTPException(400, "A linked guardian account is required before sharing with a parent or guardian")
+        raise HTTPException(
+            400,
+            "A linked guardian account is required before sharing with a parent or guardian",
+        )
     if guardian_message and guardian_id:
         from backend.database import get_db
 
@@ -4496,7 +4542,10 @@ async def complete_appointment_with_record(
         ).fetchone()
         conn.close()
         if not consent:
-            raise HTTPException(403, "An active guardian consent relationship is required before sharing this update")
+            raise HTTPException(
+                403,
+                "An active guardian consent relationship is required before sharing this update",
+            )
 
     follow_up_at = (data.get("follow_up_at") or "").strip() or None
     if follow_up_at:
@@ -4522,9 +4571,19 @@ async def complete_appointment_with_record(
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     if student_message:
-        _safe_notify(student["id"], "New update from your counsellor", "Your counsellor has shared a wellbeing update after your appointment.", "appointment")
+        _safe_notify(
+            student["id"],
+            "New update from your counsellor",
+            "Your counsellor has shared a wellbeing update after your appointment.",
+            "appointment",
+        )
     if guardian_message and guardian_id:
-        _safe_notify(guardian_id, "A wellbeing update is available", "A counsellor has shared an update about the appointment.", "appointment")
+        _safe_notify(
+            guardian_id,
+            "A wellbeing update is available",
+            "A counsellor has shared an update about the appointment.",
+            "appointment",
+        )
         guardian = get_user_by_id(guardian_id)
         if guardian and guardian.get("email"):
             send_html_email(
@@ -4693,14 +4752,19 @@ async def get_user_directory(
     if role:
         users = [u for u in users if u["role_type"] == role]
     allowed = [
-        candidate for candidate in users
+        candidate
+        for candidate in users
         if candidate.get("id") != user["id"]
         and _communication_allowed(user, candidate.get("id", ""))
     ]
     if user["role_type"] == "admin":
         return allowed
     return [
-        {"id": candidate["id"], "name": candidate.get("name") or "User", "role_type": candidate["role_type"]}
+        {
+            "id": candidate["id"],
+            "name": candidate.get("name") or "User",
+            "role_type": candidate["role_type"],
+        }
         for candidate in allowed
     ]
 
@@ -4829,7 +4893,10 @@ def _require_user_communication_access(user: dict, other_id: str) -> dict:
     if other_id == user["id"]:
         raise HTTPException(400, "Cannot communicate with yourself")
     active_statuses = {"active", "approved"}
-    if str(user.get("status") or "").lower() not in active_statuses or str(other.get("status") or "").lower() not in active_statuses:
+    if (
+        str(user.get("status") or "").lower() not in active_statuses
+        or str(other.get("status") or "").lower() not in active_statuses
+    ):
         raise HTTPException(403, "Messaging is available only between active accounts")
     user_role = user.get("role_type")
     other_role = other.get("role_type")
@@ -4839,7 +4906,9 @@ def _require_user_communication_access(user: dict, other_id: str) -> dict:
     if other_role == "admin":
         if user_role in staff_roles:
             return other
-        raise HTTPException(403, "Students can message their assigned counsellor or linked guardian")
+        raise HTTPException(
+            403, "Students can message their assigned counsellor or linked guardian"
+        )
     if user_role == "counsellor" and other_role == "student":
         _require_counsellor_student_access(user, other_id, require_consent=False)
         return other
@@ -6348,7 +6417,9 @@ async def correct_institution_guardian_recipient(
     user: dict = Depends(require_auth),
 ):
     if user.get("role_type") != "school_admin":
-        raise HTTPException(403, "Only the school administrator can correct a guardian recipient")
+        raise HTTPException(
+            403, "Only the school administrator can correct a guardian recipient"
+        )
     institution_id = _require_institution_admin(user)
     consent = get_consent_by_id(consent_id)
     if not consent or consent.get("recipient_role") != "parent":
@@ -6357,7 +6428,9 @@ async def correct_institution_guardian_recipient(
     if not student or student.get("institution_id") != institution_id:
         raise HTTPException(404, "Guardian consent request not found")
     if not student.get("is_minor"):
-        raise HTTPException(400, "Guardian recipient corrections are only available for minor students")
+        raise HTTPException(
+            400, "Guardian recipient corrections are only available for minor students"
+        )
     if consent.get("status") not in ("PENDING", "VIEWED", "EXPIRED", "INVALID"):
         raise HTTPException(400, "Only unanswered guardian requests can be corrected")
 
@@ -6365,19 +6438,30 @@ async def correct_institution_guardian_recipient(
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient_email):
         raise HTTPException(400, "Enter a valid parent or guardian email")
     student_account = get_user_by_id(consent["student_id"])
-    if student_account and recipient_email == str(student_account.get("email") or "").strip().lower():
-        raise HTTPException(400, "A minor cannot receive their own guardian consent link")
+    if (
+        student_account
+        and recipient_email == str(student_account.get("email") or "").strip().lower()
+    ):
+        raise HTTPException(
+            400, "A minor cannot receive their own guardian consent link"
+        )
     existing_recipient = get_user_by_email(recipient_email)
     if existing_recipient and (
         existing_recipient.get("role_type") != "parent"
         and existing_recipient.get("user_category") != "parent"
     ):
-        raise HTTPException(409, "That email belongs to a non-guardian account. Confirm the guardian's own email address.")
+        raise HTTPException(
+            409,
+            "That email belongs to a non-guardian account. Confirm the guardian's own email address.",
+        )
     if student_account and student_account.get("parent_guardian_id"):
         linked_guardian = get_user_by_id(student_account["parent_guardian_id"])
         linked_email = str((linked_guardian or {}).get("email") or "").strip().lower()
         if recipient_email != linked_email:
-            raise HTTPException(409, "This student has a linked guardian account. Update the guardian account through the verified guardian-linking process.")
+            raise HTTPException(
+                409,
+                "This student has a linked guardian account. Update the guardian account through the verified guardian-linking process.",
+            )
     if not student.get("id"):
         raise HTTPException(404, "Institution roster record not found")
 
@@ -6392,7 +6476,9 @@ async def correct_institution_guardian_recipient(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    safe_consent = {key: value for key, value in updated.items() if key != "magic_token"}
+    safe_consent = {
+        key: value for key, value in updated.items() if key != "magic_token"
+    }
     return {
         "consent": safe_consent,
         "email_sent": bool(updated.get("email_sent")),
@@ -6486,11 +6572,6 @@ async def list_institution_assignable(user: dict = Depends(require_auth)):
     conn.close()
     student_items = []
     for row in students:
-        consent = (
-            get_consent_by_id(row["current_consent_id"])
-            if row["current_consent_id"]
-            else None
-        )
         consent_active = bool(row["user_id"] and get_active_consent(row["user_id"]))
         access_status = _institution_student_access_status(
             account_id=row["user_id"],
@@ -7436,6 +7517,7 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
             role_title=data.role_title,
             country=data.country,
             student_count_range=data.student_count_range,
+            employee_population_range=data.employee_population_range,
             message=data.message,
             heard_about_us=data.heard_about_us,
             consent_to_contact=data.consent_to_contact,
@@ -7883,13 +7965,23 @@ async def v1_student_analyze(
             403,
             "This account is not ownership-verified. Ask the student to complete account verification before analysis.",
         )
-    if account.get("availability_status") not in (None, "available") or account.get("reverification_required"):
-        raise HTTPException(403, "This social account is unavailable and must be verified again before analysis.")
+    if account.get("availability_status") not in (None, "available") or account.get(
+        "reverification_required"
+    ):
+        raise HTTPException(
+            403,
+            "This social account is unavailable and must be verified again before analysis.",
+        )
     requested_account_id = (data.get("account_id") or "").strip()
     if not requested_account_id:
-        raise HTTPException(400, "account_id is required; select one of the student's verified accounts.")
+        raise HTTPException(
+            400,
+            "account_id is required; select one of the student's verified accounts.",
+        )
     if requested_account_id != account.get("id"):
-        raise HTTPException(400, "The selected account does not belong to this student.")
+        raise HTTPException(
+            400, "The selected account does not belong to this student."
+        )
     # The client must not be able to switch the analysis target by supplying a
     # different handle. The target is always the student's verified account.
     data["platform"] = requested_platform
@@ -7905,6 +7997,7 @@ async def v1_student_analyze(
             except Exception:
                 consented = set()
             from backend.services.platform_registry import normalize_platform
+
             consented = {
                 normalize_platform(str(value)) or str(value).strip().lower()
                 for value in consented
@@ -7930,12 +8023,24 @@ async def v1_student_analyze(
                     )
 
     try:
-        from backend.services.self_analysis import SelfAnalysisError, retrieve_verified_account
+        from backend.services.self_analysis import (
+            SelfAnalysisError,
+            retrieve_verified_account,
+        )
+
         retrieved = await retrieve_verified_account(student_id, requested_platform)
         if retrieved.get("status") not in ("ok", "no_data"):
-            raise HTTPException(422, retrieved.get("message") or "The verified account could not be retrieved.")
+            raise HTTPException(
+                422,
+                retrieved.get("message")
+                or "The verified account could not be retrieved.",
+            )
         if not retrieved.get("posts"):
-            raise HTTPException(422, retrieved.get("message") or "No analyzable public content was available for this verified account.")
+            raise HTTPException(
+                422,
+                retrieved.get("message")
+                or "No analyzable public content was available for this verified account.",
+            )
         result = run_consented_student_analysis(
             student_id=student_id,
             posts=retrieved.get("posts"),
@@ -7980,7 +8085,9 @@ async def v1_student_analyze(
 
 
 @app.get("/api/v1/students/{student_id}/social-accounts")
-async def v1_student_social_accounts(student_id: str, user: dict = Depends(require_auth)):
+async def v1_student_social_accounts(
+    student_id: str, user: dict = Depends(require_auth)
+):
     student = get_user_by_id(student_id)
     if not student or student.get("role_type") != "student":
         raise HTTPException(404, "Student not found")
@@ -7988,7 +8095,9 @@ async def v1_student_social_accounts(student_id: str, user: dict = Depends(requi
     return {"accounts": get_social_accounts(student_id)}
 
 
-@app.post("/api/v1/students/{student_id}/social-accounts/{platform}/request-reverification")
+@app.post(
+    "/api/v1/students/{student_id}/social-accounts/{platform}/request-reverification"
+)
 async def v1_request_student_account_reverification(
     student_id: str, platform: str, request: Request, user: dict = Depends(require_auth)
 ):
@@ -7997,6 +8106,7 @@ async def v1_request_student_account_reverification(
         raise HTTPException(404, "Student not found")
     _require_counsellor_student_access(user, student_id, require_consent=False)
     from backend.services.platform_registry import normalize_platform
+
     slug = normalize_platform(platform)
     if not slug:
         raise HTTPException(400, "Unknown platform")
@@ -8015,8 +8125,20 @@ async def v1_request_student_account_reverification(
         f"Your counsellor asked you to verify your {slug} account again. Open My Accounts, choose Get a new code, place it in the public profile bio/about section, then select Verify ownership.",
         "system",
     )
-    write_audit(user["id"], user["role_type"], "SOCIAL_ACCOUNT_REVERIFICATION_REQUESTED", "social_account", account.get("id", slug), payload={"student_id": student_id, "platform": slug}, ip=_client_ip(request))
-    return {"ok": True, "account": account, "message": "The student was asked to verify this account again."}
+    write_audit(
+        user["id"],
+        user["role_type"],
+        "SOCIAL_ACCOUNT_REVERIFICATION_REQUESTED",
+        "social_account",
+        account.get("id", slug),
+        payload={"student_id": student_id, "platform": slug},
+        ip=_client_ip(request),
+    )
+    return {
+        "ok": True,
+        "account": account,
+        "message": "The student was asked to verify this account again.",
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -8171,7 +8293,7 @@ async def v1_add_group_members(
         member_user = get_user_by_id(uid)
         if member_user and member_user["role_type"] == "student":
             if user["role_type"] != "admin":
-                    _require_counsellor_student_access(user, uid, require_consent=False)
+                _require_counsellor_student_access(user, uid, require_consent=False)
             result = add_group_member(group_id, uid, role="member")
             if result:
                 added.append(result)
@@ -8289,6 +8411,7 @@ def _message_change_cursor(user_id: str) -> tuple[str, str, str, str]:
 @app.get("/api/messages/events")
 async def stream_message_events(request: Request, user: dict = Depends(require_auth)):
     """Authenticated SSE change signal; message bodies remain on scoped APIs."""
+
     async def event_stream():
         cursor = _message_change_cursor(user["id"])
         yield "event: ready\ndata: {}\n\n"

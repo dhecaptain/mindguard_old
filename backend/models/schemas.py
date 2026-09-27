@@ -232,11 +232,12 @@ class DemoRequestCreate(BaseModel):
     work_email: str = Field(..., min_length=3, max_length=255)
     organisation: str = Field(..., min_length=1, max_length=255)
     organisation_type: str = Field(
-        default="other", pattern="^(k12|university|clinic|research|other)$"
+        default="other", pattern="^(k12|university|company|clinic|research|other)$"
     )
     role_title: Optional[str] = Field(default=None, max_length=255)
     country: Optional[str] = Field(default=None, max_length=64)
     student_count_range: Optional[str] = Field(default=None, max_length=32)
+    employee_population_range: Optional[str] = Field(default=None, max_length=32)
     message: Optional[str] = Field(default=None, max_length=5000)
     heard_about_us: Optional[str] = Field(default=None, max_length=64)
     consent_to_contact: bool = True
@@ -254,6 +255,7 @@ class DemoRequestResponse(BaseModel):
     role_title: Optional[str] = None
     country: Optional[str] = None
     student_count_range: Optional[str] = None
+    employee_population_range: Optional[str] = None
     message: Optional[str] = None
     heard_about_us: Optional[str] = None
     status: str

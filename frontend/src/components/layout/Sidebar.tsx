@@ -58,6 +58,7 @@ const SCHOOL_ADMIN_NAV_ITEMS = [
 const ADMIN_NAV_ITEMS = [
   { key: 'admin', icon: 'ti ti-shield-check', label: 'Dashboard' },
   { key: 'institutions', icon: 'ti ti-building-community', label: 'Institutions' },
+  { key: 'workplace-admin', icon: 'ti ti-building-skyscraper', label: 'Workplace pilot' },
   { key: 'counsellors', icon: 'ti ti-stethoscope', label: 'Counsellors' },
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'students', icon: 'ti ti-school', label: 'Students' },
@@ -69,6 +70,10 @@ const ADMIN_NAV_ITEMS = [
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ]
 
+const WORKPLACE_NAV_ITEMS = [
+  { key: 'workplace', icon: 'ti ti-heart-handshake', label: 'Workplace wellbeing' },
+]
+
 function RolePill({ role }: { role?: string }) {
   const r = role?.toLowerCase() || 'user'
   const styles: Record<string, string> = {
@@ -76,6 +81,9 @@ function RolePill({ role }: { role?: string }) {
     counsellor: 'bg-[#d1fae5] text-[#065f46]',
     school_admin: 'bg-[#d1fae5] text-[#065f46]',
     admin: 'bg-[#fef3c7] text-[#92400e]',
+    company_admin: 'bg-[#dbeafe] text-[#1e40af]',
+    workplace_employee: 'bg-[#d1fae5] text-[#065f46]',
+    workplace_provider: 'bg-[#ede9fe] text-[#5b21b6]',
   }
   return (
     <div className={`rounded-full px-[8px] py-[2px] text-[0.65rem] font-bold uppercase flex-shrink-0 ${styles[r] || 'bg-[rgba(15,118,110,0.15)] text-[#34d399]'}`}>
@@ -103,10 +111,13 @@ export default function Sidebar() {
   const isAdmin = role === 'admin'
   const isAdult = user?.user_category === 'adult'
   const isInstitutionStudent = user?.user_category === 'institution_managed'
+  const isWorkplace = ['company_admin', 'workplace_employee', 'workplace_provider'].includes(role)
   const isDesktop = useMediaQuery('(min-width: 768px)')
   const isCollapsed = isDesktop && sidebarCollapsed
 
-  const navItems = isAdmin
+  const navItems = isWorkplace
+    ? WORKPLACE_NAV_ITEMS
+    : isAdmin
     ? ADMIN_NAV_ITEMS.map((item) =>
         item.key === 'alert-queue' && openAlertCount > 0 ? { ...item, badge: openAlertCount } : item
       )
@@ -133,7 +144,7 @@ export default function Sidebar() {
     video: Boolean(video?.ok),
   }
 
-  const sectionLabel = isAdmin ? 'Admin' : role === 'school_admin' ? 'School Admin' : isCounsellor ? 'Counsellor' : 'Student'
+  const sectionLabel = isWorkplace ? (role === 'company_admin' ? 'Company admin' : role === 'workplace_provider' ? 'Care provider' : 'Employee') : isAdmin ? 'Admin' : role === 'school_admin' ? 'School Admin' : isCounsellor ? 'Counsellor' : 'Student'
 
   // Fetch open alert count for counsellors and admins
   useEffect(() => {
@@ -151,11 +162,12 @@ export default function Sidebar() {
 
   // Poll notifications every 30 seconds + fetch preferences
   useEffect(() => {
+    if (isWorkplace) return
     fetchNotifications()
     fetchPreferences()
     const interval = setInterval(fetchNotifications, 30000)
     return () => clearInterval(interval)
-  }, [fetchNotifications, fetchPreferences])
+  }, [fetchNotifications, fetchPreferences, isWorkplace])
 
   // Close notification panel on outside click
   useEffect(() => {

@@ -54,6 +54,7 @@ import GuardianSetupPage from './pages/GuardianSetupPage'
 import GuardianDashboardPage from './pages/GuardianDashboardPage'
 import AdminArchivedStudentsPage from './pages/AdminArchivedStudentsPage'
 import InstitutionPolicyPage from './pages/InstitutionPolicyPage'
+import WorkplacePage, { WorkplaceAdminPage, WorkplaceJoinPage, WorkplaceTermsPage } from './pages/WorkplacePage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -94,11 +95,16 @@ function PageRouter() {
   const role = useAuthStore((s) => s.user?.role_type?.toLowerCase())
   const userCategory = useAuthStore((s) => s.user?.user_category)
 
+  if (role === 'company_admin' || role === 'workplace_employee' || role === 'workplace_provider') {
+    return <WorkplacePage />
+  }
+
   if (role === 'admin') {
     switch (currentPage) {
       case 'admin': return <AdminPage />
       case 'counsellors': return <AdminCounsellorsPage />
       case 'institutions': return <AdminInstitutionsPage />
+      case 'workplace-admin': return <WorkplaceAdminPage />
       case 'assignments': return <AdminCounsellorsPage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
@@ -305,6 +311,10 @@ export default function App() {
     return <ConsentPortalPage token={token} />
   }
 
+  if (window.location.pathname === '/workplace/join') {
+    return <WorkplaceJoinPage />
+  }
+
   if (window.location.pathname === '/guardian/setup') {
     return <GuardianSetupPage />
   }
@@ -328,12 +338,16 @@ export default function App() {
     return <SignInPage onSuccess={() => {}} />
   }
 
+  const userCat = (useAuthStore.getState().user as unknown as { user_category?: string })?.user_category
+  const roleType = (useAuthStore.getState().user as unknown as { role_type?: string })?.role_type
+
   if (!termsAccepted) {
+    if (['company_admin', 'workplace_employee', 'workplace_provider'].includes(String(roleType))) {
+      return <WorkplaceTermsPage />
+    }
     return <TermsPage onAccepted={() => {}} />
   }
 
-  const userCat = (useAuthStore.getState().user as unknown as { user_category?: string })?.user_category
-  const roleType = (useAuthStore.getState().user as unknown as { role_type?: string })?.role_type
   const isStaff = roleType === 'admin' || roleType === 'school_admin' || roleType === 'counsellor' || userCat === 'staff'
   if (roleType === 'school_admin' || roleType === 'counsellor') {
     const profileCompleted = (useAuthStore.getState().user as unknown as { profile_completed?: boolean })?.profile_completed

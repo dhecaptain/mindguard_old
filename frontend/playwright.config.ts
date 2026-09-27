@@ -28,7 +28,7 @@ export default defineConfig({
     {
       name: 'marketing',
       testMatch: /marketing-demo\.spec\.ts/,
-      use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:3000' },
+      use: { ...devices['Desktop Chrome'], baseURL: 'http://localhost:3100' },
     },
   ],
   webServer: [
@@ -58,9 +58,9 @@ export default defineConfig({
       },
     },
     {
-      command: 'npm run dev',
+      command: 'npm run dev -- --port 3100',
       cwd: path.resolve(__dirname, '..', 'marketing'),
-      url: 'http://localhost:3000',
+      url: 'http://localhost:3100',
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
       env: {

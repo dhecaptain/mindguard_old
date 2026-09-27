@@ -14,14 +14,14 @@ const instrument = Instrument_Serif({
 })
 
 export const metadata: Metadata = {
-  title: 'MindGuard — Consent-first student wellbeing monitoring',
+  title: 'MindGuard — Privacy-first wellbeing support',
   description:
-    'MindGuard helps school and university counselling teams identify early signs of distress in consented digital content. Powered by Mental-RoBERTa, reviewed by humans, built for trust.',
+    'MindGuard supports school wellbeing teams and a voluntary workplace wellbeing pilot with privacy boundaries, human support and protected aggregate reporting.',
   metadataBase: new URL('https://mindguard.ai'),
   openGraph: {
-    title: 'MindGuard — Consent-first student wellbeing monitoring',
+    title: 'MindGuard — Privacy-first wellbeing support',
     description:
-      'Catch the signals of distress — before a crisis. Consent-first AI decision support for school and university counsellors.',
+      'Privacy-first wellbeing support for schools, universities and voluntary workplace programmes.',
     type: 'website',
   },
 }
@@ -33,6 +33,7 @@ const FOOTER_COLS: { title: string; links: { href: string; label: string }[] }[]
       { href: '/product', label: 'Product' },
       { href: '/for-schools', label: 'For schools' },
       { href: '/for-universities', label: 'For universities' },
+      { href: '/for-businesses', label: 'For businesses' },
       { href: '/pricing', label: 'Pricing' },
       { href: '/security', label: 'Security' },
     ],

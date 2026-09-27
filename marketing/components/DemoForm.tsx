@@ -6,12 +6,14 @@ import { useRouter } from 'next/navigation'
 const ORG_TYPES = [
   { value: 'k12', label: 'K-12 school / district' },
   { value: 'university', label: 'University / college' },
+  { value: 'company', label: 'Company / employer' },
   { value: 'clinic', label: 'Clinic / counselling practice' },
   { value: 'research', label: 'Research organisation' },
   { value: 'other', label: 'Other' },
 ]
 
 const COUNT_RANGES = ['Under 500', '500–1,000', '1,001–5,000', '5,001–10,000', '10,000+']
+const EMPLOYEE_RANGES = ['Under 50', '50–199', '200–499', '500–999', '1,000+']
 
 const FREE_EMAIL_DOMAINS = new Set(['gmail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com', 'aol.com'])
 
@@ -44,6 +46,7 @@ export default function DemoForm() {
     role_title: '',
     country: '',
     student_count_range: '',
+    employee_population_range: '',
     message: '',
     heard_about_us: '',
     website: '', // honeypot — humans never see or fill this
@@ -79,7 +82,7 @@ export default function DemoForm() {
     form.organisation.trim() &&
     form.role_title.trim() &&
     form.country.trim() &&
-    form.student_count_range &&
+    (form.organisation_type === 'company' ? form.employee_population_range : form.student_count_range) &&
     consentToContact
 
   const freeEmailDomain = (() => {
@@ -88,7 +91,7 @@ export default function DemoForm() {
     return FREE_EMAIL_DOMAINS.has(domain)
   })()
   const showFreeEmailWarning =
-    (form.organisation_type === 'k12' || form.organisation_type === 'university') && freeEmailDomain
+    (form.organisation_type === 'k12' || form.organisation_type === 'university' || form.organisation_type === 'company') && freeEmailDomain
 
   const handleSubmit = async () => {
     if (!valid || status === 'submitting') return
@@ -121,6 +124,8 @@ export default function DemoForm() {
           work_email: form.work_email.trim(),
           organisation: form.organisation.trim(),
           consent_to_contact: consentToContact,
+          student_count_range: form.organisation_type === 'company' ? '' : form.student_count_range,
+          employee_population_range: form.organisation_type === 'company' ? form.employee_population_range : '',
           recaptcha_token: token,
         }),
       })
@@ -195,7 +200,7 @@ export default function DemoForm() {
           <input className={inputCls} type="email" value={form.work_email} onChange={set('work_email')} placeholder="jordan@yourschool.edu" />
           {showFreeEmailWarning && (
             <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              For institutional sign-ups we recommend a school/work email address so our team can
+              For organisation sign-ups we recommend a school/work email address so our team can
               verify your organisation. A personal address is fine if you do not have one.
             </p>
           )}
@@ -228,10 +233,10 @@ export default function DemoForm() {
           <input className={inputCls} value={form.country} onChange={set('country')} placeholder="UK" />
         </div>
         <div>
-          <label className={labelCls} htmlFor="student-pop">Student population *</label>
-          <select id="student-pop" className={inputCls} value={form.student_count_range} onChange={set('student_count_range')}>
+          <label className={labelCls} htmlFor="student-pop">{form.organisation_type === 'company' ? 'Employee population *' : 'Student population *'}</label>
+          <select id="student-pop" className={inputCls} value={form.organisation_type === 'company' ? form.employee_population_range : form.student_count_range} onChange={set(form.organisation_type === 'company' ? 'employee_population_range' : 'student_count_range')}>
             <option value="">Select a range...</option>
-            {COUNT_RANGES.map((c) => (
+            {(form.organisation_type === 'company' ? EMPLOYEE_RANGES : COUNT_RANGES).map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>

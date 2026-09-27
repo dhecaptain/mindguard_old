@@ -1,7 +1,7 @@
 export type RiskLevel = 'low' | 'moderate' | 'high' | 'critical'
 export type Classification = 'Suicidal' | 'Non-Suicidal'
 export type InputMode = 'text' | 'image'
-export type RoleType = 'student' | 'parent' | 'counsellor' | 'school_admin' | 'admin'
+export type RoleType = 'student' | 'parent' | 'counsellor' | 'school_admin' | 'admin' | 'company_admin' | 'workplace_employee' | 'workplace_provider'
 
 export interface AnalysisResult {
   prob: number
@@ -78,7 +78,7 @@ export interface UserInfo {
   terms_accepted?: boolean
   dob?: string
   parent_email?: string
-  user_category?: 'staff' | 'adult' | 'minor' | 'parent' | 'institution_managed' | 'pending'
+  user_category?: 'staff' | 'adult' | 'minor' | 'parent' | 'institution_managed' | 'pending' | 'company_staff' | 'workplace_employee' | 'workplace_provider'
   onboarding_completed?: boolean
   institution_id?: string | null
   profile_completed?: boolean

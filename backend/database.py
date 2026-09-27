@@ -1887,7 +1887,7 @@ def get_institution_by_id(inst_id: str) -> dict | None:
 def list_institutions(limit: int = 500) -> list:
     conn = get_db()
     rows = conn.execute(
-        "SELECT * FROM institutions ORDER BY name COLLATE NOCASE ASC LIMIT ?",
+        "SELECT * FROM institutions WHERE lower(type) != 'company' ORDER BY name COLLATE NOCASE ASC LIMIT ?",
         (limit,),
     ).fetchall()
     conn.close()
@@ -3366,6 +3366,7 @@ def create_demo_request(
     role_title: str | None = None,
     country: str | None = None,
     student_count_range: str | None = None,
+    employee_population_range: str | None = None,
     message: str | None = None,
     heard_about_us: str | None = None,
     consent_to_contact: bool = True,
@@ -3376,9 +3377,9 @@ def create_demo_request(
     conn.execute(
         """INSERT INTO demo_requests (
             id, full_name, work_email, organisation, organisation_type,
-            role_title, country, student_count_range, message, heard_about_us,
+            role_title, country, student_count_range, employee_population_range, message, heard_about_us,
             status, consent_to_contact, created_at, updated_at, work_email_hash
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             rid,
             encrypt_pii(full_name),
@@ -3388,6 +3389,7 @@ def create_demo_request(
             role_title,
             country,
             student_count_range,
+            employee_population_range,
             message,
             heard_about_us,
             "new",
@@ -3929,7 +3931,9 @@ def mark_social_account_verified(student_id: str, platform: str) -> dict | None:
     return _strip_credentials(dict(row)) if row and cur.rowcount else None
 
 
-def request_social_account_reverification(student_id: str, platform: str) -> dict | None:
+def request_social_account_reverification(
+    student_id: str, platform: str
+) -> dict | None:
     slug = normalize_platform(platform) or platform.strip().lower()
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db()
@@ -3939,7 +3943,10 @@ def request_social_account_reverification(student_id: str, platform: str) -> dic
         (now, student_id, slug),
     )
     conn.commit()
-    row = conn.execute("SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?", (student_id, slug)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM student_social_accounts WHERE student_id = ? AND platform = ?",
+        (student_id, slug),
+    ).fetchone()
     conn.close()
     return _strip_credentials(dict(row)) if row and cur.rowcount else None
 
