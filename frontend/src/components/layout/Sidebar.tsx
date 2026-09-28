@@ -35,6 +35,8 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'counsellor-dashboard', icon: 'ti ti-layout-dashboard', label: 'Dashboard' },
   { key: 'institution', icon: 'ti ti-building-community', label: 'Institution' },
   { key: 'students', icon: 'ti ti-users', label: 'Students' },
+  { key: 'batch', icon: 'ti ti-player-play', label: 'Batch Analysis' },
+  { key: 'unified', icon: 'ti ti-chart-dots-3', label: 'Multi-Platform' },
   { key: 'referrals', icon: 'ti ti-link', label: 'Referrals' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },

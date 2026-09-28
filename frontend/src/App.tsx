@@ -31,6 +31,8 @@ import CrisisResourcesPage from './pages/CrisisResourcesPage'
 import TeamPage from './pages/TeamPage'
 import CounsellorDashboardPage from './pages/CounsellorDashboardPage'
 import StudentManagementPage from './pages/StudentManagementPage'
+import CounsellorBatchAnalysisPage from './pages/CounsellorBatchAnalysisPage'
+import CounsellorMultiPlatformPage from './pages/CounsellorMultiPlatformPage'
 import ReferralsPage from './pages/ReferralsPage'
 import CommunicationsPage from './pages/CommunicationsPage'
 import StudentCommunicationsPage from './pages/StudentCommunicationsPage'
@@ -153,6 +155,8 @@ function PageRouter() {
       case 'institution': return <InstitutionWorkspacePage />
       case 'counsellor-dashboard': return <CounsellorDashboardPage />
       case 'students': return <StudentManagementPage />
+      case 'batch': return <CounsellorBatchAnalysisPage />
+      case 'unified': return <CounsellorMultiPlatformPage />
       case 'referrals': return <ReferralsPage />
       case 'communications': return <CommunicationsPage />
       case 'appointments': return <AppointmentsPage />

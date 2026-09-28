@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { StudentDTO, Referral, Conversation, DashboardData, StudentDetail } from '../api/counsellor'
-import type { Group, GroupMessage, GroupConversationPreview } from '../types'
+import type { Group, GroupMessage, GroupConversationPreview, DirectMessage } from '../types'
 
 interface CounsellorState {
   students: StudentDTO[]
@@ -8,12 +8,13 @@ interface CounsellorState {
   referrals: Referral[]
   conversations: Conversation[]
   activeConversation: string | null
-  messages: Record<string, any[]>
+  messages: Record<string, DirectMessage[]>
   dashboard: DashboardData | null
   referralCount: number
   loading: boolean
   error: string | null
   requestedStudentId: string | null
+  analysisStudentId: string | null
 
   // Group messaging
   groups: Group[]
@@ -28,14 +29,15 @@ interface CounsellorState {
   updateReferralStatus: (id: string, status: string, notes?: string) => void
   setConversations: (conversations: Conversation[]) => void
   setActiveConversation: (id: string | null) => void
-  setMessages: (otherId: string, messages: any[]) => void
-  addMessage: (otherId: string, msg: any) => void
+  setMessages: (otherId: string, messages: DirectMessage[]) => void
+  addMessage: (otherId: string, msg: DirectMessage) => void
   setDashboard: (d: DashboardData | null) => void
   setReferralCount: (n: number) => void
   updateStudentStatus: (id: string, status: string) => void
   setLoading: (v: boolean) => void
   setError: (e: string | null) => void
   requestStudentWorkspace: (id: string | null) => void
+  setAnalysisStudentId: (id: string | null) => void
 
   // Group actions
   setGroups: (groups: Group[]) => void
@@ -58,6 +60,7 @@ export const useCounsellorStore = create<CounsellorState>((set) => ({
   loading: false,
   error: null,
   requestedStudentId: null,
+  analysisStudentId: null,
 
   // Group messaging
   groups: [],
@@ -97,6 +100,7 @@ export const useCounsellorStore = create<CounsellorState>((set) => ({
   setLoading: (v) => set({ loading: v }),
   setError: (e) => set({ error: e }),
   requestStudentWorkspace: (id) => set({ requestedStudentId: id }),
+  setAnalysisStudentId: (id) => set({ analysisStudentId: id }),
 
   // Group actions
   setGroups: (groups) => set({ groups }),
