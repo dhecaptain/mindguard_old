@@ -1,13 +1,30 @@
 #!/usr/bin/env sh
 set -u
 
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mkdir -p "$REPO_ROOT/logs"
+
+if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+  PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
+else
+  PYTHON_BIN="python3"
+fi
+
+JWT_SECRET_VALUE="${JWT_SECRET:-dev-precommit-jwt-secret}"
+ENCRYPTION_KEY_VALUE="${ENCRYPTION_KEY:-$($PYTHON_BIN -c 'import secrets; print(secrets.token_hex(32))')}"
+export JWT_SECRET="$JWT_SECRET_VALUE"
+export ENCRYPTION_KEY="$ENCRYPTION_KEY_VALUE"
+
 run_gate() {
   local name="$1"
   shift
   echo "→ $name"
-  "$@" > logs/pre-commit.log 2>&1
+  (
+    cd "$REPO_ROOT"
+    "$@" > "$REPO_ROOT/logs/pre-commit.log" 2>&1
+  )
   local rc=$?
-  cat logs/pre-commit.log
+  cat "$REPO_ROOT/logs/pre-commit.log"
   if [ "$rc" -ne 0 ]; then
     echo "❌ $name failed (exit $rc)"
     exit 1
@@ -15,13 +32,16 @@ run_gate() {
 }
 
 echo "🔍 vibe-check: lint-staged + tsc + tests"
-npx lint-staged > logs/pre-commit.log 2>&1
+(
+  cd "$REPO_ROOT"
+  npx lint-staged > "$REPO_ROOT/logs/pre-commit.log" 2>&1
+)
 rc=$?
-cat logs/pre-commit.log
+cat "$REPO_ROOT/logs/pre-commit.log"
 if [ "$rc" -ne 0 ]; then echo "❌ lint-staged failed — piping to agent"; exit 1; fi
 
-run_gate "typecheck frontend" frontend/node_modules/.bin/tsc --noEmit --project frontend/tsconfig.app.json
-run_gate "typecheck marketing" marketing/node_modules/.bin/tsc --noEmit --project marketing/tsconfig.json
-run_gate "pytest quick" python3 -m pytest backend/tests -q --tb=line
+run_gate "typecheck frontend" sh -c 'cd "$1" && npx tsc --noEmit --project tsconfig.app.json' sh "$REPO_ROOT/frontend"
+run_gate "typecheck marketing" sh -c 'cd "$1" && npx tsc --noEmit --project tsconfig.json' sh "$REPO_ROOT/marketing"
+run_gate "pytest quick" env PYTHONPATH="$REPO_ROOT:$REPO_ROOT/backend" "$PYTHON_BIN" -m pytest "$REPO_ROOT/backend/tests" -q --tb=line
 
 echo "✅ pre-commit passed"
