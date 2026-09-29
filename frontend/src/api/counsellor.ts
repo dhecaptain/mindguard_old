@@ -5,6 +5,7 @@ import type {
   AuditEvent, Note, TimelineEntry,
   Group, GroupDetail, GroupMessage,
   ConversationsResponse, NotificationPreference, DirectMessage,
+  SocioeconomicSignal,
 } from '../types'
 
 export interface StudentDTO {
@@ -52,7 +53,7 @@ export interface StudentDetail {
     platforms: string[]
     risk_score?: number | null
     insights?: string | string[] | null
-    findings?: { posts?: Array<{ platform?: string; text?: string; risk_score?: number; level?: string; date?: string; url?: string }>; result?: Record<string, unknown> } | null
+    findings?: { posts?: Array<{ platform?: string; text?: string; risk_score?: number; level?: string; date?: string; url?: string }>; result?: { signals?: Record<string, SocioeconomicSignal[]>; [key: string]: unknown } } | null
   }>
   consent_status?: {
     enforced: boolean
@@ -86,6 +87,7 @@ export interface StudentAnalysisResult {
   session_id?: string
   posts?: Array<{ platform: string; text: string; risk_score: number; level: string; date?: string | null; url?: string | null }>
   analysis_summary?: { analysed_posts: number; platform: string; review_note: string }
+  signals?: Record<string, SocioeconomicSignal[]>
 }
 
 export interface StudentSocialAccount {

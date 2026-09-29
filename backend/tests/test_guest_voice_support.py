@@ -50,9 +50,7 @@ def test_guest_analysis_requires_single_use_consent_and_is_counsellor_scoped(db)
         assert created.status_code == 201, created.text
         case_id = created.json()["id"]
         token = parse_qs(urlparse(created.json()["consent_url"]).query)["token"][0]
-        preview = client.get(
-            "/api/v1/guest-analysis/consent", params={"token": token}
-        )
+        preview = client.get("/api/v1/guest-analysis/consent", params={"token": token})
         assert preview.status_code == 200
         assert preview.json()["accounts"] == [
             {
@@ -116,12 +114,18 @@ def test_guest_decline_deletes_preentered_handles_and_invalidates_link(db):
         )
         assert declined.status_code == 200
         assert declined.json()["status"] == "declined"
-        assert client.get(
-            "/api/v1/guest-analysis/consent", params={"token": token}
-        ).status_code == 400
-        assert client.post(
-            f"/api/v1/guest-analysis/cases/{case_id}/run", headers=headers
-        ).status_code == 403
+        assert (
+            client.get(
+                "/api/v1/guest-analysis/consent", params={"token": token}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                f"/api/v1/guest-analysis/cases/{case_id}/run", headers=headers
+            ).status_code
+            == 403
+        )
 
     conn = db.get_db()
     handles = conn.execute(
@@ -169,6 +173,58 @@ def test_expired_unanswered_guest_consent_purges_handles(db):
     assert handles == 0
     assert case["status"] == "expired_deleted"
     assert case["deleted_at"]
+
+
+def test_guest_analysis_returns_context_signals_for_interactive_reports(
+    db, monkeypatch
+):
+    from backend.routes import guest_analysis
+
+    owner = _counsellor(db, "counsellor.reporting@example.org")
+
+    async def fake_fetch(_handle):
+        return [
+            {"text": "I was laid off and I am behind on rent."},
+            {"text": "A quieter day with a little support."},
+        ]
+
+    async def fake_predict(_texts):
+        return [0.62, 0.18]
+
+    monkeypatch.setattr(guest_analysis, "_fetch_reddit", fake_fetch)
+    monkeypatch.setattr(guest_analysis, "predict_batch", fake_predict)
+
+    with _client() as client:
+        headers = _login(client, owner["email"])
+        created = client.post(
+            "/api/v1/guest-analysis/cases",
+            headers=headers,
+            json={"platforms": {"reddit": "visitor_reporting"}},
+        )
+        assert created.status_code == 201, created.text
+        case_id = created.json()["id"]
+        attested = client.post(
+            f"/api/v1/guest-analysis/cases/{case_id}/attest",
+            headers=headers,
+            json={"confirmed": True},
+        )
+        assert attested.status_code == 200, attested.text
+
+        analysed = client.post(
+            f"/api/v1/guest-analysis/cases/{case_id}/run", headers=headers
+        )
+        assert analysed.status_code == 200, analysed.text
+        result = analysed.json()["results"][0]
+        assert result["status"] == "complete"
+        assert result["signals"]["Employment"]
+        assert result["signals"]["Housing"]
+
+        reopened = client.get(
+            f"/api/v1/guest-analysis/cases/{case_id}", headers=headers
+        )
+        assert reopened.status_code == 200, reopened.text
+        persisted = reopened.json()["sessions"][0]["results"][0]
+        assert persisted["signals"] == result["signals"]
 
 
 def test_voice_is_disabled_until_review_and_provider_configuration(db, monkeypatch):
@@ -238,7 +294,9 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
     ):
         monkeypatch.setenv(name, "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-only-provider-key")
-    monkeypatch.setenv("VOICE_SAFETY_SALT", "unit-test-only-safety-salt-at-least-32-chars")
+    monkeypatch.setenv(
+        "VOICE_SAFETY_SALT", "unit-test-only-safety-salt-at-least-32-chars"
+    )
     captured = {}
 
     class FakeResponse:
@@ -270,7 +328,9 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
     with _client() as client:
         headers = _login(client, user["email"])
         availability = client.get("/api/v1/voice/availability", headers=headers)
-        assert availability.status_code == 200 and availability.json()["is_minor"] is True
+        assert (
+            availability.status_code == 200 and availability.json()["is_minor"] is True
+        )
         start = client.post(
             "/api/v1/voice/sessions",
             headers=headers,
@@ -280,7 +340,10 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
         assert start.json()["max_duration_seconds"] == 900
         assert start.json()["consent_version"] == "voice-v1"
         assert "young person" in captured["payload"]["session"]["instructions"]
-        assert "No care professional is currently connected" in captured["payload"]["session"]["instructions"]
+        assert (
+            "No care professional is currently connected"
+            in captured["payload"]["session"]["instructions"]
+        )
         duplicate = client.post(
             "/api/v1/voice/sessions",
             headers=headers,
@@ -311,7 +374,9 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
     assert transcript not in str(dict(session))
 
 
-def test_voice_alert_does_not_reach_workplace_provider_after_participation_withdrawal(db):
+def test_voice_alert_does_not_reach_workplace_provider_after_participation_withdrawal(
+    db,
+):
     from datetime import datetime, timedelta, timezone
     from backend.services.crypto import encrypt_pii
 
@@ -333,8 +398,14 @@ def test_voice_alert_does_not_reach_workplace_provider_after_participation_withd
     active_until = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
     conn = db.get_db()
     conn.execute("UPDATE institutions SET status='ACTIVE' WHERE id=?", (company["id"],))
-    conn.execute("UPDATE users SET status='approved',user_category='workplace_employee' WHERE id=?", (employee["id"],))
-    conn.execute("UPDATE users SET status='approved',user_category='workplace_provider' WHERE id=?", (provider["id"],))
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='workplace_employee' WHERE id=?",
+        (employee["id"],),
+    )
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='workplace_provider' WHERE id=?",
+        (provider["id"],),
+    )
     conn.execute(
         "INSERT INTO workplace_settings (company_id,work_email_domains_json,created_at,updated_at) VALUES (?,?,?,?)",
         (company["id"], '["voice-company.test"]', now, now),
@@ -345,7 +416,15 @@ def test_voice_alert_does_not_reach_workplace_provider_after_participation_withd
     )
     conn.execute(
         "INSERT INTO workplace_provider_credentials (provider_id,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_by,reviewed_at) VALUES (?,?,?,?,?,'verified',?,?)",
-        (provider["id"], encrypt_pii("Counsellor"), encrypt_pii("Qualification"), encrypt_pii("REG-VOICE"), encrypt_pii("reviewed"), provider["id"], now),
+        (
+            provider["id"],
+            encrypt_pii("Counsellor"),
+            encrypt_pii("Qualification"),
+            encrypt_pii("REG-VOICE"),
+            encrypt_pii("reviewed"),
+            provider["id"],
+            now,
+        ),
     )
     conn.execute(
         "INSERT INTO workplace_providers (company_id,provider_id,status,created_at) VALUES (?,?,'active',?)",

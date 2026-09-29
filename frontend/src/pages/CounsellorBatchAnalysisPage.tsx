@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../lib/plotly'
+import SocioEconomicPanel from '../components/analysis/SocioEconomicPanel'
 import {
   analyzeStudent,
   getStudentDetail,
@@ -118,6 +119,20 @@ export default function CounsellorBatchAnalysisPage() {
 
   const studentName = students.find((student) => student.id === studentId)?.name
   const completedRows = rows.filter((row) => row.status === 'complete' && row.result?.rolling_score != null && Number.isFinite(Number(row.result.rolling_score)))
+  const combinedSignals = useMemo(() => {
+    const signals: NonNullable<StudentAnalysisResult['signals']> = {}
+    for (const row of completedRows) {
+      for (const [category, items] of Object.entries(row.result?.signals || {})) {
+        const existing = signals[category] || []
+        for (const item of items) {
+          if (!existing.some((current) => current.keyword === item.keyword && current.snippet === item.snippet)) existing.push(item)
+        }
+        signals[category] = existing
+      }
+    }
+    return signals
+  }, [completedRows])
+  const signalCount = Object.values(combinedSignals).reduce((sum, items) => sum + items.length, 0)
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-5 md:p-8">
@@ -180,6 +195,11 @@ export default function CounsellorBatchAnalysisPage() {
           <h3 className="font-bold text-slate-900">Completed platform comparison</h3>
           <p className="mt-1 text-xs text-slate-500">Missing or failed platforms remain visible above and are never treated as zero.</p>
           <Plot data={[{ type: 'bar', x: completedRows.map(row => row.account.platform), y: completedRows.map(row => Math.max(0, Math.min(1, Number(row.result?.rolling_score)))), marker: { color: '#0f766e' }, text: completedRows.map(row => `${(Number(row.result?.rolling_score) * 100).toFixed(0)}%`), textposition: 'outside' }]} layout={{ autosize: true, height: 320, margin: { l: 50, r: 20, t: 20, b: 45 }, yaxis: { range: [0, 1.1], tickformat: '.0%' }, paper_bgcolor: 'transparent', plot_bgcolor: '#fff' }} config={{ responsive: true, displaylogo: false, toImageButtonOptions: { filename: `mindguard-${studentId}-batch-comparison` } }} className="w-full" />
+        </div>}
+        {signalCount > 0 && <div className="mt-5 rounded-xl border border-slate-200 p-4">
+          <h3 className="font-bold text-slate-900">Combined socio-economic context</h3>
+          <p className="mt-1 text-xs text-slate-500">Keyword matches across completed platforms are supporting context, not proof of intent.</p>
+          <div className="mt-3"><SocioEconomicPanel signals={combinedSignals} /></div>
         </div>}
         {rows.some((row) => row.status === 'complete') && <p className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-900">Decision-support signals are shown separately by platform. They are not a diagnosis and are not combined into an unvalidated single score. Review source context with the student.</p>}
       </section>}

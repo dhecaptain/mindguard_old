@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../lib/plotly'
 import api from '../api/client'
+import SocioEconomicPanel from '../components/analysis/SocioEconomicPanel'
+import type { SocioeconomicSignal } from '../types'
 
-type Result = { platform:string;status:string;overall?:number;n_posts?:number;message?:string;ownership_status:string;analysed_at:string;posts?:Array<{text:string;risk_score?:number}> }
+type Result = { platform:string;status:string;overall?:number;n_posts?:number;message?:string;ownership_status:string;analysed_at:string;posts?:Array<{text:string;risk_score?:number}>;signals?:Record<string,SocioeconomicSignal[]> }
 type GuestCase = { id:string;case_code:string;status:string;consent_method?:string;consented_at?:string;expires_at:string;created_at:string;notes?:Array<{type:string;private_note:string;visitor_update?:string;created_at:string}> }
 
 const inputClass = 'min-h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm focus:border-teal-700 focus:outline-none'
@@ -19,7 +21,13 @@ export default function GuestAnalysisPage() {
   const [referralNote,setReferralNote] = useState('')
 
   const loadCases = async () => setCases((await api.get('/v1/guest-analysis/cases')).data)
-  useEffect(()=>{ void loadCases().catch(()=>setMessage('Could not load guest cases.')) },[])
+  useEffect(() => {
+    let active = true
+    api.get('/v1/guest-analysis/cases')
+      .then(({ data }) => { if (active) setCases(data) })
+      .catch(() => { if (active) setMessage('Could not load guest cases.') })
+    return () => { active = false }
+  }, [])
   const selected = useMemo(()=>Object.fromEntries(Object.entries(handles).filter(([,v])=>v.trim()).map(([k,v])=>[k,v.trim()])),[handles])
 
   const createCase = async () => {
@@ -53,6 +61,31 @@ export default function GuestAnalysisPage() {
   const closeCase=async()=>{if(!activeCase||!window.confirm('Close this guest case? Further analysis will stop.'))return;try{await api.post(`/v1/guest-analysis/cases/${activeCase.id}/close`);setActiveCase({...activeCase,status:'closed'});setMessage('Guest case closed.')}catch(e){setMessage(e instanceof Error?e.message:'Unable to close the case.')}}
   const deleteCase=async()=>{if(!activeCase||!window.confirm('Permanently remove this guest case’s handles, retrieved content, results and notes now? This cannot be undone.'))return;try{await api.delete(`/v1/guest-analysis/cases/${activeCase.id}`);setActiveCase(null);setResults([]);setMessage('Guest case sensitive data was permanently deleted; a minimal audit entry remains.');await loadCases()}catch(e){setMessage(e instanceof Error?e.message:'Unable to delete the guest case.')}}
   const complete=results.filter(r=>r.status==='complete'&&Number.isFinite(Number(r.overall)))
+  const riskBuckets = useMemo(() => {
+    const counts = { Low: 0, Moderate: 0, High: 0, Critical: 0 }
+    for (const result of complete) for (const post of result.posts || []) {
+      const score = Number(post.risk_score)
+      if (!Number.isFinite(score)) continue
+      if (score >= .75) counts.Critical += 1
+      else if (score >= .55) counts.High += 1
+      else if (score >= .35) counts.Moderate += 1
+      else counts.Low += 1
+    }
+    return counts
+  }, [complete])
+  const combinedSignals = useMemo(() => {
+    const signals: Record<string, SocioeconomicSignal[]> = {}
+    for (const result of complete) for (const [category, items] of Object.entries(result.signals || {})) {
+      const existing = signals[category] || []
+      for (const item of items) {
+        if (!existing.some((current) => current.keyword === item.keyword && current.snippet === item.snippet)) existing.push(item)
+      }
+      signals[category] = existing
+    }
+    return signals
+  }, [complete])
+  const riskBucketTotal = Object.values(riskBuckets).reduce((sum, count) => sum + count, 0)
+  const signalCount = Object.values(combinedSignals).reduce((sum, items) => sum + items.length, 0)
 
   return <main className="mx-auto max-w-6xl space-y-6 p-5 md:p-8">
     <header><p className="text-xs font-bold uppercase tracking-[.16em] text-teal-700">Pseudonymous visitor workflow</p><h1 className="mt-1 text-3xl font-bold text-slate-900">Guest analysis</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">For an in-person visitor who does not want a MindGuard account. Document consent before analysis. Counsellor attestation records authorization but does not prove ownership of a social account.</p></header>
@@ -78,6 +111,20 @@ export default function GuestAnalysisPage() {
         {r.status === 'complete' ? <><p className="mt-3 text-3xl font-bold text-teal-800">{(Number(r.overall) * 100).toFixed(0)}%</p><p className="text-sm text-slate-500">{r.n_posts} public items reviewed</p></> : <p className="mt-3 text-sm text-red-700">{r.message}</p>}
         <p className="mt-3 text-xs text-amber-800">Visitor-authorized · ownership not technically verified</p>
       </article>)}</div>
+      {riskBucketTotal > 0 && <div className="rounded-2xl border bg-white p-5 shadow-sm">
+        <h2 className="font-bold">Reviewed-item distribution</h2>
+        <p className="mt-1 text-sm text-slate-500">Interactive distribution of the individual public items reviewed across the authorized guest platforms.</p>
+        <Plot data={[{type:'pie',labels:Object.keys(riskBuckets),values:Object.values(riskBuckets),hole:.45,marker:{colors:['#059669','#d97706','#ea580c','#dc2626']},textinfo:'label+percent'}]} layout={{height:320,margin:{l:30,r:30,t:20,b:20},paper_bgcolor:'transparent',showlegend:true}} config={{responsive:true,displaylogo:false,toImageButtonOptions:{filename:`mindguard-${activeCase?.case_code||'guest'}-risk-distribution`}}} className="w-full"/>
+      </div>}
+      {signalCount > 0 && <div className="rounded-2xl border bg-white p-5 shadow-sm">
+        <h2 className="font-bold">Combined socio-economic context</h2>
+        <p className="mt-1 text-sm text-slate-500">Keyword matches provide supporting context only and are not proof of suicidal intent.</p>
+        <div className="mt-4"><SocioEconomicPanel signals={combinedSignals}/></div>
+      </div>}
+      <div className="overflow-hidden rounded-2xl border bg-white shadow-sm">
+        <div className="border-b p-5"><h2 className="font-bold">Detailed authorized result table</h2></div>
+        <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="p-3">Platform</th><th className="p-3">Status</th><th className="p-3">Signal</th><th className="p-3">Items</th><th className="p-3">Analysed</th></tr></thead><tbody>{results.map(r=><tr key={`detail-${r.platform}`} className="border-t"><td className="p-3 font-semibold capitalize">{r.platform}</td><td className="p-3 capitalize">{r.status}</td><td className="p-3">{r.status==='complete'&&Number.isFinite(Number(r.overall))?`${(Number(r.overall)*100).toFixed(0)}%`:'—'}</td><td className="p-3">{r.n_posts??'—'}</td><td className="p-3">{new Date(r.analysed_at).toLocaleString()}</td></tr>)}</tbody></table></div>
+      </div>
     </section>}
   </main>
 }
@@ -86,7 +133,16 @@ export function GuestConsentPage(){
   const token=new URLSearchParams(window.location.search).get('token')||''
   const [accepted,setAccepted]=useState(false);const [status,setStatus]=useState('');const [busy,setBusy]=useState(false)
   const [details,setDetails]=useState<{case_code:string;consent_expires_at:string;retention_expires_at:string;accounts:Array<{platform:string;handle:string;ownership_status:string}>}|null>(null)
-  useEffect(()=>{if(!token){setStatus('This consent link is missing or invalid.');return}void api.get('/v1/guest-analysis/consent',{params:{token}}).then(({data})=>setDetails(data)).catch(e=>setStatus(e instanceof Error?e.message:'This consent link is invalid or expired.'))},[token])
+  useEffect(() => {
+    if (!token) return
+    let active = true
+    api.get('/v1/guest-analysis/consent', { params: { token } })
+      .then(({ data }) => { if (active) setDetails(data) })
+      .catch((error: unknown) => {
+        if (active) setStatus(error instanceof Error ? error.message : 'This consent link is invalid or expired.')
+      })
+    return () => { active = false }
+  }, [token])
   const submit=async(choice:boolean)=>{if(!details)return;setBusy(true);try{const {data}=await api.post('/v1/guest-analysis/consent',{token,accepted:choice});setStatus(choice?`You authorized the listed profiles for case ${data.case_code}. You may return to the counsellor.`:'You declined. The saved handles were deleted and no analysis will be run.');if(!choice)setDetails(null);window.history.replaceState({},'',window.location.pathname); }catch(e){setStatus(e instanceof Error?e.message:'Unable to record your decision.')}finally{setBusy(false)}}
-  return <main className="min-h-screen bg-slate-50 p-5"><section className="mx-auto mt-12 max-w-xl rounded-2xl border bg-white p-7 shadow-sm"><p className="text-xs font-bold uppercase tracking-widest text-teal-700">MindGuard guest analysis</p><h1 className="mt-2 text-2xl font-bold">Review consent</h1>{details?<><p className="mt-2 text-sm text-slate-600">Pseudonymous case <strong>{details.case_code}</strong>. This one-time decision link expires {new Date(details.consent_expires_at).toLocaleString()}.</p><div className="mt-5 rounded-xl border border-teal-100 bg-teal-50 p-4"><h2 className="font-semibold text-teal-950">Exact public accounts proposed</h2><ul className="mt-2 space-y-2 text-sm text-teal-950">{details.accounts.map(account=><li key={account.platform} className="flex flex-wrap justify-between gap-2"><span><strong className="capitalize">{account.platform}</strong> · {account.handle}</span><span className="text-xs">ownership not technically verified</span></li>)}</ul></div><ul className="mt-5 space-y-3 text-sm text-slate-700"><li>Only the exact public profiles above will be retrieved for this decision. No other handle can be substituted without fresh consent.</li><li>Your authorization does not create a MindGuard account. A counsellor may retain this pseudonymous case until {new Date(details.retention_expires_at).toLocaleDateString()}, or delete it earlier if requested.</li><li>MindGuard provides decision support, not a diagnosis or emergency service. A counsellor attestation or your consent does not technically verify account ownership.</li></ul><label className="mt-6 flex gap-3 text-sm"><input type="checkbox" checked={accepted} onChange={e=>setAccepted(e.target.checked)} className="mt-1"/><span>I reviewed these exact accounts and voluntarily authorize this analysis.</span></label><div className="mt-5 grid gap-3 sm:grid-cols-2"><button disabled={!accepted||busy} onClick={()=>void submit(true)} className="min-h-12 rounded-xl bg-teal-700 p-3 font-bold text-white disabled:opacity-50">{busy?'Saving…':'Accept consent'}</button><button disabled={busy} onClick={()=>void submit(false)} className="min-h-12 rounded-xl border border-rose-300 p-3 font-bold text-rose-800 disabled:opacity-50">Decline and delete handles</button></div></>:<p className="mt-4 rounded-lg bg-slate-100 p-3 text-sm text-slate-700">{status||'Loading the exact accounts covered by this request…'}</p>}{status&&details&&<p role="status" className="mt-4 rounded-lg bg-slate-100 p-3 text-sm">{status}</p>}</section></main>
+  return <main className="min-h-screen bg-slate-50 p-5"><section className="mx-auto mt-12 max-w-xl rounded-2xl border bg-white p-7 shadow-sm"><p className="text-xs font-bold uppercase tracking-widest text-teal-700">MindGuard guest analysis</p><h1 className="mt-2 text-2xl font-bold">Review consent</h1>{!token?<p className="mt-4 rounded-lg bg-slate-100 p-3 text-sm text-slate-700">This consent link is missing or invalid.</p>:details?<><p className="mt-2 text-sm text-slate-600">Pseudonymous case <strong>{details.case_code}</strong>. This one-time decision link expires {new Date(details.consent_expires_at).toLocaleString()}.</p><div className="mt-5 rounded-xl border border-teal-100 bg-teal-50 p-4"><h2 className="font-semibold text-teal-950">Exact public accounts proposed</h2><ul className="mt-2 space-y-2 text-sm text-teal-950">{details.accounts.map(account=><li key={account.platform} className="flex flex-wrap justify-between gap-2"><span><strong className="capitalize">{account.platform}</strong> · {account.handle}</span><span className="text-xs">ownership not technically verified</span></li>)}</ul></div><ul className="mt-5 space-y-3 text-sm text-slate-700"><li>Only the exact public profiles above will be retrieved for this decision. No other handle can be substituted without fresh consent.</li><li>Your authorization does not create a MindGuard account. A counsellor may retain this pseudonymous case until {new Date(details.retention_expires_at).toLocaleDateString()}, or delete it earlier if requested.</li><li>MindGuard provides decision support, not a diagnosis or emergency service. A counsellor attestation or your consent does not technically verify account ownership.</li></ul><label className="mt-6 flex gap-3 text-sm"><input type="checkbox" checked={accepted} onChange={e=>setAccepted(e.target.checked)} className="mt-1"/><span>I reviewed these exact accounts and voluntarily authorize this analysis.</span></label><div className="mt-5 grid gap-3 sm:grid-cols-2"><button disabled={!accepted||busy} onClick={()=>void submit(true)} className="min-h-12 rounded-xl bg-teal-700 p-3 font-bold text-white disabled:opacity-50">{busy?'Saving…':'Accept consent'}</button><button disabled={busy} onClick={()=>void submit(false)} className="min-h-12 rounded-xl border border-rose-300 p-3 font-bold text-rose-800 disabled:opacity-50">Decline and delete handles</button></div></>:<p className="mt-4 rounded-lg bg-slate-100 p-3 text-sm text-slate-700">{status||'Loading the exact accounts covered by this request…'}</p>}{status&&details&&<p role="status" className="mt-4 rounded-lg bg-slate-100 p-3 text-sm">{status}</p>}</section></main>
 }

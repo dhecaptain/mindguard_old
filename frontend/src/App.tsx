@@ -59,6 +59,7 @@ import InstitutionPolicyPage from './pages/InstitutionPolicyPage'
 import WorkplacePage, { WorkplaceAdminPage, WorkplaceJoinPage, WorkplaceTermsPage } from './pages/WorkplacePage'
 import GuestAnalysisPage, { GuestConsentPage } from './pages/GuestAnalysisPage'
 import VoiceSupportPage from './pages/VoiceSupportPage'
+import PageErrorBoundary from './components/common/PageErrorBoundary'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -233,6 +234,7 @@ function AdultPageRouter() {
 
 function AuthenticatedApp() {
   const { logout } = useAuthStore()
+  const currentPage = useUiStore((state) => state.currentPage)
   const [showWarning, setShowWarning] = useState(false)
   const [countdown, setCountdown] = useState(60)
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -269,7 +271,9 @@ function AuthenticatedApp() {
   return (
     <>
       <MainLayout>
-        <PageRouter />
+        <PageErrorBoundary key={currentPage}>
+          <PageRouter />
+        </PageErrorBoundary>
       </MainLayout>
       {showWarning && (
         <IdleWarningModal countdown={countdown} onStay={handleStay} onLogout={handleLogout} />

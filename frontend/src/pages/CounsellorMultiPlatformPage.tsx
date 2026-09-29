@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import Plot from 'react-plotly.js'
+import Plot from '../lib/plotly'
 import api from '../api/client'
+import SocioEconomicPanel from '../components/analysis/SocioEconomicPanel'
+import type { SocioeconomicSignal } from '../types'
 import {
   getStudentDetail,
   getStudents,
@@ -15,6 +17,22 @@ type PlatformSummary = {
   createdAt: string
   posts: number
   sessionId: string
+}
+
+const mergeSignals = (
+  target: Record<string, SocioeconomicSignal[]>,
+  source: Record<string, SocioeconomicSignal[]> | undefined,
+) => {
+  if (!source) return
+  for (const [category, items] of Object.entries(source)) {
+    const existing = target[category] || []
+    for (const item of items) {
+      if (!existing.some((current) => current.keyword === item.keyword && current.snippet === item.snippet)) {
+        existing.push(item)
+      }
+    }
+    target[category] = existing
+  }
 }
 
 export default function CounsellorMultiPlatformPage() {
@@ -104,6 +122,14 @@ export default function CounsellorMultiPlatformPage() {
   }, [detail])
 
   const selectedStudent = students.find((student) => student.id === studentId)
+  const combinedSignals = useMemo(() => {
+    const signals: Record<string, SocioeconomicSignal[]> = {}
+    for (const session of detail?.analysis_sessions || []) {
+      mergeSignals(signals, session.findings?.result?.signals)
+    }
+    return signals
+  }, [detail])
+  const signalCount = Object.values(combinedSignals).reduce((sum, items) => sum + items.length, 0)
   const timeline = useMemo(() => (detail?.analysis_sessions || []).flatMap((session) => {
     const grouped = new Map<string, { platform: string; scores: number[] }>()
     for (const post of session.findings?.posts || []) {
@@ -181,6 +207,11 @@ export default function CounsellorMultiPlatformPage() {
             })}
           </section>
           <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b p-5"><h2 className="font-bold text-slate-900">Detailed authorized result table</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="p-3">Platform</th><th className="p-3">Signal</th><th className="p-3">Items</th><th className="p-3">Timestamp</th></tr></thead><tbody>{summaries.map(s => <tr key={`table-${s.sessionId}-${s.platform}`} className="border-t"><td className="p-3 font-semibold capitalize">{s.platform}</td><td className="p-3">{(s.score * 100).toFixed(0)}%</td><td className="p-3">{s.posts}</td><td className="p-3">{formatDate(s.createdAt)}</td></tr>)}</tbody></table></div></section>
+          {signalCount > 0 && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-bold text-slate-900">Combined socio-economic context</h2>
+            <p className="mt-1 text-sm text-slate-500">Interactive distribution across the student’s authorized platform results. Keyword matches provide context and are not proof of intent.</p>
+            <div className="mt-4"><SocioEconomicPanel signals={combinedSignals} /></div>
+          </section>}
           <p className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm leading-6 text-blue-900">Signals are platform-specific decision-support information, not diagnoses. They are not averaged into a single cross-platform score. Review the underlying session and discuss context with the student before deciding on follow-up.</p>
         </>}
       </>}

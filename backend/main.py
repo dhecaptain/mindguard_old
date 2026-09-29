@@ -263,9 +263,18 @@ from backend.logging_setup import (
     set_request_context,
     setup_logging,
 )
-from backend.routes.workplace import router as workplace_router, purge_expired_workplace_records
-from backend.routes.guest_analysis import router as guest_analysis_router, purge_expired_guest_cases
-from backend.routes.voice_support import router as voice_support_router, purge_expired_voice_summaries
+from backend.routes.workplace import (
+    router as workplace_router,
+    purge_expired_workplace_records,
+)
+from backend.routes.guest_analysis import (
+    router as guest_analysis_router,
+    purge_expired_guest_cases,
+)
+from backend.routes.voice_support import (
+    router as voice_support_router,
+    purge_expired_voice_summaries,
+)
 
 _background_tasks: list[asyncio.Task] = []
 
@@ -810,7 +819,12 @@ async def _retention_maintenance_loop() -> None:
                     result["eligible"],
                     result["anonymized"],
                 )
-            if guest_purged or voice_purged or workplace_purged["cases"] or workplace_purged["checkins"]:
+            if (
+                guest_purged
+                or voice_purged
+                or workplace_purged["cases"]
+                or workplace_purged["checkins"]
+            ):
                 logger.info(
                     "privacy retention: guest_cases=%s voice_summaries=%s workplace_cases=%s workplace_checkins=%s",
                     guest_purged,
@@ -4029,7 +4043,11 @@ async def audit_student_analysis_export(
     if export_format not in {"csv", "pdf"}:
         raise HTTPException(400, "Export format must be CSV or PDF")
     write_audit(
-        user["id"], user["role_type"], "STUDENT_ANALYSIS_EXPORTED", "user", student_id,
+        user["id"],
+        user["role_type"],
+        "STUDENT_ANALYSIS_EXPORTED",
+        "user",
+        student_id,
         payload={"format": export_format, "scope": "authorized_platform_summary"},
         ip=_client_ip(request),
     )
@@ -8087,6 +8105,7 @@ async def v1_student_analyze(
     except Exception as exc:
         raise inference_http_error(exc)
 
+    result["signals"] = detect_socioeconomic(retrieved.get("posts", []))
     try:
         sess = create_analysis_session(
             student_id=student_id,
