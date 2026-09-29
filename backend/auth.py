@@ -122,11 +122,12 @@ async def require_auth(
         "workplace_provider",
     }:
         path = request.url.path
-        allowed = path.startswith("/api/v1/workplace/") or path in {
+        allowed = path.startswith("/api/v1/workplace/") or path.startswith("/api/v1/voice/") or path in {
             "/api/auth/me",
             "/api/auth/terms",
             "/api/auth/change-password",
             "/api/auth/logout",
+            "/api/institution/staff/profile",
         }
         if not allowed:
             raise HTTPException(

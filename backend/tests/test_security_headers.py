@@ -40,7 +40,9 @@ def test_csp_allows_required_assets():
     assert "https://fonts.googleapis.com" in csp
     assert "https://cdn.jsdelivr.net" in csp
     assert "https://*.supabase.co" in csp
+    assert "https://api.openai.com" in csp
     assert "blob:" in csp
+    assert "microphone=(self)" in headers["Permissions-Policy"]
 
 
 def test_hsts_emitted_only_over_https():

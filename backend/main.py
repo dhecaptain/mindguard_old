@@ -263,7 +263,9 @@ from backend.logging_setup import (
     set_request_context,
     setup_logging,
 )
-from backend.routes.workplace import router as workplace_router
+from backend.routes.workplace import router as workplace_router, purge_expired_workplace_records
+from backend.routes.guest_analysis import router as guest_analysis_router, purge_expired_guest_cases
+from backend.routes.voice_support import router as voice_support_router, purge_expired_voice_summaries
 
 _background_tasks: list[asyncio.Task] = []
 
@@ -300,6 +302,8 @@ if _SENTRY_DSN:
 app = FastAPI(title="MindGuard API", version="2.0.0")
 
 app.include_router(workplace_router)
+app.include_router(guest_analysis_router)
+app.include_router(voice_support_router)
 
 
 @app.exception_handler(InferenceUnavailableError)
@@ -559,7 +563,7 @@ _SECURITY_ALWAYS_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "X-Frame-Options": "DENY",
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    "Permissions-Policy": "camera=(), microphone=(self), geolocation=(), interest-cohort=()",
 }
 
 _CSP_POLICY = (
@@ -568,7 +572,7 @@ _CSP_POLICY = (
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
     "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; "
     "img-src 'self' data: blob:; "
-    "connect-src 'self' https://*.supabase.co wss://*.supabase.co; "
+    "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.openai.com wss://api.openai.com; "
     "frame-src 'self' blob:; "
     "object-src 'self' blob:; "
     "base-uri 'self'; "
@@ -797,11 +801,22 @@ async def _retention_maintenance_loop() -> None:
     while True:
         try:
             result = await asyncio.to_thread(run_retention_cleanup)
+            guest_purged = await asyncio.to_thread(purge_expired_guest_cases)
+            voice_purged = await asyncio.to_thread(purge_expired_voice_summaries)
+            workplace_purged = await asyncio.to_thread(purge_expired_workplace_records)
             if result["anonymized"]:
                 logger.info(
                     "retention maintenance: eligible=%s anonymized=%s",
                     result["eligible"],
                     result["anonymized"],
+                )
+            if guest_purged or voice_purged or workplace_purged["cases"] or workplace_purged["checkins"]:
+                logger.info(
+                    "privacy retention: guest_cases=%s voice_summaries=%s workplace_cases=%s workplace_checkins=%s",
+                    guest_purged,
+                    voice_purged,
+                    workplace_purged["cases"],
+                    workplace_purged["checkins"],
                 )
         except Exception:
             logger.exception("retention maintenance run failed")
@@ -3318,7 +3333,7 @@ async def mark_institution_ready(request: Request, user: dict = Depends(require_
 async def patch_staff_profile(
     data: dict, request: Request, user: dict = Depends(require_auth)
 ):
-    if user.get("role_type") not in {"school_admin", "counsellor"}:
+    if user.get("role_type") not in {"school_admin", "counsellor", "company_admin"}:
         raise HTTPException(403, "Staff account required")
     updated = update_staff_profile(user["id"], **data)
     write_audit(
@@ -3338,7 +3353,7 @@ async def patch_staff_profile(
 
 @app.get("/api/institution/staff/profile")
 async def get_staff_profile(user: dict = Depends(require_auth)):
-    if user.get("role_type") not in {"school_admin", "counsellor"}:
+    if user.get("role_type") not in {"school_admin", "counsellor", "company_admin"}:
         raise HTTPException(403, "Staff account required")
     return _staff_profile_payload(user)
 
@@ -4002,6 +4017,23 @@ async def get_student_detail(student_id: str, user: dict = Depends(require_auth)
         "analysis_sessions": analysis_sessions,
         "consent_status": consent_status,
     }
+
+
+@app.post("/api/counsellor/students/{student_id}/analysis-export-audit")
+async def audit_student_analysis_export(
+    student_id: str, data: dict, request: Request, user: dict = Depends(require_auth)
+):
+    """Record an authorized counsellor export without accepting report data from the client."""
+    _require_counsellor_student_access(user, student_id, require_consent=True)
+    export_format = str(data.get("format") or "").lower()
+    if export_format not in {"csv", "pdf"}:
+        raise HTTPException(400, "Export format must be CSV or PDF")
+    write_audit(
+        user["id"], user["role_type"], "STUDENT_ANALYSIS_EXPORTED", "user", student_id,
+        payload={"format": export_format, "scope": "authorized_platform_summary"},
+        ip=_client_ip(request),
+    )
+    return {"ok": True}
 
 
 # ── Referrals routes ─────────────────────────────────────────────────

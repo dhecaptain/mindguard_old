@@ -25,6 +25,19 @@ const PAGE_TITLES: Record<string, string> = {
   'audit-log': 'MindGuard',
   admin: 'Admin Panel',
   'notification-preferences': 'Notification Preferences',
+  'guest-analysis': 'Guest Analysis',
+  'voice-support': 'Voice Grounding Companion',
+  'workplace': 'Workplace Wellbeing',
+  'workplace-setup': 'Workplace Setup',
+  'workplace-providers': 'Independent Providers',
+  'workplace-enrollment': 'Employee Enrollment',
+  'workplace-reports': 'Protected Aggregate Reports',
+  'workplace-audit': 'Workplace Audit History',
+  'workplace-checkins': 'Private Check-ins',
+  'workplace-support': 'Provider Support',
+  'workplace-cases': 'Shared Workplace Cases',
+  'workplace-messages': 'Private Provider Messages',
+  'workplace-appointments': 'Workplace Appointments',
 }
 
 export default function TopBar() {

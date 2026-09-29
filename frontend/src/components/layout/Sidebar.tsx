@@ -15,6 +15,7 @@ const STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'resources', icon: 'ti ti-ambulance', label: 'Crisis Resources' },
   { key: 'team', icon: 'ti ti-users', label: 'Team' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Calm with voice' },
 ]
 
 const ADULT_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
@@ -29,6 +30,14 @@ const INSTITUTION_STUDENT_NAV_ITEMS: { key: string; icon: string; label: string 
   { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
   { key: 'resources', icon: 'ti ti-lifebuoy', label: 'Get support now' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Calm with voice' },
+]
+
+const GUARDIAN_NAV_ITEMS: { key: string; icon: string; label: string }[] = [
+  { key: 'dashboard', icon: 'ti ti-home-heart', label: 'Guardian home' },
+  { key: 'communications', icon: 'ti ti-mail', label: 'Messages' },
+  { key: 'resources', icon: 'ti ti-lifebuoy', label: 'Support resources' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Calm with voice' },
 ]
 
 const COUNSELLOR_NAV_BASE = [
@@ -37,6 +46,7 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'students', icon: 'ti ti-users', label: 'Students' },
   { key: 'batch', icon: 'ti ti-player-play', label: 'Batch Analysis' },
   { key: 'unified', icon: 'ti ti-chart-dots-3', label: 'Multi-Platform' },
+  { key: 'guest-analysis', icon: 'ti ti-user-scan', label: 'Guest Analysis' },
   { key: 'referrals', icon: 'ti ti-link', label: 'Referrals' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
@@ -44,6 +54,7 @@ const COUNSELLOR_NAV_BASE = [
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent Tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit Log' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
 ] as const
 
 const SCHOOL_ADMIN_NAV_ITEMS = [
@@ -55,6 +66,7 @@ const SCHOOL_ADMIN_NAV_ITEMS = [
   { key: 'consent-tracker', icon: 'ti ti-file-check', label: 'Consent tracker' },
   { key: 'audit-log', icon: 'ti ti-history', label: 'Audit log' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
 ] as const
 
 const ADMIN_NAV_ITEMS = [
@@ -69,11 +81,33 @@ const ADMIN_NAV_ITEMS = [
   { key: 'alert-queue', icon: 'ti ti-bell-ringing', label: 'Alert Queue' },
   { key: 'communications', icon: 'ti ti-mail', label: 'Communications' },
   { key: 'appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'My profile' },
 ]
 
-const WORKPLACE_NAV_ITEMS = [
-  { key: 'workplace', icon: 'ti ti-heart-handshake', label: 'Workplace wellbeing' },
+const COMPANY_ADMIN_NAV_ITEMS = [
+  { key: 'workplace', icon: 'ti ti-layout-dashboard', label: 'Overview' },
+  { key: 'workplace-setup', icon: 'ti ti-list-check', label: 'Setup & policies' },
+  { key: 'workplace-providers', icon: 'ti ti-stethoscope', label: 'Providers' },
+  { key: 'workplace-enrollment', icon: 'ti ti-link', label: 'Enrollment' },
+  { key: 'workplace-reports', icon: 'ti ti-chart-line', label: 'Aggregate reports' },
+  { key: 'workplace-audit', icon: 'ti ti-history', label: 'Audit history' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
+  { key: 'profile', icon: 'ti ti-user-cog', label: 'Account profile' },
+]
+const EMPLOYEE_NAV_ITEMS = [
+  { key: 'workplace', icon: 'ti ti-home-heart', label: 'My wellbeing' },
+  { key: 'workplace-checkins', icon: 'ti ti-clipboard-heart', label: 'Private check-ins' },
+  { key: 'workplace-support', icon: 'ti ti-heart-handshake', label: 'Request support' },
+  { key: 'workplace-messages', icon: 'ti ti-message-circle', label: 'Provider messages' },
+  { key: 'workplace-appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Calm with voice' },
+]
+const PROVIDER_NAV_ITEMS = [
+  { key: 'workplace', icon: 'ti ti-layout-dashboard', label: 'Overview' },
+  { key: 'workplace-cases', icon: 'ti ti-briefcase-2', label: 'Shared cases' },
+  { key: 'workplace-appointments', icon: 'ti ti-calendar-event', label: 'Appointments' },
+  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
 ]
 
 function RolePill({ role }: { role?: string }) {
@@ -113,12 +147,13 @@ export default function Sidebar() {
   const isAdmin = role === 'admin'
   const isAdult = user?.user_category === 'adult'
   const isInstitutionStudent = user?.user_category === 'institution_managed'
+  const isGuardian = user?.user_category === 'parent' || role === 'parent'
   const isWorkplace = ['company_admin', 'workplace_employee', 'workplace_provider'].includes(role)
   const isDesktop = useMediaQuery('(min-width: 768px)')
   const isCollapsed = isDesktop && sidebarCollapsed
 
   const navItems = isWorkplace
-    ? WORKPLACE_NAV_ITEMS
+    ? role === 'company_admin' ? COMPANY_ADMIN_NAV_ITEMS : role === 'workplace_provider' ? PROVIDER_NAV_ITEMS : EMPLOYEE_NAV_ITEMS
     : isAdmin
     ? ADMIN_NAV_ITEMS.map((item) =>
         item.key === 'alert-queue' && openAlertCount > 0 ? { ...item, badge: openAlertCount } : item
@@ -129,7 +164,9 @@ export default function Sidebar() {
       ? COUNSELLOR_NAV_BASE.map((item) =>
           item.key === 'alert-queue' && openAlertCount > 0 ? { ...item, badge: openAlertCount } : item
         )
-      : isAdult
+      : isGuardian
+        ? GUARDIAN_NAV_ITEMS
+        : isAdult
         ? ADULT_STUDENT_NAV_ITEMS
         : isInstitutionStudent
           ? INSTITUTION_STUDENT_NAV_ITEMS

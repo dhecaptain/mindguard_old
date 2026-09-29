@@ -57,6 +57,8 @@ import GuardianDashboardPage from './pages/GuardianDashboardPage'
 import AdminArchivedStudentsPage from './pages/AdminArchivedStudentsPage'
 import InstitutionPolicyPage from './pages/InstitutionPolicyPage'
 import WorkplacePage, { WorkplaceAdminPage, WorkplaceJoinPage, WorkplaceTermsPage } from './pages/WorkplacePage'
+import GuestAnalysisPage, { GuestConsentPage } from './pages/GuestAnalysisPage'
+import VoiceSupportPage from './pages/VoiceSupportPage'
 
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000   // 15 minutes
 const IDLE_WARNING_MS = 60 * 1000         // warn 1 minute before
@@ -98,6 +100,8 @@ function PageRouter() {
   const userCategory = useAuthStore((s) => s.user?.user_category)
 
   if (role === 'company_admin' || role === 'workplace_employee' || role === 'workplace_provider') {
+    if (currentPage === 'voice-support') return <VoiceSupportPage />
+    if (currentPage === 'profile' && role === 'company_admin') return <StaffProfilePage />
     return <WorkplacePage />
   }
 
@@ -129,6 +133,7 @@ function PageRouter() {
       case 'audit-log': return <AuditLogPage />
       case 'notification-preferences': return <NotificationPreferencesPage />
       case 'profile': return <StaffProfilePage />
+      case 'voice-support': return <VoiceSupportPage />
       default: return <AdminPage />
     }
   }
@@ -143,6 +148,7 @@ function PageRouter() {
       case 'consent-tracker': return <ConsentTrackerPage />
       case 'audit-log': return <AuditLogPage />
       case 'profile': return <StaffProfilePage />
+      case 'voice-support': return <VoiceSupportPage />
       // A stale dashboard route can exist after a role change or an earlier
       // login. School administrators belong in institution operations, not
       // the counsellor-only dashboard.
@@ -157,6 +163,8 @@ function PageRouter() {
       case 'students': return <StudentManagementPage />
       case 'batch': return <CounsellorBatchAnalysisPage />
       case 'unified': return <CounsellorMultiPlatformPage />
+      case 'guest-analysis': return <GuestAnalysisPage />
+      case 'voice-support': return <VoiceSupportPage />
       case 'referrals': return <ReferralsPage />
       case 'communications': return <CommunicationsPage />
       case 'appointments': return <AppointmentsPage />
@@ -174,7 +182,10 @@ function PageRouter() {
   }
 
   if (userCategory === 'parent' || role === 'parent') {
-    return currentPage === 'communications' ? <StudentCommunicationsPage /> : <GuardianDashboardPage />
+    if (currentPage === 'voice-support') return <VoiceSupportPage />
+    if (currentPage === 'communications') return <StudentCommunicationsPage />
+    if (currentPage === 'resources') return <CrisisResourcesPage />
+    return <GuardianDashboardPage />
   }
 
   if (userCategory === 'institution_managed') {
@@ -184,6 +195,7 @@ function PageRouter() {
       case 'communications': return <StudentCommunicationsPage />
       case 'appointments': return <AppointmentsPage />
       case 'resources': return <CrisisResourcesPage />
+      case 'voice-support': return <VoiceSupportPage />
       default: return <InstitutionStudentHomePage />
     }
   }
@@ -197,6 +209,7 @@ function PageRouter() {
     case 'appointments': return <AppointmentsPage />
     case 'my-accounts': return <MyAccountsPage />
     case 'notification-preferences': return <NotificationPreferencesPage />
+    case 'voice-support': return <VoiceSupportPage />
     default: return <DashboardPage />
   }
 }
@@ -213,6 +226,7 @@ function AdultPageRouter() {
     case 'communications': return <StudentCommunicationsPage />
     case 'appointments': return <AppointmentsPage />
     case 'notification-preferences': return <NotificationPreferencesPage />
+    case 'voice-support': return <VoiceSupportPage />
     default: return <AdultDashboardPage />
   }
 }
@@ -284,6 +298,8 @@ export default function App() {
             setPage('institution')
           } else if (user.role_type?.toLowerCase() === 'admin') {
             setPage('admin')
+          } else if (['company_admin', 'workplace_employee', 'workplace_provider'].includes(user.role_type?.toLowerCase() || '')) {
+            setPage('workplace')
           }
         } catch {
           clearToken()
@@ -317,6 +333,10 @@ export default function App() {
 
   if (window.location.pathname === '/workplace/join') {
     return <WorkplaceJoinPage />
+  }
+
+  if (window.location.pathname === '/guest-consent' || window.location.pathname.startsWith('/guest-consent/')) {
+    return <GuestConsentPage />
   }
 
   if (window.location.pathname === '/guardian/setup') {

@@ -13,6 +13,9 @@ export type PageKey =
   | 'notification-preferences'
   | 'workplace'
   | 'workplace-admin'
+  | 'workplace-setup' | 'workplace-providers' | 'workplace-enrollment' | 'workplace-reports' | 'workplace-audit'
+  | 'workplace-checkins' | 'workplace-support' | 'workplace-cases' | 'workplace-messages' | 'workplace-appointments'
+  | 'guest-analysis' | 'voice-support'
   | 'profile'
   | 'self-history' | 'self-session'
 

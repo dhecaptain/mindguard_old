@@ -15,6 +15,7 @@ export default function StaffProfilePage() {
   const [saving, setSaving] = useState(false)
   const profileComplete = Boolean(user?.profile_completed)
   const isCounsellor = user?.role_type === 'counsellor'
+  const isCompanyAdmin = user?.role_type === 'company_admin'
   const profileFields = (isCounsellor
     ? ['phone', 'country', 'address', 'professional_title', 'qualification', 'emergency_contact']
     : ['phone', 'country', 'address', 'emergency_contact']) as Array<keyof typeof emptyProfile>
@@ -53,8 +54,8 @@ export default function StaffProfilePage() {
   if (loading) return <div className="p-8 text-slate-500">Loading your profile…</div>
   return <div className="mx-auto w-full max-w-[760px] p-6 md:p-9"><div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
     <p className="text-xs font-bold uppercase tracking-widest text-[#0f766e]">Account profile</p>
-    <h1 className="mt-2 text-2xl font-bold text-slate-800">{profileComplete ? 'Your professional profile' : 'Complete your professional profile'}</h1>
-    <p className="mt-2 text-sm text-slate-500">{profileComplete ? 'Keep your approved contact and professional details current.' : 'Before entering the workspace, provide the required contact and professional details for your institution.'}</p>
+    <h1 className="mt-2 text-2xl font-bold text-slate-800">{isCompanyAdmin ? 'Your company administrator profile' : profileComplete ? 'Your professional profile' : 'Complete your professional profile'}</h1>
+    <p className="mt-2 text-sm text-slate-500">{isCompanyAdmin ? 'Keep your company administrator contact details current.' : profileComplete ? 'Keep your approved contact and professional details current.' : 'Before entering your institution workspace, provide the required contact and professional details.'}</p>
     <div className="mt-5 grid gap-3 sm:grid-cols-2">{profileFields.map((key) => <div key={key} className={key === 'address' ? 'sm:col-span-2' : ''}><label className="mb-1 block text-xs font-bold uppercase text-slate-600">{key.replaceAll('_', ' ')}{key !== 'emergency_contact' && ' *'}</label><input className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" value={form[key]} onChange={(e) => update(key, e.target.value)} /></div>)}</div>
     {(error || message) && <div className={`mt-4 rounded-lg px-3 py-2 text-sm ${error ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>{error || message}</div>}
     <button onClick={saveProfile} disabled={saving || !form.phone || !form.country || !form.address || (isCounsellor && (!form.professional_title || !form.qualification))} className="mt-5 w-full rounded-lg bg-[#0f766e] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40">{saving ? 'Saving…' : profileComplete ? 'Save profile' : 'Save and continue'}</button>

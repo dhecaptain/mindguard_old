@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import Plot from 'react-plotly.js'
 import {
   analyzeStudent,
   getStudentDetail,
@@ -116,6 +117,7 @@ export default function CounsellorBatchAnalysisPage() {
   }
 
   const studentName = students.find((student) => student.id === studentId)?.name
+  const completedRows = rows.filter((row) => row.status === 'complete' && row.result?.rolling_score != null && Number.isFinite(Number(row.result.rolling_score)))
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-5 md:p-8">
@@ -174,6 +176,11 @@ export default function CounsellorBatchAnalysisPage() {
             <span className={`rounded-full px-2.5 py-1 text-xs font-bold uppercase ${row.status === 'complete' ? 'bg-emerald-100 text-emerald-800' : row.status === 'failed' ? 'bg-red-100 text-red-800' : row.status === 'running' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-700'}`}>{row.status}</span>
           </div>)}
         </div>
+        {completedRows.length > 0 && <div className="mt-5 rounded-xl border border-slate-200 p-4">
+          <h3 className="font-bold text-slate-900">Completed platform comparison</h3>
+          <p className="mt-1 text-xs text-slate-500">Missing or failed platforms remain visible above and are never treated as zero.</p>
+          <Plot data={[{ type: 'bar', x: completedRows.map(row => row.account.platform), y: completedRows.map(row => Math.max(0, Math.min(1, Number(row.result?.rolling_score)))), marker: { color: '#0f766e' }, text: completedRows.map(row => `${(Number(row.result?.rolling_score) * 100).toFixed(0)}%`), textposition: 'outside' }]} layout={{ autosize: true, height: 320, margin: { l: 50, r: 20, t: 20, b: 45 }, yaxis: { range: [0, 1.1], tickformat: '.0%' }, paper_bgcolor: 'transparent', plot_bgcolor: '#fff' }} config={{ responsive: true, displaylogo: false, toImageButtonOptions: { filename: `mindguard-${studentId}-batch-comparison` } }} className="w-full" />
+        </div>}
         {rows.some((row) => row.status === 'complete') && <p className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-900">Decision-support signals are shown separately by platform. They are not a diagnosis and are not combined into an unvalidated single score. Review source context with the student.</p>}
       </section>}
     </main>

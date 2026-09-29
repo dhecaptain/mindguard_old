@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
+import Plot from 'react-plotly.js'
+import api from '../api/client'
 import {
   getStudentDetail,
   getStudents,
@@ -67,15 +69,33 @@ export default function CounsellorMultiPlatformPage() {
   const summaries = useMemo(() => {
     const latest = new Map<string, PlatformSummary>()
     for (const session of detail?.analysis_sessions || []) {
-      if (session.risk_score == null || !Number.isFinite(Number(session.risk_score))) continue
-      for (const platform of session.platforms || []) {
+      const platformPosts = new Map<string, Array<{ score: number; platform: string }>>()
+      for (const post of session.findings?.posts || []) {
+        const platform = String(post.platform || '').trim()
+        if (post.risk_score == null) continue
+        const score = Number(post.risk_score)
+        if (!platform || !Number.isFinite(score)) continue
+        const key = platform.toLowerCase()
+        const current = platformPosts.get(key) || []
+        current.push({ score, platform })
+        platformPosts.set(key, current)
+      }
+      const platforms = session.platforms || []
+      for (const platform of platforms) {
         const key = platform.toLowerCase()
         if (latest.has(key)) continue
+        const posts = platformPosts.get(key) || []
+        const sessionScore = session.risk_score == null ? Number.NaN : Number(session.risk_score)
+        // Older multi-platform rows sometimes contain one overall score with no
+        // platform-specific findings. Never present that combined value as if
+        // it belonged to each platform.
+        if (!posts.length && (platforms.length !== 1 || !Number.isFinite(sessionScore))) continue
+        const score = posts.length ? posts.reduce((sum, post) => sum + post.score, 0) / posts.length : sessionScore
         latest.set(key, {
           platform,
-          score: Number(session.risk_score),
+          score,
           createdAt: session.created_at,
-          posts: session.findings?.posts?.length || 0,
+          posts: posts.length || session.findings?.posts?.length || 0,
           sessionId: session.id,
         })
       }
@@ -84,10 +104,38 @@ export default function CounsellorMultiPlatformPage() {
   }, [detail])
 
   const selectedStudent = students.find((student) => student.id === studentId)
+  const timeline = useMemo(() => (detail?.analysis_sessions || []).flatMap((session) => {
+    const grouped = new Map<string, { platform: string; scores: number[] }>()
+    for (const post of session.findings?.posts || []) {
+      const platform = String(post.platform || '').trim()
+      if (post.risk_score == null) continue
+      const score = Number(post.risk_score)
+      if (!platform || !Number.isFinite(score)) continue
+      const key = platform.toLowerCase(); const current = grouped.get(key) || { platform, scores: [] }; current.scores.push(score); grouped.set(key, current)
+    }
+    const platforms = session.platforms || []
+    const output = [...grouped.values()].map(item => ({ platform: item.platform, score: Math.max(0, Math.min(1, item.scores.reduce((sum, value) => sum + value, 0) / item.scores.length)), createdAt: session.created_at, sessionId: session.id }))
+    if (!output.length && platforms.length === 1 && session.risk_score != null && Number.isFinite(Number(session.risk_score))) output.push({ platform: platforms[0], score: Math.max(0, Math.min(1, Number(session.risk_score))), createdAt: session.created_at, sessionId: session.id })
+    return output
+  }).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()), [detail])
   const formatDate = (value: string) => {
     const date = new Date(value)
     return Number.isNaN(date.getTime()) ? 'Date unavailable' : date.toLocaleString()
   }
+  const auditExport = async (format: 'csv' | 'pdf') => {
+    if (!studentId) return
+    await api.post(`/counsellor/students/${studentId}/analysis-export-audit`, { format })
+  }
+  const exportCsv = async () => {
+    try {
+      await auditExport('csv')
+      const rows = [['platform', 'signal_percent', 'items_reviewed', 'analysis_timestamp'], ...summaries.map(s => [s.platform, (s.score * 100).toFixed(1), String(s.posts), s.createdAt])]
+      const csv = rows.map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n')
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = `mindguard-${studentId}-platform-report.csv`; anchor.click(); URL.revokeObjectURL(url)
+    } catch (err) { setError(err instanceof Error ? err.message : 'Export audit failed; the report was not downloaded.') }
+  }
+  const printPdf = async () => { try { await auditExport('pdf'); window.print() } catch (err) { setError(err instanceof Error ? err.message : 'Export audit failed; the report was not printed.') } }
 
   return (
     <main className="mx-auto max-w-5xl space-y-6 p-5 md:p-8">
@@ -115,6 +163,11 @@ export default function CounsellorMultiPlatformPage() {
           <h2 className="mt-3 font-bold text-slate-900">No platform results yet</h2>
           <p className="mx-auto mt-1 max-w-lg text-sm text-slate-600">Run one or more verified-account analyses from Batch Analysis. Successfully saved sessions will appear here.</p>
         </section> : <>
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-bold text-slate-900">Latest platform comparison</h2><p className="text-sm text-slate-500">Each bar is independent; MindGuard does not create a combined clinical score.</p></div><div className="flex gap-2 print:hidden"><button onClick={() => void exportCsv()} className="rounded-lg border px-3 py-2 text-sm font-semibold">Export CSV</button><button onClick={() => void printPdf()} className="rounded-lg border px-3 py-2 text-sm font-semibold">Print / save PDF</button></div></div>
+            <Plot data={[{ type: 'bar', x: summaries.map(s => s.platform), y: summaries.map(s => Math.max(0, Math.min(1, s.score))), marker: { color: summaries.map(s => s.score >= .75 ? '#dc2626' : s.score >= .5 ? '#d97706' : '#059669') }, text: summaries.map(s => `${(s.score * 100).toFixed(0)}%`), textposition: 'outside' }]} layout={{ autosize: true, height: 340, margin: { l: 50, r: 20, t: 30, b: 50 }, yaxis: { range: [0, 1.1], tickformat: '.0%', title: { text: 'Platform signal' } }, paper_bgcolor: 'transparent', plot_bgcolor: '#fff' }} config={{ responsive: true, displaylogo: false, toImageButtonOptions: { filename: `mindguard-${studentId}-platform-comparison` } }} className="w-full" />
+          </section>
+          {timeline.length > 1 && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h2 className="font-bold text-slate-900">Longitudinal platform trend</h2><p className="text-sm text-slate-500">Recorded sessions over time, separated by platform.</p><Plot data={[...new Set(timeline.map(v => v.platform))].map(platform => ({ type: 'scatter' as const, mode: 'lines+markers' as const, name: platform, x: timeline.filter(v => v.platform === platform).map(v => v.createdAt), y: timeline.filter(v => v.platform === platform).map(v => v.score) }))} layout={{ autosize: true, height: 350, margin: { l: 50, r: 20, t: 30, b: 60 }, yaxis: { range: [0, 1], tickformat: '.0%' }, paper_bgcolor: 'transparent', plot_bgcolor: '#fff', legend: { orientation: 'h' } }} config={{ responsive: true, displaylogo: false }} className="w-full" /></section>}
           <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {summaries.map((summary) => {
               const score = Math.max(0, Math.min(1, summary.score))
@@ -127,6 +180,7 @@ export default function CounsellorMultiPlatformPage() {
               </article>
             })}
           </section>
+          <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b p-5"><h2 className="font-bold text-slate-900">Detailed authorized result table</h2></div><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="p-3">Platform</th><th className="p-3">Signal</th><th className="p-3">Items</th><th className="p-3">Timestamp</th></tr></thead><tbody>{summaries.map(s => <tr key={`table-${s.sessionId}-${s.platform}`} className="border-t"><td className="p-3 font-semibold capitalize">{s.platform}</td><td className="p-3">{(s.score * 100).toFixed(0)}%</td><td className="p-3">{s.posts}</td><td className="p-3">{formatDate(s.createdAt)}</td></tr>)}</tbody></table></div></section>
           <p className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm leading-6 text-blue-900">Signals are platform-specific decision-support information, not diagnoses. They are not averaged into a single cross-platform score. Review the underlying session and discuss context with the student before deciding on follow-up.</p>
         </>}
       </>}

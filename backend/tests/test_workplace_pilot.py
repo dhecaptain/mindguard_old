@@ -46,6 +46,45 @@ def _company(db, admin_email="owner@acme.test"):
     return company, db.get_user_by_id(admin["id"])
 
 
+def _configure_enrollment_readiness(db, company, admin):
+    """Give a fixture a reviewed policy and an approved independent provider."""
+    provider = db.create_user(
+        "care-provider@care.test",
+        "Care Provider",
+        hash_password("workplace-test-password"),
+        role_type="workplace_provider",
+    )
+    now = "2026-09-27T10:00:00+00:00"
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE workplace_settings SET policy_status='approved' WHERE company_id=?",
+        (company["id"],),
+    )
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='workplace_provider' WHERE id=?",
+        (provider["id"],),
+    )
+    conn.execute(
+        "INSERT INTO workplace_provider_credentials (provider_id,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_by,reviewed_at) VALUES (?,?,?,?,?,'verified',?,?)",
+        (
+            provider["id"],
+            encrypt_pii("Counsellor"),
+            encrypt_pii("Qualification"),
+            encrypt_pii("REG-1"),
+            encrypt_pii("review ref"),
+            admin["id"],
+            now,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO workplace_providers (company_id,provider_id,status,created_at) VALUES (?,?,'active',?)",
+        (company["id"], provider["id"], now),
+    )
+    conn.commit()
+    conn.close()
+    return provider
+
+
 def test_company_admin_is_not_allowed_legacy_school_or_social_routes(db):
     _, admin = _company(db)
     with _client() as client:
@@ -56,6 +95,7 @@ def test_company_admin_is_not_allowed_legacy_school_or_social_routes(db):
             client.get("/api/self/social-accounts", headers=headers).status_code == 403
         )
         assert client.get("/api/institution/setup", headers=headers).status_code == 403
+        assert client.get("/api/institution/staff/profile", headers=headers).status_code == 200
 
 
 def test_workplace_checkins_are_encrypted_and_not_returned_to_company_admin(db):
@@ -208,6 +248,7 @@ def test_shared_link_requires_work_email_verification_before_optin_account(
     from backend.routes import workplace
 
     company, admin = _company(db)
+    _configure_enrollment_readiness(db, company, admin)
     conn = db.get_db()
     conn.execute(
         "UPDATE workplace_settings SET work_email_domains_json='[\"acme.com\"]' WHERE company_id=?",
@@ -280,7 +321,7 @@ def test_provider_gets_only_the_exact_checkin_employee_shares_and_can_be_revoked
         institution_id=company["id"],
     )
     provider = db.create_user(
-        "provider@care.test",
+        "provider@care.example.org",
         "Independent Provider",
         hash_password("workplace-test-password"),
         role_type="workplace_provider",
@@ -388,6 +429,19 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
     conn.execute("UPDATE users SET status='approved' WHERE id=?", (root["id"],))
     conn.commit()
     conn.close()
+    provider = db.create_user(
+        "provider@care.example.org",
+        "Independent Provider",
+        hash_password("workplace-test-password"),
+        role_type="student",
+    )
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='adult' WHERE id=?",
+        (provider["id"],),
+    )
+    conn.commit()
+    conn.close()
     with _client() as client:
         root_headers = _login(client, root["email"])
         create = client.post(
@@ -414,6 +468,36 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
             json={"reviewed": True, "reference": "KE privacy review record 2026-01"},
         )
         assert reviewed.status_code == 200
+        policy = client.put(
+            "/api/v1/workplace/admin/policy",
+            headers=company_headers,
+            json={
+                "privacy_contact_email": "privacy@acme.com",
+                "employee_population_range": "50-199",
+                "retention_days": 365,
+                "privacy_notice_version": "workplace-v1",
+                "confirm_aggregate_only": True,
+            },
+        )
+        assert policy.status_code == 200, policy.text
+        credentials = client.post(
+            "/api/v1/workplace/admin/provider-credentials",
+            headers=root_headers,
+            json={
+                "provider_email": "provider@care.example.org",
+                "professional_title": "Counsellor",
+                "qualification": "Registered counsellor",
+                "registration_number": "REG-001",
+                "verification_reference": "Credential document reviewed",
+            },
+        )
+        assert credentials.status_code == 201, credentials.text
+        attached = client.post(
+            "/api/v1/workplace/admin/providers",
+            headers=company_headers,
+            json={"provider_email": "provider@care.example.org"},
+        )
+        assert attached.status_code == 201, attached.text
         link = client.post(
             "/api/v1/workplace/admin/enrollment-link", headers=company_headers
         )
@@ -424,3 +508,157 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
         assert link_inventory.status_code == 200
         assert link_inventory.json()[0]["id"] == link.json()["id"]
         assert "token" not in link_inventory.json()[0]
+
+
+def test_company_audit_does_not_expose_employee_or_provider_activity(db):
+    company, admin = _company(db)
+    employee = db.create_user(
+        "person@acme.test",
+        "Private Employee",
+        hash_password("workplace-test-password"),
+    )
+    conn = db.get_db()
+    conn.execute(
+        "INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES ('audit-private',?,?,?,datetime('now'))",
+        (company["id"], employee["id"], "EMPLOYEE_OPTED_IN"),
+    )
+    conn.execute(
+        "INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES ('audit-safe',?,?,?,datetime('now'))",
+        (company["id"], admin["id"], "WORKPLACE_POLICY_APPROVED"),
+    )
+    conn.commit()
+    conn.close()
+    with _client() as client:
+        response = client.get(
+            "/api/v1/workplace/admin/audit",
+            headers=_login(client, admin["email"]),
+        )
+    assert response.status_code == 200
+    assert [row["event_type"] for row in response.json()] == [
+        "WORKPLACE_POLICY_APPROVED"
+    ]
+    assert "actor_user_id" not in response.text
+    assert employee["id"] not in response.text
+
+
+def test_suspending_company_blocks_existing_employee_and_provider_access(db):
+    company, admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, admin)
+    employee = db.create_user(
+        "worker@acme.test",
+        "Worker",
+        hash_password("workplace-test-password"),
+        role_type="workplace_employee",
+        institution_id=company["id"],
+    )
+    root = db.create_user(
+        "root@example.org",
+        "Global Admin",
+        hash_password("workplace-test-password"),
+        role_type="admin",
+    )
+    now = "2026-09-27T10:00:00+00:00"
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='workplace_employee' WHERE id=?",
+        (employee["id"],),
+    )
+    conn.execute("UPDATE users SET status='approved' WHERE id=?", (root["id"],))
+    conn.execute(
+        "INSERT INTO workplace_memberships (id,company_id,user_id,status,notice_version,consented_at,created_at,updated_at) VALUES ('suspend-m',?,?,'active','v1',?,?,?)",
+        (company["id"], employee["id"], now, now, now),
+    )
+    conn.execute(
+        "INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES ('suspend-c',?,?,?,?)",
+        (company["id"], employee["id"], encrypt_pii('{"mood":3}'), now),
+    )
+    conn.execute(
+        "INSERT INTO workplace_support_cases (id,company_id,user_id,provider_id,status,share_consent_at,shared_checkin_id,created_at,updated_at) VALUES ('suspend-case',?,?,?,'open',?,'suspend-c',?,?)",
+        (company["id"], employee["id"], provider["id"], now, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    with _client() as client:
+        provider_headers = _login(client, provider["email"])
+        employee_headers = _login(client, employee["email"])
+        root_headers = _login(client, root["email"])
+        before = client.get(
+            "/api/v1/workplace/provider/cases", headers=provider_headers
+        )
+        assert before.status_code == 200 and len(before.json()) == 1
+        suspended = client.post(
+            f"/api/v1/workplace/admin/companies/{company['id']}/lifecycle",
+            headers=root_headers,
+            json={"action": "suspend", "reason": "Testing tenant suspension"},
+        )
+        assert suspended.status_code == 200
+        assert client.get(
+            "/api/v1/workplace/checkins", headers=employee_headers
+        ).status_code == 403
+        after = client.get(
+            "/api/v1/workplace/provider/cases", headers=provider_headers
+        )
+        assert after.status_code == 200 and after.json() == []
+
+
+def test_workplace_retention_purges_old_closed_case_data_but_keeps_active_cases(db):
+    from datetime import datetime, timedelta, timezone
+    from backend.routes.workplace import purge_expired_workplace_records
+
+    company, admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, admin)
+    employee = db.create_user(
+        "worker@acme.test",
+        "Worker",
+        hash_password("workplace-test-password"),
+        role_type="workplace_employee",
+        institution_id=company["id"],
+    )
+    old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db.get_db()
+    conn.execute(
+        "UPDATE workplace_settings SET retention_days=30 WHERE company_id=?",
+        (company["id"],),
+    )
+    conn.execute(
+        "INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES ('old-checkin',?,?,?,?)",
+        (company["id"], employee["id"], encrypt_pii('{"mood":2}'), old),
+    )
+    conn.execute(
+        "INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES ('active-checkin',?,?,?,?)",
+        (company["id"], employee["id"], encrypt_pii('{"mood":3}'), old),
+    )
+    conn.execute(
+        "INSERT INTO workplace_support_cases (id,company_id,user_id,provider_id,status,share_consent_at,shared_checkin_id,created_at,updated_at) VALUES ('closed-old',?,?,?,'closed',?,'old-checkin',?,?)",
+        (company["id"], employee["id"], provider["id"], old, old, old),
+    )
+    conn.execute(
+        "INSERT INTO workplace_support_cases (id,company_id,user_id,provider_id,status,share_consent_at,shared_checkin_id,created_at,updated_at) VALUES ('active-retained',?,?,?,'open',?,'active-checkin',?,?)",
+        (company["id"], employee["id"], provider["id"], old, old, now),
+    )
+    conn.execute(
+        "INSERT INTO workplace_case_notes (id,case_id,provider_id,private_note_encrypted,created_at) VALUES ('old-note','closed-old',?,?,?)",
+        (provider["id"], encrypt_pii("private note"), old),
+    )
+    conn.commit()
+    conn.close()
+
+    assert purge_expired_workplace_records() == {"cases": 1, "checkins": 1}
+    conn = db.get_db()
+    old_case = conn.execute(
+        "SELECT 1 FROM workplace_support_cases WHERE id='closed-old'"
+    ).fetchone()
+    old_note = conn.execute(
+        "SELECT 1 FROM workplace_case_notes WHERE id='old-note'"
+    ).fetchone()
+    retained_case = conn.execute(
+        "SELECT 1 FROM workplace_support_cases WHERE id='active-retained'"
+    ).fetchone()
+    retained_checkin = conn.execute(
+        "SELECT 1 FROM workplace_checkins WHERE id='active-checkin'"
+    ).fetchone()
+    conn.close()
+    assert old_case is None and old_note is None
+    assert retained_case is not None and retained_checkin is not None
