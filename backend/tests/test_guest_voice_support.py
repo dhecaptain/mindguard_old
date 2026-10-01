@@ -1,4 +1,8 @@
+import asyncio
+import json
 import os
+import time
+from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("JWT_SECRET", "guest-voice-test-secret")
@@ -266,7 +270,7 @@ def test_voice_is_disabled_until_review_and_provider_configuration(db, monkeypat
         assert "review" in start.json()["detail"].lower()
 
 
-def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipient(
+def test_voice_session_uses_server_controls_and_explicit_help_for_minor(
     db, monkeypatch
 ):
     from backend.routes import voice_support
@@ -277,10 +281,20 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
         hash_password("guest-test-password"),
         role_type="student",
     )
+    other_user = db.create_user(
+        "other-minor@example.org",
+        "Another Young Person",
+        hash_password("guest-test-password"),
+        role_type="student",
+    )
     conn = db.get_db()
     conn.execute(
         "UPDATE users SET status='approved',user_category='minor' WHERE id=?",
         (user["id"],),
+    )
+    conn.execute(
+        "UPDATE users SET status='approved',user_category='minor' WHERE id=?",
+        (other_user["id"],),
     )
     conn.commit()
     conn.close()
@@ -291,46 +305,53 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
         "VOICE_CHILD_SAFEGUARDING_REVIEW_COMPLETE",
         "VOICE_PRIVACY_REVIEW_COMPLETE",
         "VOICE_ACCESSIBILITY_REVIEW_COMPLETE",
+        "VOICE_SERVER_SIDE_CONTROLS_ENABLED",
     ):
         monkeypatch.setenv(name, "true")
+    monkeypatch.setenv("MINDGUARD_DISABLE_BACKGROUND_TASKS", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "test-only-provider-key")
     monkeypatch.setenv(
         "VOICE_SAFETY_SALT", "unit-test-only-safety-salt-at-least-32-chars"
     )
     captured = {}
 
-    class FakeResponse:
-        status_code = 200
+    class FakeProvider:
+        async def create_client_secret(self, payload, safety_id):
+            captured["payload"] = payload
+            captured["safety_id"] = safety_id
+            return {"id": "provider-session-test", "value": "ephemeral-client-credential"}
 
-        @staticmethod
-        def json():
-            return {
-                "id": "provider-session-test",
-                "value": "ephemeral-client-credential",
-                "expires_at": 1_900_000_000,
-            }
+        async def connect_webrtc(self, client_secret, offer_sdp):
+            assert client_secret == "ephemeral-client-credential"
+            assert offer_sdp.startswith("v=0")
+            return "v=0\r\n" + "a=answer\r\n" * 30, "rtc_voice_test_1"
 
-    class FakeAsyncClient:
-        async def __aenter__(self):
-            return self
+        @asynccontextmanager
+        async def sideband(self, call_id):
+            assert call_id == "rtc_voice_test_1"
 
-        async def __aexit__(self, *_):
-            return None
+            class FakeSocket:
+                def __init__(self):
+                    self.closed = asyncio.Event()
 
-        async def post(self, url, *, headers, json):
-            captured["url"] = url
-            captured["payload"] = json
-            return FakeResponse()
+                async def recv(self):
+                    await self.closed.wait()
+                    return json.dumps({"type": "session.closed"})
 
-    monkeypatch.setattr(
-        voice_support.httpx, "AsyncClient", lambda **_: FakeAsyncClient()
-    )
+                async def send(self, payload):
+                    if json.loads(payload).get("type") == "session.close":
+                        self.closed.set()
+
+            yield FakeSocket()
+
+    monkeypatch.setattr(voice_support, "OpenAIRealtimeProvider", lambda _key: FakeProvider())
     with _client() as client:
         headers = _login(client, user["email"])
         availability = client.get("/api/v1/voice/availability", headers=headers)
         assert (
             availability.status_code == 200 and availability.json()["is_minor"] is True
         )
+        assert availability.json()["server_side_controls_ready"] is True
         start = client.post(
             "/api/v1/voice/sessions",
             headers=headers,
@@ -338,7 +359,8 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
         )
         assert start.status_code == 201, start.text
         assert start.json()["max_duration_seconds"] == 900
-        assert start.json()["consent_version"] == "voice-v1"
+        assert start.json()["consent_version"] == "voice-v2"
+        assert "client_secret" not in start.json()
         assert "young person" in captured["payload"]["session"]["instructions"]
         assert (
             "No care professional is currently connected"
@@ -351,27 +373,73 @@ def test_voice_minor_safety_event_is_transient_and_truthful_without_care_recipie
         )
         assert duplicate.status_code == 409
 
-        transcript = "I want to end my life tonight"
-        alert = client.post(
-            f"/api/v1/voice/sessions/{start.json()['session_id']}/safety-event",
+        session_id = start.json()["session_id"]
+        other_headers = _login(client, other_user["email"])
+        assert client.get(
+            f"/api/v1/voice/sessions/{session_id}/state", headers=other_headers
+        ).status_code == 404
+        assert client.post(
+            f"/api/v1/voice/sessions/{session_id}/connect",
+            headers=other_headers,
+            json={"sdp": "v=0\r\n" + "a=offer\r\n" * 30},
+        ).status_code == 404
+        conn = db.get_db()
+        before_connect = conn.execute(
+            "SELECT status,client_secret_encrypted FROM voice_support_sessions WHERE id=?",
+            (session_id,),
+        ).fetchone()
+        conn.close()
+        assert before_connect["status"] == "connecting"
+        assert before_connect["client_secret_encrypted"] != "ephemeral-client-credential"
+
+        connected = client.post(
+            f"/api/v1/voice/sessions/{session_id}/connect",
             headers=headers,
-            json={"transcript_segment": transcript},
+            json={"sdp": "v=0\r\n" + "a=offer\r\n" * 30},
+        )
+        assert connected.status_code == 200, connected.text
+        assert connected.json()["status"] == "active"
+        assert "answer_sdp" in connected.json()
+        assert client.post(
+            f"/api/v1/voice/sessions/{session_id}/safety-event",
+            headers=headers,
+            json={"transcript_segment": "I want to end my life tonight", "client_flagged_urgent": True},
+        ).status_code == 410
+
+        alert = client.post(
+            f"/api/v1/voice/sessions/{session_id}/request-help", headers=headers
         )
         assert alert.status_code == 200
         assert alert.json()["delivery_status"] == "no_authorized_recipient"
         assert "could not notify" in alert.json()["message"].lower()
         assert "116" in alert.json()["message"]
 
+        ended = client.post(
+            f"/api/v1/voice/sessions/{session_id}/close",
+            headers=headers,
+            json={"summary": "A private user-written note"},
+        )
+        assert ended.status_code == 200
+        assert ended.json()["status"] == "ending"
+        for _ in range(30):
+            state = client.get(f"/api/v1/voice/sessions/{session_id}/state", headers=headers)
+            if state.json()["status"] == "completed":
+                break
+            time.sleep(0.1)
+        assert state.json()["status"] == "completed"
+
     conn = db.get_db()
     session = conn.execute(
-        "SELECT consent_version,summary_encrypted,safety_outcome FROM voice_support_sessions WHERE id=?",
+        "SELECT consent_version,summary_encrypted,safety_outcome,status,provider_call_id,client_secret_encrypted FROM voice_support_sessions WHERE id=?",
         (start.json()["session_id"],),
     ).fetchone()
     conn.close()
-    assert session["consent_version"] == "voice-v1"
-    assert session["summary_encrypted"] is None
-    assert session["safety_outcome"] == "urgent"
-    assert transcript not in str(dict(session))
+    assert session["consent_version"] == "voice-v2"
+    assert session["summary_encrypted"] != "A private user-written note"
+    assert session["safety_outcome"] == "user_requested_help"
+    assert session["status"] == "completed"
+    assert session["provider_call_id"] == "rtc_voice_test_1"
+    assert session["client_secret_encrypted"] is None
 
 
 def test_voice_alert_does_not_reach_workplace_provider_after_participation_withdrawal(

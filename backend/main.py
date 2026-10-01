@@ -277,6 +277,7 @@ from backend.routes.guest_analysis import (
 from backend.routes.voice_support import (
     router as voice_support_router,
     purge_expired_voice_summaries,
+    voice_sideband_maintenance_loop,
 )
 
 def _terms_accepted_for_auth(user: dict) -> bool:
@@ -724,6 +725,9 @@ async def startup():
                     _retention_maintenance_loop(), name="retention-maintenance"
                 ),
                 asyncio.create_task(_email_drain_loop(), name="email-drain"),
+                asyncio.create_task(
+                    voice_sideband_maintenance_loop(), name="voice-sideband-maintenance"
+                ),
             ]
         )
 
