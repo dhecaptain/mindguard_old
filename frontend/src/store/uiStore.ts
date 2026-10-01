@@ -14,6 +14,7 @@ export type PageKey =
   | 'workplace'
   | 'workplace-admin'
   | 'workplace-setup' | 'workplace-providers' | 'workplace-enrollment' | 'workplace-reports' | 'workplace-audit'
+  | 'workplace-plan'
   | 'workplace-checkins' | 'workplace-support' | 'workplace-cases' | 'workplace-messages' | 'workplace-appointments'
   | 'guest-analysis' | 'voice-support'
   | 'profile'

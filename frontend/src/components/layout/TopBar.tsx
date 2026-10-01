@@ -27,11 +27,12 @@ const PAGE_TITLES: Record<string, string> = {
   'notification-preferences': 'Notification Preferences',
   'guest-analysis': 'Guest Analysis',
   'voice-support': 'Voice Grounding Companion',
-  'workplace': 'Workplace Wellbeing',
-  'workplace-setup': 'Workplace Setup',
+  'workplace': 'Overview',
+  'workplace-setup': 'Setup & Privacy',
+  'workplace-plan': 'Plan & Subscription',
   'workplace-providers': 'Independent Providers',
   'workplace-enrollment': 'Employee Enrollment',
-  'workplace-reports': 'Protected Aggregate Reports',
+  'workplace-reports': 'Workplace Insights',
   'workplace-audit': 'Workplace Audit History',
   'workplace-checkins': 'Private Check-ins',
   'workplace-support': 'Provider Support',
@@ -53,6 +54,15 @@ export default function TopBar() {
   }, [])
 
   const title = PAGE_TITLES[currentPage] || 'MindGuard'
+  const workplaceContext = user?.role_type === 'company_admin'
+    ? 'Company administration'
+    : user?.role_type === 'workplace_employee'
+      ? 'Private employee space'
+      : user?.role_type === 'workplace_provider'
+        ? 'Independent provider'
+        : user?.role_type === 'admin' && currentPage === 'workplace-admin'
+          ? 'MindGuard operations'
+          : ''
   const initials = user?.name
     ? user.name.split(' ').map((p: string) => p[0]).join('').toUpperCase().slice(0, 2)
     : 'MG'
@@ -74,7 +84,7 @@ export default function TopBar() {
             </svg>
           </button>
         )}
-        <div className="text-[0.95rem] font-semibold text-[#1f2937]">{title}</div>
+        <div className="min-w-0"><div className="truncate text-[0.95rem] font-semibold text-[#1f2937]">{title}</div>{workplaceContext&&<div className="hidden text-[0.65rem] font-medium text-slate-500 sm:block">{workplaceContext}</div>}</div>
       </div>
       <div className="flex items-center gap-[12px]">
         <div className="relative text-[#6b7280]">

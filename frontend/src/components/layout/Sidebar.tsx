@@ -87,12 +87,12 @@ const ADMIN_NAV_ITEMS = [
 
 const COMPANY_ADMIN_NAV_ITEMS = [
   { key: 'workplace', icon: 'ti ti-layout-dashboard', label: 'Overview' },
-  { key: 'workplace-setup', icon: 'ti ti-list-check', label: 'Setup & policies' },
+  { key: 'workplace-setup', icon: 'ti ti-list-check', label: 'Setup & privacy' },
   { key: 'workplace-providers', icon: 'ti ti-stethoscope', label: 'Providers' },
   { key: 'workplace-enrollment', icon: 'ti ti-link', label: 'Enrollment' },
-  { key: 'workplace-reports', icon: 'ti ti-chart-line', label: 'Aggregate reports' },
+  { key: 'workplace-reports', icon: 'ti ti-chart-line', label: 'Insights' },
+  { key: 'workplace-plan', icon: 'ti ti-receipt-2', label: 'Plan & subscription' },
   { key: 'workplace-audit', icon: 'ti ti-history', label: 'Audit history' },
-  { key: 'voice-support', icon: 'ti ti-wave-sine', label: 'Voice support' },
   { key: 'profile', icon: 'ti ti-user-cog', label: 'Account profile' },
 ]
 const EMPLOYEE_NAV_ITEMS = [
