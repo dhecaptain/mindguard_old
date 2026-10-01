@@ -10,7 +10,7 @@ interface SignInPageProps {
 }
 
 export default function SignInPage({ onSuccess }: SignInPageProps) {
-  const { setAuth } = useAuthStore()
+  const { setAuth, setTermsAccepted } = useAuthStore()
   const setPage = useUiStore((s) => s.setPage)
   const [tab, setTab] = useState<'signin' | 'register'>('signin')
 
@@ -45,10 +45,12 @@ export default function SignInPage({ onSuccess }: SignInPageProps) {
     try {
       const user = await login(email, password)
       setAuth(user)
+      setTermsAccepted(Boolean(user.terms_accepted))
       const rt = user.role_type?.toLowerCase()
       if (rt === 'counsellor') setPage('counsellor-dashboard')
       else if (rt === 'school_admin') setPage('institution')
       else if (rt === 'admin') setPage('admin')
+      else if (['company_admin', 'workplace_employee', 'workplace_provider'].includes(rt || '')) setPage('workplace')
       onSuccess()
     } catch (err: any) {
       setError(err?.response?.data?.detail || err.message || 'Login failed')

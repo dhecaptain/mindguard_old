@@ -185,11 +185,11 @@ export default function Sidebar() {
 
   const sectionLabel = isWorkplace ? (role === 'company_admin' ? 'Company admin' : role === 'workplace_provider' ? 'Care provider' : 'Employee') : isAdmin ? 'Admin' : role === 'school_admin' ? 'School Admin' : isCounsellor ? 'Counsellor' : 'Student'
 
-  // A newly authenticated company admin starts on the generic student route
-  // unless the role-specific landing page is selected after auth resolves.
+  // Newly authenticated workplace users start from the generic dashboard route
+  // unless their role-specific landing page is selected after auth resolves.
   useEffect(() => {
-    if (role === 'company_admin' && currentPage === 'dashboard') setPage('workplace')
-  }, [currentPage, role, setPage])
+    if (isWorkplace && currentPage === 'dashboard') setPage('workplace')
+  }, [currentPage, isWorkplace, setPage])
 
   // Fetch open alert count for counsellors and admins
   useEffect(() => {
@@ -353,10 +353,12 @@ export default function Sidebar() {
           const isActive = currentPage === item.key
           const isAnalysed = analysedPlatforms[item.key]
           return (
-            <div
+            <button
               key={item.key}
+              type="button"
+              aria-current={isActive ? 'page' : undefined}
               onClick={() => setPage(item.key as PageKey)}
-              className={`relative flex items-center cursor-pointer transition-colors duration-150 ${
+              className={`relative flex w-full items-center border-0 bg-transparent text-left cursor-pointer transition-colors duration-150 ${
                 isCollapsed
                   ? 'justify-center mx-[6px] py-[10px] rounded-[8px]'
                   : 'gap-[10px] px-[14px] py-[9px] mx-[8px] my-[1px] rounded-[8px] text-[0.82rem]'
@@ -389,7 +391,7 @@ export default function Sidebar() {
                   {item.badge}
                 </span>
               ) : null)}
-            </div>
+            </button>
           )
         })}
       </div>
