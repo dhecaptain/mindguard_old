@@ -10,6 +10,8 @@ export interface DemoSubmission {
   role_title?: string
   country?: string
   student_count_range?: string
+  employee_population_range?: string
+  population_range?: string
   message?: string
   heard_about_us?: string
   consent_to_contact: boolean

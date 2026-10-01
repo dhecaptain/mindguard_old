@@ -4,17 +4,20 @@ import { submitDemoRequest } from '../api/demo'
 const ORG_TYPES = [
   { value: 'k12', label: 'K-12 school / district' },
   { value: 'university', label: 'University / college' },
+  { value: 'company', label: 'Company / employer' },
   { value: 'clinic', label: 'Clinic / counselling practice' },
   { value: 'research', label: 'Research organisation' },
   { value: 'other', label: 'Other' },
 ]
 
 const COUNT_RANGES = ['Under 500', '500–1,000', '1,001–5,000', '5,001–10,000', '10,000+']
+const EMPLOYEE_RANGES = ['Under 50', '50–199', '200–499', '500–999', '1,000+']
 
 const inputCls =
   'w-full bg-[#fafbfc] border border-[#e5e7eb] rounded-[8px] px-[12px] py-[9px] text-[0.85rem] text-[#1f2937] outline-none focus:border-[#0F766E] focus:ring-2 focus:ring-[#0F766E]/20'
 
 const labelCls = 'block text-[0.72rem] font-bold text-[#374151] uppercase tracking-[0.06em] mb-[6px]'
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Unable to submit the demo request.'
 
 export default function DemoRequestPage() {
   const [form, setForm] = useState({
@@ -24,7 +27,7 @@ export default function DemoRequestPage() {
     organisation_type: 'k12',
     role_title: '',
     country: '',
-    student_count_range: '',
+    population_range: '',
     message: '',
     heard_about_us: '',
   })
@@ -37,7 +40,7 @@ export default function DemoRequestPage() {
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }))
 
-  const valid = form.full_name.trim() && form.work_email.trim() && form.organisation.trim() && consentToContact
+  const valid = form.full_name.trim() && form.work_email.trim() && form.organisation.trim() && (form.organisation_type !== 'company' || form.population_range) && consentToContact
 
   const handleSubmit = async () => {
     if (!valid || submitting) return
@@ -54,8 +57,8 @@ export default function DemoRequestPage() {
       })
       setWarning(res.warning || null)
       setDone(`Thanks, ${form.full_name.trim()}! We've received your request and will be in touch within 2 business days.`)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     } finally {
       setSubmitting(false)
     }
@@ -78,8 +81,7 @@ export default function DemoRequestPage() {
         <div className="mb-[24px]">
           <h1 className="text-[1.4rem] font-bold text-[#1f2937]">Request a demo</h1>
           <p className="text-[0.85rem] text-[#6b7280] mt-[6px]">
-            See how MindGuard helps counselling teams monitor student wellbeing
-            across platforms — with consent baked in from day one.
+            Explore how MindGuard can support wellbeing in your organisation, with privacy and consent built in from day one.
           </p>
         </div>
 
@@ -112,14 +114,14 @@ export default function DemoRequestPage() {
               </div>
               <div>
                 <label className={labelCls}>Work email *</label>
-                <input className={inputCls} type="email" value={form.work_email} onChange={set('work_email')} placeholder="jordan@yourschool.edu" />
+                <input className={inputCls} type="email" value={form.work_email} onChange={set('work_email')} placeholder="you@organisation.org" />
               </div>
             </div>
 
             <div className="grid sm:grid-cols-2 gap-[14px]">
               <div>
                 <label className={labelCls}>Organisation *</label>
-                <input className={inputCls} value={form.organisation} onChange={set('organisation')} placeholder="Riverside High" />
+                <input className={inputCls} value={form.organisation} onChange={set('organisation')} placeholder={form.organisation_type === 'company' ? 'Acme Ltd' : 'Organisation name'} />
               </div>
               <div>
                 <label className={labelCls}>Organisation type</label>
@@ -143,10 +145,10 @@ export default function DemoRequestPage() {
             </div>
 
             <div>
-              <label className={labelCls}>Student population</label>
-              <select className={inputCls} value={form.student_count_range} onChange={set('student_count_range')}>
+              <label className={labelCls}>{form.organisation_type === 'company' ? 'Employee population *' : ['k12', 'university'].includes(form.organisation_type) ? 'Student population' : 'Population served'}</label>
+              <select className={inputCls} value={form.population_range} onChange={set('population_range')}>
                 <option value="">Select a range...</option>
-                {COUNT_RANGES.map((c) => (
+                {(form.organisation_type === 'company' ? EMPLOYEE_RANGES : COUNT_RANGES).map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
@@ -215,7 +217,7 @@ export default function DemoRequestPage() {
       </main>
 
       <footer className="text-center py-[18px] text-[0.72rem] text-[#9ca3af]">
-        MindGuard · Student wellbeing, consented.
+        MindGuard · Wellbeing, with consent.
       </footer>
     </div>
   )

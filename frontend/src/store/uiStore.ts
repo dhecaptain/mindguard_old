@@ -30,7 +30,10 @@ interface UiState {
   unreadCount: number
   sidebarOpen: boolean
   sidebarCollapsed: boolean
+  workplaceConversionLeadId: string | null
   setPage: (p: PageKey) => void
+  openWorkplaceConversion: (leadId: string) => void
+  clearWorkplaceConversion: () => void
   setNotifications: (n: Notification[]) => void
   markRead: (id: string) => void
   toggleSidebar: () => void
@@ -44,7 +47,10 @@ export const useUiStore = create<UiState>((set) => ({
   unreadCount: 0,
   sidebarOpen: false,
   sidebarCollapsed: false,
+  workplaceConversionLeadId: null,
   setPage: (p) => set({ currentPage: p, sidebarOpen: false }),
+  openWorkplaceConversion: (leadId) => set({ workplaceConversionLeadId: leadId, currentPage: 'workplace-admin', sidebarOpen: false }),
+  clearWorkplaceConversion: () => set({ workplaceConversionLeadId: null }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setSidebarOpen: (v) => set({ sidebarOpen: v }),
   toggleSidebarCollapsed: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),

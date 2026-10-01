@@ -45,8 +45,7 @@ export default function DemoForm() {
     organisation_type: 'k12',
     role_title: '',
     country: '',
-    student_count_range: '',
-    employee_population_range: '',
+    population_range: '',
     message: '',
     heard_about_us: '',
     website: '', // honeypot — humans never see or fill this
@@ -82,7 +81,7 @@ export default function DemoForm() {
     form.organisation.trim() &&
     form.role_title.trim() &&
     form.country.trim() &&
-    (form.organisation_type === 'company' ? form.employee_population_range : form.student_count_range) &&
+    form.population_range &&
     consentToContact
 
   const freeEmailDomain = (() => {
@@ -124,8 +123,7 @@ export default function DemoForm() {
           work_email: form.work_email.trim(),
           organisation: form.organisation.trim(),
           consent_to_contact: consentToContact,
-          student_count_range: form.organisation_type === 'company' ? '' : form.student_count_range,
-          employee_population_range: form.organisation_type === 'company' ? form.employee_population_range : '',
+          population_range: form.population_range,
           recaptcha_token: token,
         }),
       })
@@ -197,10 +195,10 @@ export default function DemoForm() {
         </div>
         <div>
           <label className={labelCls}>Work email *</label>
-          <input className={inputCls} type="email" value={form.work_email} onChange={set('work_email')} placeholder="jordan@yourschool.edu" />
+          <input className={inputCls} type="email" value={form.work_email} onChange={set('work_email')} placeholder="you@organisation.org" />
           {showFreeEmailWarning && (
             <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              For organisation sign-ups we recommend a school/work email address so our team can
+              For organisation sign-ups we recommend a work email address so our team can
               verify your organisation. A personal address is fine if you do not have one.
             </p>
           )}
@@ -209,7 +207,7 @@ export default function DemoForm() {
 
       <div>
         <label className={labelCls}>Organisation *</label>
-        <input className={inputCls} value={form.organisation} onChange={set('organisation')} placeholder="Riverside High" />
+        <input className={inputCls} value={form.organisation} onChange={set('organisation')} placeholder={form.organisation_type === 'company' ? 'Acme Ltd' : 'Organisation name'} />
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
@@ -233,8 +231,8 @@ export default function DemoForm() {
           <input className={inputCls} value={form.country} onChange={set('country')} placeholder="UK" />
         </div>
         <div>
-          <label className={labelCls} htmlFor="student-pop">{form.organisation_type === 'company' ? 'Employee population *' : 'Student population *'}</label>
-          <select id="student-pop" className={inputCls} value={form.organisation_type === 'company' ? form.employee_population_range : form.student_count_range} onChange={set(form.organisation_type === 'company' ? 'employee_population_range' : 'student_count_range')}>
+          <label className={labelCls} htmlFor="student-pop">{form.organisation_type === 'company' ? 'Employee population *' : ['k12', 'university'].includes(form.organisation_type) ? 'Student population *' : 'Population served *'}</label>
+          <select id="student-pop" className={inputCls} value={form.population_range} onChange={set('population_range')}>
             <option value="">Select a range...</option>
             {(form.organisation_type === 'company' ? EMPLOYEE_RANGES : COUNT_RANGES).map((c) => (
               <option key={c} value={c}>{c}</option>

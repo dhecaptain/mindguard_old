@@ -33,7 +33,7 @@ def _company(db, admin_email="owner@acme.test"):
     )
     conn = db.get_db()
     conn.execute(
-        "UPDATE users SET status='approved', user_category='adult', role_type='company_admin', institution_id=? WHERE id=?",
+        "UPDATE users SET status='approved', user_category='company_staff', role_type='company_admin', institution_id=?, workplace_admin_role='owner', workplace_invitation_status='accepted', workplace_terms_version='workplace-admin-v1',terms_accepted_at=datetime('now') WHERE id=?",
         (company["id"], admin["id"]),
     )
     conn.execute("UPDATE institutions SET status='ACTIVE' WHERE id=?", (company["id"],))
@@ -85,6 +85,81 @@ def _configure_enrollment_readiness(db, company, admin):
     return provider
 
 
+def _global_admin(db):
+    admin = db.create_user(
+        "global-admin@mindguard.test",
+        "Global Admin",
+        hash_password("workplace-test-password"),
+        role_type="admin",
+    )
+    conn = db.get_db()
+    conn.execute("UPDATE users SET status='approved' WHERE id=?", (admin["id"],))
+    conn.commit()
+    conn.close()
+    return admin
+
+
+def test_company_demo_conversion_is_atomic_invites_first_admin_and_is_idempotent(db, monkeypatch):
+    demo = db.create_demo_request(
+        "Company Owner", "owner@acme.co.ke", "Acme Ltd", "company",
+        employee_population_range="50–199", country="KE",
+    )
+    db.update_demo_request(demo["id"], status="qualified")
+    admin = _global_admin(db)
+    from backend.services import email_sender
+    monkeypatch.setattr(email_sender, "_deliver", lambda *args: (True, "", "test-message-id"))
+    with _client() as client:
+        headers = _login(client, admin["email"])
+        payload = {
+            "company_name": "Acme Workplace",
+            "admin_name": "Company Owner",
+            "admin_email": "owner@acme.co.ke",
+            "work_email_domains": ["acme.co.ke"],
+            "privacy_contact_email": "privacy@acme.co.ke",
+            "population_range": "50–199",
+            "retention_days": 365,
+        }
+        response = client.post(f"/api/v1/workplace/admin/demo-requests/{demo['id']}/convert", json=payload, headers=headers)
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["company"]["name"] == "Acme Workplace"
+        assert body["administrator"]["status"] == "pending"
+        assert "token=" not in response.text
+        queued = db.get_db().execute("SELECT * FROM email_outbox WHERE related_type='workplace_admin_invitation'").fetchone()
+        assert queued is not None and "token=" in queued["body_html"]
+        assert queued["metadata_json"] is not None and demo["id"] in queued["metadata_json"]
+        repeat = client.post(f"/api/v1/workplace/admin/demo-requests/{demo['id']}/convert", json=payload, headers=headers)
+        assert repeat.status_code == 409
+
+    conn = db.get_db()
+    assert conn.execute("SELECT COUNT(*) FROM institutions WHERE type='company'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM users WHERE role_type='company_admin'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM email_outbox WHERE related_type='workplace_admin_invitation'").fetchone()[0] == 1
+    events = {row[0] for row in conn.execute("SELECT event_type FROM workplace_audit_events").fetchall()}
+    assert "WORKPLACE_ADMIN_INVITATION_CREATED" in events
+    conn.close()
+
+
+def test_company_demo_conversion_rejects_unqualified_and_institution_route(db):
+    from backend.main import app
+
+    company_demo = db.create_demo_request("Lead", "lead@acme.co.ke", "Acme", "company")
+    education_demo = db.create_demo_request("School", "lead@school.test", "School", "k12")
+    admin = _global_admin(db)
+    payload = {"company_name":"Acme", "admin_name":"Lead", "admin_email":"lead@acme.co.ke", "work_email_domains":["acme.co.ke"], "privacy_contact_email":"privacy@acme.co.ke"}
+    with _client() as client:
+        headers = _login(client, admin["email"])
+        rejected = client.post(f"/api/v1/workplace/admin/demo-requests/{company_demo['id']}/convert", json=payload, headers=headers)
+        assert rejected.status_code == 409
+        wrong_route = client.post(f"/api/v1/admin/demo-requests/{company_demo['id']}/convert", headers=headers)
+        assert wrong_route.status_code == 400
+        wrong_type = client.post(f"/api/v1/workplace/admin/demo-requests/{education_demo['id']}/convert", json=payload, headers=headers)
+        assert wrong_type.status_code == 400
+    conn = db.get_db()
+    assert conn.execute("SELECT COUNT(*) FROM institutions WHERE type='company'").fetchone()[0] == 0
+    conn.close()
+
+
 def test_company_admin_is_not_allowed_legacy_school_or_social_routes(db):
     _, admin = _company(db)
     with _client() as client:
@@ -110,7 +185,7 @@ def test_workplace_checkins_are_encrypted_and_not_returned_to_company_admin(db):
     conn = db.get_db()
     now = "2026-09-27T10:00:00+00:00"
     conn.execute(
-        "UPDATE users SET status='approved', user_category='workplace_employee' WHERE id=?",
+        "UPDATE users SET status='approved', user_category='workplace_employee',workplace_terms_version='workplace-participant-v1',terms_accepted_at=datetime('now') WHERE id=?",
         (employee["id"],),
     )
     conn.execute(
@@ -158,7 +233,7 @@ def test_aggregate_report_suppresses_below_ten_active_respondents(db):
         )
         conn = db.get_db()
         conn.execute(
-            "UPDATE users SET status='approved', user_category='workplace_employee' WHERE id=?",
+            "UPDATE users SET status='approved', user_category='workplace_employee',workplace_terms_version='workplace-participant-v1',terms_accepted_at=datetime('now') WHERE id=?",
             (person["id"],),
         )
         conn.execute(
@@ -182,6 +257,11 @@ def test_aggregate_report_suppresses_below_ten_active_respondents(db):
         headers = _login(client, admin["email"])
         response = client.get("/api/v1/workplace/admin/report", headers=headers)
         assert response.status_code == 200 and response.json()["suppressed"] is True
+        trends = client.get("/api/v1/workplace/admin/report/trends", headers=headers)
+        assert trends.status_code == 200
+        assert trends.json()["suppressed"] is True
+        assert trends.json()["periods"] == []
+        assert "2026-09" not in trends.text
         conn = db.get_db()
         person = conn.execute(
             "SELECT user_id FROM workplace_memberships WHERE company_id=? LIMIT 1",
@@ -281,6 +361,7 @@ def test_shared_link_requires_work_email_verification_before_optin_account(
                 "email": "one@acme.com",
                 "password": "secure-workplace-password",
                 "accepted_notice": True,
+                "accepted_workplace_terms": True,
             },
         )
         assert start.status_code == 202, start.text
@@ -329,7 +410,7 @@ def test_provider_gets_only_the_exact_checkin_employee_shares_and_can_be_revoked
     now = "2026-09-27T10:00:00+00:00"
     conn = db.get_db()
     conn.execute(
-        "UPDATE users SET status='approved', user_category='workplace_employee' WHERE id=?",
+        "UPDATE users SET status='approved', user_category='workplace_employee',workplace_terms_version='workplace-participant-v1',terms_accepted_at=datetime('now') WHERE id=?",
         (employee["id"],),
     )
     conn.execute(
@@ -458,6 +539,7 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
         assert create.json()["legal_review_complete"] is False
         assert all(row["type"] != "company" for row in db.list_institutions())
         company_headers = _login(client, "owner@acme.com")
+        assert client.post("/api/auth/terms", headers=company_headers).status_code == 200
         blocked = client.post(
             "/api/v1/workplace/admin/enrollment-link", headers=company_headers
         )
@@ -662,3 +744,124 @@ def test_workplace_retention_purges_old_closed_case_data_but_keeps_active_cases(
     conn.close()
     assert old_case is None and old_note is None
     assert retained_case is not None and retained_checkin is not None
+
+
+def test_provider_status_and_credential_are_checked_on_all_sensitive_routes(db):
+    company, admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, admin)
+    employee = db.create_user("guarded@acme.test", "Guarded Worker", hash_password("workplace-test-password"), role_type="workplace_employee", institution_id=company["id"])
+    now = "2026-10-01T10:00:00+00:00"
+    conn = db.get_db()
+    conn.execute("UPDATE users SET status='approved',user_category='workplace_employee',workplace_terms_version='workplace-participant-v1',terms_accepted_at=? WHERE id=?", (now,employee["id"]))
+    conn.execute("INSERT INTO workplace_memberships (id,company_id,user_id,status,notice_version,consented_at,created_at,updated_at) VALUES ('guard-m',?,?,'active','v1',?,?,?)", (company["id"],employee["id"],now,now,now))
+    conn.execute("INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES ('guard-c',?,?,?,?)", (company["id"],employee["id"],encrypt_pii('{"mood":3}'),now))
+    conn.execute("INSERT INTO workplace_support_cases (id,company_id,user_id,provider_id,status,share_consent_at,shared_checkin_id,created_at,updated_at) VALUES ('guard-case',?,?,?,'open',?,'guard-c',?,?)", (company["id"],employee["id"],provider["id"],now,now,now))
+    conn.execute("INSERT INTO workplace_appointments (id,case_id,company_id,user_id,provider_id,starts_at,mode,status,created_at,updated_at) VALUES ('guard-appt','guard-case',?,?,?,?,'online','scheduled',?,?)", (company["id"],employee["id"],provider["id"],"2026-10-03T10:00:00+00:00",now,now))
+    conn.commit(); conn.close()
+    with _client() as client:
+        headers = _login(client, provider["email"])
+        conn = db.get_db(); conn.execute("UPDATE users SET status='suspended' WHERE id=?", (provider["id"],)); conn.commit(); conn.close()
+        calls = [
+            client.get("/api/v1/workplace/provider/cases", headers=headers),
+            client.get("/api/v1/workplace/provider/cases/guard-case", headers=headers),
+            client.post("/api/v1/workplace/provider/cases/guard-case/notes", headers=headers, json={"private_note":"note"}),
+            client.get("/api/v1/workplace/provider/cases/guard-case/messages", headers=headers),
+            client.post("/api/v1/workplace/provider/cases/guard-case/messages", headers=headers, json={"message":"hello"}),
+            client.post("/api/v1/workplace/provider/cases/guard-case/appointments", headers=headers, json={"starts_at":"2026-10-03T10:00:00+00:00","mode":"online","location_or_link":"https://meet.example.test"}),
+            client.get("/api/v1/workplace/provider/appointments", headers=headers),
+            client.post("/api/v1/workplace/provider/appointments/guard-appt/status", headers=headers, json={"status":"cancelled"}),
+            client.post("/api/v1/workplace/provider/cases/guard-case/close", headers=headers),
+        ]
+        assert [response.status_code for response in calls] == [403] * len(calls)
+        conn = db.get_db(); conn.execute("UPDATE users SET status='approved' WHERE id=?", (provider["id"],)); conn.execute("UPDATE workplace_provider_credentials SET status='revoked' WHERE provider_id=?", (provider["id"],)); conn.commit(); conn.close()
+        assert client.get("/api/v1/workplace/provider/cases/guard-case", headers=headers).status_code == 404
+
+
+def test_workplace_terms_domains_admin_invites_and_ownership_are_enforced(db, monkeypatch):
+    company, owner = _company(db)
+    from backend.routes import workplace
+    sent_bodies = []
+    monkeypatch.setattr(workplace, "send_html_email", lambda email, subject, body, **kwargs: (sent_bodies.append(body) or True, ""))
+    with _client() as client:
+        owner_headers = _login(client, owner["email"])
+        conn = db.get_db(); conn.execute("UPDATE users SET workplace_terms_version=NULL WHERE id=?", (owner["id"],)); conn.commit(); conn.close()
+        assert client.get("/api/v1/workplace/admin/setup", headers=owner_headers).status_code == 403
+        assert client.get("/api/auth/me", headers=owner_headers).json()["terms_accepted"] is False
+        assert client.post("/api/auth/terms", headers=owner_headers).status_code == 200
+        assert client.get("/api/v1/workplace/admin/setup", headers=owner_headers).status_code == 200
+
+        added = client.post("/api/v1/workplace/admin/domains", headers=owner_headers, json={"domain":" @New.Acme.co.ke "})
+        assert added.status_code == 201 and added.json()["domains"] == ["acme.test", "new.acme.co.ke"]
+        assert client.post("/api/v1/workplace/admin/domains", headers=owner_headers, json={"domain":"NEW.ACME.CO.KE"}).status_code == 409
+        assert client.request("DELETE", "/api/v1/workplace/admin/domains", headers=owner_headers, json={"domain":"acme.test"}).status_code == 200
+        assert client.request("DELETE", "/api/v1/workplace/admin/domains", headers=owner_headers, json={"domain":"new.acme.co.ke"}).status_code == 409
+
+        invited = client.post("/api/v1/workplace/admin/administrators", headers=owner_headers, json={"name":"Second Admin","email":"second@new.acme.co.ke"})
+        assert invited.status_code == 201, invited.text
+        second_id = invited.json()["id"]
+        old_token = re.search(r"token=([^&\"]+)", sent_bodies[-1]).group(1)
+        resent = client.post(f"/api/v1/workplace/admin/administrators/{second_id}/resend", headers=owner_headers)
+        assert resent.status_code == 200
+        fresh_token = re.search(r"token=([^&\"]+)", sent_bodies[-1]).group(1)
+        assert client.post("/api/auth/invite/verify", json={"token":old_token}).status_code == 400
+        assert client.delete(f"/api/v1/workplace/admin/administrators/{second_id}", headers=owner_headers).json()["invitation_revoked"] is True
+        assert client.post("/api/auth/invite/verify", json={"token":fresh_token}).status_code == 400
+
+        other_company, other_owner = _company(db, "other-owner@other.test")
+        third = client.post("/api/v1/workplace/admin/administrators", headers=owner_headers, json={"name":"New Owner","email":"new-owner@new.acme.co.ke"})
+        assert third.status_code == 201, third.text
+        new_owner_token = re.search(r"token=([^&\"]+)", sent_bodies[-1]).group(1)
+        accepted = client.post("/api/auth/invite/accept", json={"token":new_owner_token,"password":"new-owner-password"})
+        assert accepted.status_code == 200, accepted.text
+        new_owner_headers = {"Authorization":f"Bearer {accepted.json()['access_token']}"}
+        assert client.post("/api/auth/terms", headers=new_owner_headers).status_code == 200
+        transferred = client.post("/api/v1/workplace/admin/ownership/transfer", headers=owner_headers, json={"administrator_id":third.json()["id"]})
+        assert transferred.status_code == 200, transferred.text
+        assert client.post("/api/v1/workplace/admin/ownership/transfer", headers=owner_headers, json={"administrator_id":other_owner["id"]}).status_code == 403
+        assert client.post("/api/v1/workplace/admin/ownership/transfer", headers=new_owner_headers, json={"administrator_id":other_owner["id"]}).status_code == 404
+        assert client.delete(f"/api/v1/workplace/admin/administrators/{third.json()['id']}", headers=new_owner_headers).status_code == 409
+        conn = db.get_db()
+        owners = conn.execute("SELECT COUNT(*) FROM users WHERE institution_id=? AND role_type='company_admin' AND workplace_admin_role='owner'", (company["id"],)).fetchone()[0]
+        owner_id = conn.execute("SELECT id FROM users WHERE institution_id=? AND role_type='company_admin' AND workplace_admin_role='owner'", (company["id"],)).fetchone()[0]
+        conn.close()
+        assert owners == 1 and owner_id == third.json()["id"]
+
+
+def test_existing_verified_account_joins_once_and_withdrawal_stays_private(db, monkeypatch):
+    company, admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, admin)
+    existing = db.create_user("existing@acme.test", "Existing Account", hash_password("workplace-test-password"))
+    conn = db.get_db(); conn.execute("UPDATE users SET role_type='student',user_category='adult',status='approved',institution_id=NULL WHERE id=?", (existing["id"],)); conn.commit(); conn.close()
+    from backend.services.crypto import hash_token
+    from backend.routes import workplace
+    token = "existing-account-workplace-link-token-long-enough"
+    conn = db.get_db()
+    conn.execute("INSERT INTO workplace_enrollment_links (id,company_id,token_hash,expires_at,created_by,created_at) VALUES ('existing-link',?,?,datetime('now','+90 days'),?,datetime('now'))", (company["id"],hash_token(token),admin["id"]))
+    conn.commit(); conn.close()
+    sent = {}
+    def capture(email, subject, body, **kwargs):
+        sent["body"] = body
+        return True, ""
+    monkeypatch.setattr(workplace, "send_html_email", capture)
+    with _client() as client:
+        headers = _login(client, existing["email"])
+        start = client.post("/api/v1/workplace/enrollment/existing/start", headers=headers, json={"token":token,"accepted_notice":True,"accepted_workplace_terms":True})
+        assert start.status_code == 202, start.text
+        code = re.search(r"<strong>([0-9]{6})</strong>", sent["body"]).group(1)
+        verify = client.post("/api/v1/workplace/enrollment/existing/verify", headers=headers, json={"challenge_id":start.json()["challenge_id"],"code":code})
+        assert verify.status_code == 200, verify.text
+        employee_headers = {"Authorization":f"Bearer {verify.json()['access_token']}"}
+        assert client.get("/api/v1/workplace/me", headers=employee_headers).status_code == 200
+        conn = db.get_db(); count = conn.execute("SELECT COUNT(*) FROM users WHERE lower(email)=lower(?)", (existing["email"],)).fetchone()[0]; conn.close()
+        assert count == 1
+        assert client.post("/api/v1/workplace/enrollment/existing/start", headers=employee_headers, json={"token":token,"accepted_notice":True,"accepted_workplace_terms":True}).status_code == 403
+        assert client.post("/api/v1/workplace/withdraw", headers=employee_headers).status_code == 200
+        company_headers = _login(client, admin["email"])
+        audit = client.get("/api/v1/workplace/admin/audit", headers=company_headers)
+        report = client.get("/api/v1/workplace/admin/report", headers=company_headers)
+        assert audit.status_code == 200 and "EMPLOYEE_WITHDREW" not in audit.text and existing["id"] not in audit.text
+        assert report.status_code == 200 and report.json()["suppressed"] is True
+        conn = db.get_db()
+        internal = conn.execute("SELECT actor_user_id FROM workplace_audit_events WHERE company_id=? AND event_type='EMPLOYEE_WITHDREW_PARTICIPATION'", (company["id"],)).fetchone()
+        conn.close()
+        assert internal and internal["actor_user_id"] == existing["id"]

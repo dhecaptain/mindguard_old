@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -266,6 +267,8 @@ from backend.logging_setup import (
 from backend.routes.workplace import (
     router as workplace_router,
     purge_expired_workplace_records,
+    WORKPLACE_ADMIN_TERMS_VERSION,
+    WORKPLACE_EMPLOYEE_TERMS_VERSION,
 )
 from backend.routes.guest_analysis import (
     router as guest_analysis_router,
@@ -275,6 +278,12 @@ from backend.routes.voice_support import (
     router as voice_support_router,
     purge_expired_voice_summaries,
 )
+
+def _terms_accepted_for_auth(user: dict) -> bool:
+    return bool(user.get("terms_accepted_at")) and (
+        (user.get("role_type") != "company_admin" or user.get("workplace_terms_version") == WORKPLACE_ADMIN_TERMS_VERSION)
+        and (user.get("role_type") != "workplace_employee" or user.get("workplace_terms_version") == WORKPLACE_EMPLOYEE_TERMS_VERSION)
+    )
 
 _background_tasks: list[asyncio.Task] = []
 
@@ -984,7 +993,7 @@ async def login(req: LoginRequest, request: Request):
         "role": user["role_type"].capitalize(),
         "role_type": user["role_type"],
         "referral_code": _generate_referral_code(),
-        "terms_accepted": bool(user.get("terms_accepted_at")),
+        "terms_accepted": _terms_accepted_for_auth(user),
         "user_category": _auth_user_category(user),
         "institution_id": user.get("institution_id"),
         "profile_completed": bool(user.get("profile_completed_at"))
@@ -1132,7 +1141,7 @@ async def get_me(user: dict = Depends(require_auth)):
         "role": user["role_type"].capitalize(),
         "role_type": user["role_type"],
         "referral_code": user.get("referral_code") or _generate_referral_code(),
-        "terms_accepted": bool(user.get("terms_accepted_at")),
+        "terms_accepted": _terms_accepted_for_auth(user),
         "user_category": _auth_user_category(user),
         "institution_id": user.get("institution_id"),
         "onboarding_completed": bool(user.get("onboarding_completed_at")),
@@ -1164,6 +1173,20 @@ async def get_me(user: dict = Depends(require_auth)):
 @app.post("/api/auth/terms")
 async def accept_terms(request: Request, user: dict = Depends(require_auth)):
     newly = accept_user_terms(user["id"])
+    workplace_version = (
+        WORKPLACE_ADMIN_TERMS_VERSION if user.get("role_type") == "company_admin"
+        else WORKPLACE_EMPLOYEE_TERMS_VERSION if user.get("role_type") == "workplace_employee"
+        else None
+    )
+    if workplace_version:
+        conn = get_db()
+        conn.execute("UPDATE users SET workplace_terms_version=? WHERE id=?", (workplace_version, user["id"]))
+        if user.get("workplace_terms_version") != workplace_version and user.get("institution_id"):
+            event = "WORKPLACE_ADMIN_TERMS_ACCEPTED" if user.get("role_type") == "company_admin" else "WORKPLACE_EMPLOYEE_TERMS_ACCEPTED"
+            conn.execute("INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), user["institution_id"], user["id"], event, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+        conn.close()
+        newly = newly or user.get("workplace_terms_version") != workplace_version
     if newly:
         write_audit(
             user["id"],
@@ -1909,7 +1932,7 @@ async def google_auth(data: dict, request: Request):
         "role": user["role_type"].capitalize(),
         "role_type": user["role_type"],
         "referral_code": _generate_referral_code(),
-        "terms_accepted": bool(user.get("terms_accepted_at")),
+        "terms_accepted": _terms_accepted_for_auth(user),
         "user_category": _auth_user_category(user),
         "institution_id": user.get("institution_id"),
         "profile_completed": bool(user.get("profile_completed_at"))
@@ -3502,6 +3525,10 @@ async def verify_invite(data: dict):
         try:
             exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             if datetime.now(timezone.utc) > exp:
+                if user.get("role_type") == "company_admin":
+                    conn = get_db()
+                    conn.execute("UPDATE users SET workplace_invitation_status='expired',invitation_token_hash=NULL WHERE id=? AND status IN ('pending','invited')", (user["id"],))
+                    conn.commit(); conn.close()
                 raise HTTPException(400, "Invitation has expired")
         except HTTPException:
             raise
@@ -3532,6 +3559,10 @@ async def accept_invite(data: dict, request: Request):
         try:
             exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             if datetime.now(timezone.utc) > exp:
+                if user.get("role_type") == "company_admin":
+                    conn = get_db()
+                    conn.execute("UPDATE users SET workplace_invitation_status='expired',invitation_token_hash=NULL WHERE id=? AND status IN ('pending','invited')", (user["id"],))
+                    conn.commit(); conn.close()
                 raise HTTPException(400, "Invitation has expired")
         except HTTPException:
             raise
@@ -3540,6 +3571,39 @@ async def accept_invite(data: dict, request: Request):
     if user.get("status") not in ("pending", "invited"):
         raise HTTPException(400, "Invitation already used")
     pw_hash = hash_password(password)
+    if user.get("role_type") == "company_admin":
+        # Workplace invitation consumption is atomic: a resent/revoked/expired
+        # token cannot race another acceptance or activate a removed admin.
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT * FROM users WHERE id=? AND invitation_token_hash=?", (user["id"], token_hash)).fetchone()
+            if not current or current["status"] not in ("pending", "invited") or current["workplace_invitation_status"] == "revoked":
+                conn.rollback(); conn.close()
+                raise HTTPException(400, "Invalid, revoked, or already used invitation")
+            expiry = current["invitation_expires_at"]
+            if expiry and datetime.fromisoformat(expiry.replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                conn.execute("UPDATE users SET workplace_invitation_status='expired',invitation_token_hash=NULL WHERE id=?", (user["id"],))
+                conn.commit(); conn.close()
+                raise HTTPException(400, "Invitation has expired")
+            company_id = current["institution_id"]
+            conn.execute("UPDATE users SET password_hash=?,status='approved',user_category='company_staff',terms_accepted_at=NULL,workplace_terms_version=NULL,invitation_token_hash=NULL,invitation_expires_at=NULL,workplace_invitation_status='accepted' WHERE id=?", (pw_hash, user["id"]))
+            conn.execute("INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES (?,?,?,'WORKPLACE_ADMIN_ACTIVATED',?)", (str(uuid.uuid4()),company_id,user["id"],datetime.now(timezone.utc).isoformat()))
+            conn.commit()
+        except HTTPException:
+            if conn: conn.close()
+            raise
+        except Exception:
+            conn.rollback(); conn.close()
+            raise HTTPException(409, "Unable to activate this workplace administrator invitation")
+        conn.close()
+        fresh = get_user_by_id(user["id"])
+        token_value = create_access_token(fresh["id"], fresh["role_type"])
+        return {
+            "ok": True,
+            "access_token": token_value,
+            "user": {"id": fresh["id"], "email": fresh["email"], "name": fresh["name"], "role_type": fresh["role_type"], "user_category": _auth_user_category(fresh), "institution_id": fresh.get("institution_id"), "profile_completed": True},
+        }
     update_user_password(user["id"], pw_hash)
     update_user_status(user["id"], "approved")
     mark_user_as_staff(user["id"])
@@ -4719,6 +4783,8 @@ async def admin_permanently_delete_user(
     target = get_user_by_id(user_id)
     if not target:
         raise HTTPException(404, "User not found")
+    if target.get("role_type") == "company_admin" and target.get("workplace_admin_role") == "owner":
+        raise HTTPException(409, "Transfer workplace ownership before permanently deleting the company owner")
     if (data.get("confirmation") or "").strip().lower() != str(
         target.get("email") or ""
     ).strip().lower():
@@ -4742,6 +4808,10 @@ async def admin_permanently_delete_user(
         payload={"email": target.get("email"), "role_type": target.get("role_type")},
         ip=request.client.host if request.client else None,
     )
+    if target.get("role_type") == "company_admin" and target.get("institution_id"):
+        conn = get_db()
+        conn.execute("INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES (?,?,?,'WORKPLACE_ADMIN_REMOVED',?)", (str(uuid.uuid4()), target["institution_id"], user["id"], datetime.now(timezone.utc).isoformat()))
+        conn.commit(); conn.close()
     deleted = permanently_delete_user(user_id)
     return {"ok": True, "deleted_user_id": deleted["id"] if deleted else user_id}
 
@@ -7558,6 +7628,12 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
         raise HTTPException(
             400, "Consent to contact is required to submit a demo request"
         )
+    if data.organisation_type == "company":
+        population = data.population_range
+        if population is None:
+            population = data.employee_population_range
+        if not population or not population.strip():
+            raise HTTPException(422, "Employee population is required for company demo requests")
     try:
         demo = create_demo_request(
             full_name=data.full_name.strip(),
@@ -7568,6 +7644,11 @@ async def v1_demo_request_create(data: DemoRequestCreate, request: Request):
             country=data.country,
             student_count_range=data.student_count_range,
             employee_population_range=data.employee_population_range,
+            population_range=(
+                data.population_range
+                if data.population_range is not None
+                else data.employee_population_range or data.student_count_range
+            ),
             message=data.message,
             heard_about_us=data.heard_about_us,
             consent_to_contact=data.consent_to_contact,
@@ -7838,6 +7919,8 @@ async def v1_admin_convert_demo_request(
         raise HTTPException(
             409, "This demo request is already linked to an institution"
         )
+    if str(demo.get("organisation_type") or "").lower() == "company":
+        raise HTTPException(400, "Company demo requests must use workplace provisioning")
     requester_email = (demo.get("work_email") or "").strip().lower()
     existing = get_user_by_email(requester_email) if requester_email else None
     if existing:

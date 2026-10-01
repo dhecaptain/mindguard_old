@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { DEMO_STATUSES, convertDemoRequest, getDemoRequests, scheduleDemoRequest, updateDemoRequest } from '../../api/admin'
 import api from '../../api/client'
 import type { DemoRequest } from '../../types'
+import { useUiStore } from '../../store/uiStore'
 
 interface AssignableUser {
   id: string
@@ -20,8 +21,10 @@ const STATUS_STYLE: Record<string, string> = {
   closed_won: 'bg-[#d1fae5] text-[#065f46]',
   closed_lost: 'bg-[#fee2e2] text-[#991b1b]',
 }
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'The request could not be completed.'
 
 export default function DemoRequestsPanel() {
+  const openWorkplaceConversion = useUiStore((s) => s.openWorkplaceConversion)
   const [requests, setRequests] = useState<DemoRequest[]>([])
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(false)
@@ -36,14 +39,16 @@ export default function DemoRequestsPanel() {
     setError(null)
     try {
       setRequests(await getDemoRequests(filter || undefined))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     } finally {
       setLoading(false)
     }
   }, [filter])
 
-  useEffect(() => { load() }, [load])
+  // Fetch demo requests when the selected status filter changes.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void load() }, [load])
 
   useEffect(() => {
     api.get('/admin/users')
@@ -58,8 +63,8 @@ export default function DemoRequestsPanel() {
     try {
       const updated = await updateDemoRequest(id, { status: status as DemoRequest['status'] })
       setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, ...updated } : r)))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     }
   }
 
@@ -67,8 +72,8 @@ export default function DemoRequestsPanel() {
     try {
       const updated = await updateDemoRequest(id, { notes })
       setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, ...updated } : r)))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     }
   }
 
@@ -76,8 +81,8 @@ export default function DemoRequestsPanel() {
     try {
       const updated = await updateDemoRequest(id, { assigned_to: userId || null })
       setRequests((rs) => rs.map((r) => (r.id === id ? { ...r, ...updated } : r)))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     }
   }
 
@@ -90,8 +95,8 @@ export default function DemoRequestsPanel() {
       setNotice(result.email_sent
         ? `Institution provisioned and school-admin invitation queued for ${result.staff.email}.`
         : `Institution provisioned, but the school-admin invitation email was not confirmed${result.email_error ? `: ${result.email_error}` : '. Check email delivery and resend the invitation.'}`)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     } finally {
       setConverting(null)
     }
@@ -109,8 +114,8 @@ export default function DemoRequestsPanel() {
     try {
       const result = await scheduleDemoRequest(request.id, new Date(dateInput.value).toISOString(), urlInput.value.trim())
       setRequests((rs) => rs.map((r) => r.id === request.id ? result.demo_request : r))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(errorMessage(e))
     } finally {
       setScheduling(null)
     }
@@ -228,7 +233,15 @@ export default function DemoRequestsPanel() {
                   </td>
                   <td className="py-[12px] px-[20px]">
                     {r.institution_id ? (
-                      <div className="text-[0.72rem] text-[#047857] font-semibold">Institution provisioned</div>
+                      <div className="text-[0.72rem] text-[#047857] font-semibold">{r.organisation_type === 'company' ? 'Workplace provisioned' : 'Institution provisioned'}</div>
+                    ) : r.organisation_type === 'company' ? (
+                      <button
+                        onClick={() => openWorkplaceConversion(r.id)}
+                        disabled={!['qualified', 'demo_scheduled', 'closed_won'].includes(r.status)}
+                        className="rounded-[7px] bg-[#0F766E] px-[9px] py-[5px] text-[0.7rem] font-semibold text-white disabled:opacity-40"
+                      >
+                        Set up workplace
+                      </button>
                     ) : (
                       <button
                         onClick={() => handleConvert(r.id)}
@@ -241,8 +254,8 @@ export default function DemoRequestsPanel() {
                   </td>
                   <td className="py-[12px] px-[20px] text-[#374151]">
                     {r.organisation}
-                    {r.student_count_range && (
-                      <div className="text-[0.7rem] text-[#9ca3af]">{r.student_count_range}</div>
+                    {(r.population_range || r.employee_population_range || r.student_count_range) && (
+                      <div className="text-[0.7rem] text-[#9ca3af]">{r.population_range || r.employee_population_range || r.student_count_range}</div>
                     )}
                     {r.country && (
                       <div className="text-[0.7rem] text-[#9ca3af]">{r.country}</div>

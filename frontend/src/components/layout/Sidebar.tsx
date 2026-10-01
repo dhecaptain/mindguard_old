@@ -185,6 +185,12 @@ export default function Sidebar() {
 
   const sectionLabel = isWorkplace ? (role === 'company_admin' ? 'Company admin' : role === 'workplace_provider' ? 'Care provider' : 'Employee') : isAdmin ? 'Admin' : role === 'school_admin' ? 'School Admin' : isCounsellor ? 'Counsellor' : 'Student'
 
+  // A newly authenticated company admin starts on the generic student route
+  // unless the role-specific landing page is selected after auth resolves.
+  useEffect(() => {
+    if (role === 'company_admin' && currentPage === 'dashboard') setPage('workplace')
+  }, [currentPage, role, setPage])
+
   // Fetch open alert count for counsellors and admins
   useEffect(() => {
     if (!isCounsellor && !isAdmin) return

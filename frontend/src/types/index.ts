@@ -298,6 +298,8 @@ export interface DemoRequest {
   role_title?: string | null
   country?: string | null
   student_count_range?: string | null
+  employee_population_range?: string | null
+  population_range?: string | null
   message?: string | null
   heard_about_us?: string | null
   status: DemoRequestStatus

@@ -13,8 +13,7 @@ export default function RequestDemoPage() {
         <span className="mg-eyebrow mb-3 inline-block">Demo request</span>
         <h1 className="display text-4xl text-ink mb-3">Request a demo</h1>
         <p className="text-ink-soft mb-10 max-w-lg">
-          See how MindGuard helps counselling teams spot signs of distress across consent-gated
-          channels — with consent baked in from day one.
+          Explore how MindGuard supports wellbeing across schools, care organisations, and workplaces — with consent and privacy built in from day one.
         </p>
         <DemoForm />
       </div>

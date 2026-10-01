@@ -238,6 +238,7 @@ class DemoRequestCreate(BaseModel):
     country: Optional[str] = Field(default=None, max_length=64)
     student_count_range: Optional[str] = Field(default=None, max_length=32)
     employee_population_range: Optional[str] = Field(default=None, max_length=32)
+    population_range: Optional[str] = Field(default=None, max_length=32)
     message: Optional[str] = Field(default=None, max_length=5000)
     heard_about_us: Optional[str] = Field(default=None, max_length=64)
     consent_to_contact: bool = True
@@ -256,6 +257,7 @@ class DemoRequestResponse(BaseModel):
     country: Optional[str] = None
     student_count_range: Optional[str] = None
     employee_population_range: Optional[str] = None
+    population_range: Optional[str] = None
     message: Optional[str] = None
     heard_about_us: Optional[str] = None
     status: str

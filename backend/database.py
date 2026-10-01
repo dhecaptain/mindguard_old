@@ -3367,19 +3367,28 @@ def create_demo_request(
     country: str | None = None,
     student_count_range: str | None = None,
     employee_population_range: str | None = None,
+    population_range: str | None = None,
     message: str | None = None,
     heard_about_us: str | None = None,
     consent_to_contact: bool = True,
 ) -> dict:
     rid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
+    canonical_population = population_range
+    if canonical_population is None:
+        canonical_population = employee_population_range if organisation_type == "company" else student_count_range
+        canonical_population = canonical_population or employee_population_range or student_count_range
+    if organisation_type == "company":
+        employee_population_range = canonical_population
+    elif organisation_type in {"k12", "university"}:
+        student_count_range = canonical_population
     conn = get_db()
     conn.execute(
         """INSERT INTO demo_requests (
             id, full_name, work_email, organisation, organisation_type,
-            role_title, country, student_count_range, employee_population_range, message, heard_about_us,
+            role_title, country, student_count_range, employee_population_range, population_range, message, heard_about_us,
             status, consent_to_contact, created_at, updated_at, work_email_hash
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             rid,
             encrypt_pii(full_name),
@@ -3390,6 +3399,7 @@ def create_demo_request(
             country,
             student_count_range,
             employee_population_range,
+            canonical_population,
             message,
             heard_about_us,
             "new",
