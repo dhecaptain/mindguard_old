@@ -9,7 +9,7 @@ import json
 import re
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -26,9 +26,30 @@ from backend.database import (
 )
 from backend.services.crypto import decrypt_pii, encrypt_pii, hash_email, hash_token
 from backend.services.email_sender import send_html_email
+from backend.services.workplace_commercial import (
+    CAPABILITIES as COMMERCIAL_CAPABILITIES,
+    PLANS as WORKPLACE_PLANS,
+    POPULATION_BANDS,
+    STATUS_VALUES as COMMERCIAL_STATUSES,
+    can_use as commercial_can_use,
+    ensure_account as ensure_commercial_account,
+    grace_period_days,
+    plan_limit as commercial_plan_limit,
+    record_event as record_commercial_event,
+    resolve_account as resolve_commercial_account,
+    summary as commercial_summary,
+    transition as transition_commercial_account,
+)
+from backend.services.workplace_lifecycle import (
+    complete_offboarding,
+    retention_decision,
+    schedule_offboarding,
+    sync_offboarding,
+    termination_effective,
+)
+from backend.services.workplace_analytics import AVAILABLE as ANALYTICS_AVAILABLE, get_workplace_insights
 
 router = APIRouter(prefix="/api/v1/workplace", tags=["workplace"])
-MIN_REPORT_COHORT = 10
 NOTICE_VERSION = "workplace-v1"
 WORKPLACE_ADMIN_TERMS_VERSION = "workplace-admin-v1"
 WORKPLACE_EMPLOYEE_TERMS_VERSION = "workplace-participant-v1"
@@ -53,15 +74,25 @@ def _admin_invitation_state(row) -> str:
 
 
 def purge_expired_workplace_records() -> dict[str, int]:
-    """Delete expired wellbeing/case content while preserving active care cases."""
+    """Advance workplace lifecycle and execute configured, dependency-safe retention."""
     conn = get_db()
     now = datetime.now(timezone.utc)
+    expired_credentials = conn.execute(
+        "SELECT provider_id FROM workplace_provider_credentials WHERE status='verified' AND expires_at IS NOT NULL AND expires_at<?",
+        (now.date().isoformat(),),
+    ).fetchall()
+    for credential in expired_credentials:
+        _provider_credential_state(conn, credential["provider_id"], today=now.date())
     companies = conn.execute(
         "SELECT company_id,retention_days FROM workplace_settings"
     ).fetchall()
+    for account in conn.execute("SELECT company_id FROM workplace_commercial_accounts").fetchall():
+        resolve_commercial_account(conn, account["company_id"], at=now.date())
+        sync_offboarding(conn, account["company_id"], now=now)
     purged_cases = 0
     purged_checkins = 0
     for company in companies:
+        company_purged_cases = 0
         cutoff = (now - timedelta(days=max(1, int(company["retention_days"] or 365)))).isoformat()
         expired_cases = conn.execute(
             "SELECT id FROM workplace_support_cases WHERE company_id=? "
@@ -70,15 +101,31 @@ def purge_expired_workplace_records() -> dict[str, int]:
             (company["company_id"], cutoff),
         ).fetchall()
         for case in expired_cases:
-            conn.execute("DELETE FROM workplace_support_cases WHERE id=?", (case["id"],))
-        purged_cases += len(expired_cases)
-        deleted_checkins = conn.execute(
-            "DELETE FROM workplace_checkins WHERE company_id=? AND created_at<=? "
+            dependencies = conn.execute(
+                "SELECT continuity_until FROM workplace_support_cases WHERE id=?", (case["id"],)
+            ).fetchone()
+            if dependencies and retention_decision(
+                "closed_case", conn.execute("SELECT COALESCE(closed_at,updated_at,created_at) FROM workplace_support_cases WHERE id=?", (case["id"],)).fetchone()[0],
+                int(company["retention_days"] or 365),
+                active_dependency=bool(dependencies["continuity_until"] and dependencies["continuity_until"] > now.isoformat()), now=now,
+            ) == "DELETE":
+                # Case-owned notes, messages and appointments follow their parent
+                # through the established case foreign keys.
+                conn.execute("DELETE FROM workplace_support_cases WHERE id=?", (case["id"],))
+                purged_cases += 1
+                company_purged_cases += 1
+        old_checkins = conn.execute(
+            "SELECT id,created_at FROM workplace_checkins WHERE company_id=? AND created_at<=? "
             "AND NOT EXISTS (SELECT 1 FROM workplace_support_cases c WHERE c.shared_checkin_id=workplace_checkins.id)",
             (company["company_id"], cutoff),
-        ).rowcount
+        ).fetchall()
+        deleted_checkins = 0
+        for checkin in old_checkins:
+            if retention_decision("checkin", checkin["created_at"], int(company["retention_days"] or 365), now=now) == "DELETE":
+                conn.execute("DELETE FROM workplace_checkins WHERE id=?", (checkin["id"],))
+                deleted_checkins += 1
         purged_checkins += max(0, deleted_checkins)
-        if expired_cases or deleted_checkins:
+        if company_purged_cases or deleted_checkins:
             conn.execute(
                 "INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES (?,?,NULL,'WORKPLACE_RETENTION_PURGED',?)",
                 (str(uuid.uuid4()), company["company_id"], now.isoformat()),
@@ -102,11 +149,18 @@ def _company_admin(user: dict, *, owner: bool = False, terms: bool = True) -> st
     row = conn.execute(
         "SELECT type, status FROM institutions WHERE id = ?", (user["institution_id"],)
     ).fetchone()
-    conn.close()
     if not row or str(row["type"]).lower() != "company":
+        conn.close()
         raise HTTPException(403, "This account is not assigned to a workplace tenant")
     if str(row["status"] or "").upper() != "ACTIVE":
+        conn.close()
         raise HTTPException(403, "This workplace is not active")
+    if termination_effective(conn, user["institution_id"]):
+        conn.commit()
+        conn.close()
+        raise HTTPException(403, "Workplace operations have ended. Use the read-only offboarding status page.")
+    conn.commit()
+    conn.close()
     if str(user.get("status") or "approved").lower() not in {"approved", "active"}:
         raise HTTPException(403, "Your account is not active")
     if terms and user.get("workplace_terms_version") != WORKPLACE_ADMIN_TERMS_VERSION:
@@ -160,43 +214,164 @@ def _company_enrollment_is_ready(conn, company_id: str | None = None, *, token: 
         "AND i.type='company' AND i.status='ACTIVE' AND s.legal_review_complete=1 "
         "AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
         "JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id "
-        "JOIN users pu ON pu.id=p.provider_id WHERE p.company_id=l.company_id AND p.status='active' "
-        "AND c.status='verified' AND pu.status IN ('approved','active')) LIMIT 1",
+        "JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
+        "WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' "
+        "AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) "
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active')) LIMIT 1",
         params,
     ).fetchone()
 
 
+def _mark_provider_cases_for_reassignment(conn, provider_id: str, reason: str, *, company_id: str | None = None) -> int:
+    company_clause = " AND company_id=?" if company_id else ""
+    params: tuple = (provider_id, company_id) if company_id else (provider_id,)
+    rows = conn.execute(
+        "SELECT id,company_id FROM workplace_support_cases WHERE provider_id=? "
+        "AND status IN ('open','active') AND assignment_status='assigned' AND withdrawn_at IS NULL" + company_clause,
+        params,
+    ).fetchall()
+    now = _now()
+    for row in rows:
+        conn.execute(
+            "UPDATE workplace_support_cases SET assignment_status='reassignment_required',updated_at=? WHERE id=?",
+            (now, row["id"]),
+        )
+        conn.execute(
+            "INSERT INTO workplace_case_assignment_history (id,case_id,company_id,previous_provider_id,new_provider_id,event_type,occurred_at) VALUES (?,?,?,?,NULL,?,?)",
+            (str(uuid.uuid4()), row["id"], row["company_id"], provider_id, f"provider_unavailable:{reason}", now),
+        )
+        _audit(conn, row["company_id"], None, "WORKPLACE_CASE_REASSIGNMENT_REQUIRED")
+    return len(rows)
+
+
+def _provider_credential_state(conn, provider_id: str, *, today: date | None = None) -> dict | None:
+    """Resolve credential validity at request time and persist an observed expiry once."""
+    row = conn.execute(
+        "SELECT c.*,COALESCE(o.access_status,'active') AS access_status,"
+        "COALESCE(o.availability,'available') AS availability "
+        "FROM workplace_provider_credentials c LEFT JOIN workplace_provider_operations o ON o.provider_id=c.provider_id "
+        "WHERE c.provider_id=?",
+        (provider_id,),
+    ).fetchone()
+    if not row:
+        return None
+    current_day = today or datetime.now(timezone.utc).date()
+    status = str(row["status"] or "").lower()
+    expires = row["expires_at"] if "expires_at" in row.keys() else None
+    valid_from = row["valid_from"] if "valid_from" in row.keys() else None
+    if status == "verified" and expires and date.fromisoformat(str(expires)[:10]) < current_day:
+        now = _now()
+        changed = conn.execute(
+            "UPDATE workplace_provider_credentials SET status='expired' WHERE provider_id=? AND status='verified'",
+            (provider_id,),
+        ).rowcount
+        if changed:
+            conn.execute(
+                "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at) VALUES (?,?,?,?,?,? ,?,'expired',?,?,?, ?,?)",
+                (str(uuid.uuid4()), provider_id, row["professional_type"], row["title_encrypted"], row["qualification_encrypted"], row["registration_encrypted"], row["verification_reference_encrypted"], now, row["reviewed_by"], now, valid_from, expires),
+            )
+            affected = conn.execute(
+                "SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?",
+                (provider_id,),
+            ).fetchall()
+            for company in affected:
+                conn.execute(
+                    "INSERT INTO workplace_audit_events (id,company_id,actor_user_id,event_type,occurred_at) VALUES (?,?,NULL,'WORKPLACE_PROVIDER_CREDENTIAL_EXPIRED',?)",
+                    (str(uuid.uuid4()), company["company_id"], now),
+                )
+            _mark_provider_cases_for_reassignment(conn, provider_id, "credential_expired")
+            conn.commit()
+            row = conn.execute(
+                "SELECT c.*,COALESCE(o.access_status,'active') AS access_status,COALESCE(o.availability,'available') AS availability "
+                "FROM workplace_provider_credentials c LEFT JOIN workplace_provider_operations o ON o.provider_id=c.provider_id WHERE c.provider_id=?",
+                (provider_id,),
+            ).fetchone()
+            status = "expired"
+    valid_start = not valid_from or date.fromisoformat(str(valid_from)[:10]) <= current_day
+    valid_expiry = not expires or date.fromisoformat(str(expires)[:10]) >= current_day
+    return {
+        "status": status,
+        "credential_valid": status == "verified" and valid_start and valid_expiry,
+        "access_status": str(row["access_status"] or "active").lower(),
+        "availability": str(row["availability"] or "available").lower(),
+        "valid_from": valid_from,
+        "expires_at": expires,
+    }
+
+
+def _validate_credential_period(valid_from: str | None, expires_at: str | None) -> None:
+    try:
+        starts = date.fromisoformat(valid_from) if valid_from else None
+        expires = date.fromisoformat(expires_at) if expires_at else None
+    except ValueError as exc:
+        raise HTTPException(400, "Credential dates must be valid ISO dates") from exc
+    if starts and expires and expires < starts:
+        raise HTTPException(400, "Credential expiry must be on or after its valid-from date")
+
+
+def _provider_can_receive_case(conn, provider_id: str, company_id: str) -> bool:
+    provider = conn.execute(
+        "SELECT u.id,u.status,u.role_type,p.status AS association_status FROM users u "
+        "JOIN workplace_providers p ON p.provider_id=u.id AND p.company_id=? "
+        "JOIN institutions i ON i.id=p.company_id WHERE u.id=? AND i.type='company' AND i.status='ACTIVE'",
+        (company_id, provider_id),
+    ).fetchone()
+    state = _provider_credential_state(conn, provider_id)
+    return bool(
+        provider
+        and provider["role_type"] == "workplace_provider"
+        and str(provider["status"]).lower() in {"approved", "active"}
+        and provider["association_status"] == "active"
+        and state
+        and state["credential_valid"]
+        and state["access_status"] == "active"
+        and state["availability"] == "available"
+    )
+
+
 def _provider_access(user: dict, *, case_id: str | None = None, writable: bool = False):
-    """Single authorization path for current provider, tenant, credential and case scope."""
-    if user.get("role_type") != "workplace_provider" or str(user.get("status") or "").lower() not in {"approved", "active"}:
+    """One authorization path for active provider, valid credential and assigned case scope."""
+    if user.get("role_type") != "workplace_provider":
         raise HTTPException(403, "Approved workplace provider access required")
     conn = get_db()
-    base = (
-        "SELECT c.id,c.company_id,c.user_id,c.provider_id,c.shared_checkin_id,c.status,c.withdrawn_at "
-        "FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id "
-        "AND p.provider_id=c.provider_id AND p.status='active' "
-        "JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id AND pc.status='verified' "
-        "JOIN users pu ON pu.id=p.provider_id AND pu.status IN ('approved','active') "
-        "JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' "
-        "WHERE c.provider_id=? AND c.withdrawn_at IS NULL"
-    )
     if case_id:
-        clauses = " AND c.id=?"
+        case_company = conn.execute("SELECT company_id FROM workplace_support_cases WHERE id=? AND provider_id=?", (case_id, user["id"])).fetchone()
+        if case_company:
+            sync_offboarding(conn, case_company["company_id"])
+    live_user = conn.execute("SELECT role_type,status FROM users WHERE id=?", (user["id"],)).fetchone()
+    if not live_user or live_user["role_type"] != "workplace_provider" or str(live_user["status"] or "").lower() not in {"approved", "active"}:
+        conn.close()
+        raise HTTPException(403, "Approved workplace provider access required")
+    state = _provider_credential_state(conn, user["id"])
+    if not state or not state["credential_valid"] or state["access_status"] != "active":
+        conn.close()
+        raise HTTPException(403, "Provider access is unavailable; review your credential or account status")
+    valid_association = conn.execute(
+        "SELECT 1 FROM workplace_providers p JOIN institutions i ON i.id=p.company_id "
+        "WHERE p.provider_id=? AND i.type='company' AND i.status='ACTIVE' AND (p.status='active' OR "
+        "(p.status='ending' AND EXISTS (SELECT 1 FROM workplace_support_cases c WHERE c.company_id=p.company_id "
+        "AND c.provider_id=p.provider_id AND c.status IN ('open','active') AND c.withdrawn_at IS NULL AND c.continuity_until>?))) LIMIT 1",
+        (user["id"], _now()),
+    ).fetchone()
+    if case_id:
+        clauses = " AND c.id=? AND c.assignment_status='assigned'"
         if writable:
             clauses += " AND c.status IN ('open','active')"
-        row = conn.execute(base + clauses, (user["id"], case_id)).fetchone()
+        row = conn.execute(
+            "SELECT c.id,c.company_id,c.user_id,c.provider_id,c.shared_checkin_id,c.status,c.withdrawn_at,c.assignment_status,c.continuity_until "
+            "FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id "
+            "AND p.provider_id=c.provider_id AND (p.status='active' OR (p.status='ending' AND c.continuity_until>?)) "
+            "JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' "
+            "WHERE c.provider_id=? AND c.withdrawn_at IS NULL" + clauses,
+            (_now(), user["id"], case_id),
+        ).fetchone()
         conn.close()
         if not row:
             raise HTTPException(404, "Active workplace support case not found")
         return dict(row)
-    valid = conn.execute(
-        "SELECT 1 FROM users u JOIN workplace_provider_credentials pc ON pc.provider_id=u.id AND pc.status='verified' "
-        "WHERE u.id=? AND u.role_type='workplace_provider' AND u.status IN ('approved','active')",
-        (user["id"],),
-    ).fetchone()
     conn.close()
-    if not valid:
-        raise HTTPException(403, "Verified workplace provider access required")
+    if not valid_association:
+        raise HTTPException(403, "No active workplace provider relationship")
     return None
 
 
@@ -270,10 +445,47 @@ class ProviderAttach(BaseModel):
 
 class ProviderCredentialCreate(BaseModel):
     provider_email: EmailStr
+    professional_type: str | None = Field(default=None, max_length=160)
     professional_title: str = Field(min_length=2, max_length=160)
     qualification: str = Field(min_length=2, max_length=300)
     registration_number: str = Field(min_length=2, max_length=160)
     verification_reference: str = Field(min_length=4, max_length=500)
+    valid_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class ProviderCredentialSubmission(BaseModel):
+    professional_type: str | None = Field(default=None, max_length=160)
+    professional_title: str = Field(min_length=2, max_length=160)
+    qualification: str = Field(min_length=2, max_length=300)
+    registration_number: str = Field(min_length=2, max_length=160)
+
+
+class ProviderCredentialReview(BaseModel):
+    review_id: str = Field(min_length=1, max_length=80)
+    decision: str = Field(pattern=r"^(verify|reject)$")
+    verification_reference: str | None = Field(default=None, min_length=4, max_length=500)
+    valid_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class ProviderAccessAction(BaseModel):
+    action: str = Field(pattern=r"^(suspend|reactivate|revoke|deactivate)$")
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ProviderCredentialRevoke(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ProviderAvailability(BaseModel):
+    availability: str = Field(pattern=r"^(available|unavailable)$")
+
+
+class WorkplaceCaseReassignment(BaseModel):
+    provider_id: str = Field(min_length=1, max_length=80)
+    confirm_shared_history: bool
 
 
 class CompanyCreate(BaseModel):
@@ -344,6 +556,30 @@ class CompanyLifecycle(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class WorkplaceCommercialUpdate(BaseModel):
+    status: str | None = Field(default=None, pattern=r"^(PILOT|TRIAL|ACTIVE|GRACE_PERIOD|SUSPENDED|CANCELLED|TERMINATED)$")
+    plan_key: str | None = Field(default=None, pattern=r"^(pilot|trial|team|enterprise|legacy_pilot)$")
+    contract_start_date: date | None = None
+    contract_end_date: date | None = None
+    billing_cycle: str | None = Field(default=None, pattern=r"^(monthly|annual|one_time|custom)$")
+    population_band: str | None = None
+    renewal_date: date | None = None
+    grace_period_end: date | None = None
+    cancellation_effective_date: date | None = None
+    cancellation_reason: str | None = Field(default=None, max_length=500)
+    reason: str | None = Field(default=None, max_length=500)
+    internal_reference: str | None = Field(default=None, max_length=500)
+    internal_notes: str | None = Field(default=None, max_length=5000)
+    enabled_capabilities: dict[str, bool] | None = None
+    external_customer_reference: str | None = Field(default=None, max_length=200)
+    external_subscription_reference: str | None = Field(default=None, max_length=200)
+    billing_provider: str | None = Field(default=None, max_length=80)
+
+
+class WorkplaceOffboardingAction(BaseModel):
+    action: str = Field(pattern=r"^(complete)$")
+
+
 @router.post("/enrollment/start", status_code=202)
 async def start_enrollment(data: EnrollmentStart, request: Request):
     """Start a private opt-in. Email ownership is verified before account creation."""
@@ -369,12 +605,15 @@ async def start_enrollment(data: EnrollmentStart, request: Request):
         "JOIN institutions i ON i.id = l.company_id "
         "WHERE l.token_hash = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?) "
         "AND i.type = 'company' AND i.status = 'ACTIVE' AND s.legal_review_complete = 1 "
-        "AND s.policy_status = 'approved' AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' AND pu.status IN ('approved','active'))",
+        "AND s.policy_status = 'approved' AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
         (hash_token(data.token), _now()),
     ).fetchone()
     if not link:
         conn.close()
         raise HTTPException(400, "This enrollment link is invalid, expired, or revoked")
+    if not commercial_can_use(conn, link["company_id"], "enrollment"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "New workplace enrollment is temporarily unavailable for this company")
     try:
         domains = json.loads(link["work_email_domains_json"])
     except (ValueError, TypeError):
@@ -456,6 +695,9 @@ async def start_existing_account_enrollment(data: ExistingEnrollmentStart, reque
     if not link:
         conn.close()
         raise HTTPException(400, "This enrollment link is invalid, expired, revoked, or not ready")
+    if not commercial_can_use(conn, link["company_id"], "enrollment"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "New workplace enrollment is temporarily unavailable for this company")
     account = conn.execute("SELECT email,role_type,user_category,institution_id,status FROM users WHERE id=?", (user["id"],)).fetchone()
     email = str(account["email"]).strip().lower()
     domains = {str(d).strip().lower().lstrip("@") for d in json.loads(link["work_email_domains_json"] or "[]")}
@@ -499,12 +741,18 @@ async def verify_existing_account_enrollment(data: ExistingEnrollmentVerify, use
         "AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at>?) AND i.type='company' AND i.status='ACTIVE' "
         "AND s.legal_review_complete=1 AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
         "JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id "
-        "WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pu.status IN ('approved','active'))",
+        "LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
+        "WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' "
+        "AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) "
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
         (data.challenge_id, user["id"], now, now),
     ).fetchone()
     if not row:
         conn.rollback(); conn.close()
         raise HTTPException(400, "The verification code is invalid or expired")
+    if not commercial_can_use(conn, row["company_id"], "enrollment"):
+        conn.rollback(); conn.close()
+        raise HTTPException(403, "New workplace enrollment is temporarily unavailable for this company")
     if not secrets.compare_digest(row["code_hash"], hash_token(data.code)):
         attempts = row["attempts_count"] + 1
         conn.execute("UPDATE workplace_existing_enrollment_challenges SET attempts_count=?,used_at=CASE WHEN ?>=5 THEN ? ELSE used_at END WHERE id=?", (attempts, attempts, now, data.challenge_id))
@@ -581,6 +829,8 @@ async def create_workplace_company(
             "INSERT INTO workplace_settings (company_id, work_email_domains_json, privacy_notice_version, provider_service_enabled, privacy_contact_encrypted, employee_population_range, retention_days, policy_status, created_at, updated_at) VALUES (?,?,?,0,?,?,?,'draft',?,?)",
             (company["id"], json.dumps(domains), NOTICE_VERSION, encrypt_pii(str(data.privacy_contact_email or admin_email)), data.employee_population_range, data.retention_days, now, now),
         )
+        ensure_commercial_account(conn, company["id"], population_range=data.employee_population_range, starts_on=now[:10], plan_key="pilot")
+        record_commercial_event(conn, company["id"], actor["id"], "ACCOUNT_CREATED", None, "PILOT", "Initial workplace pilot account created", at=now)
         if invite_token:
             conn.execute("UPDATE users SET user_category='company_staff', status='pending', terms_accepted_at=NULL, workplace_admin_role='owner', workplace_invitation_status='pending', workplace_terms_version=NULL WHERE id=?", (admin["id"],))
         else:
@@ -661,6 +911,8 @@ async def convert_workplace_demo_request(demo_request_id: str, data: WorkplaceDe
         conn.execute("INSERT INTO users (id,email,name,role_type,password_hash,status,created_at,referral_code,institution_id,user_category,terms_accepted_at,invitation_token_hash,invitation_expires_at,invited_at,workplace_admin_role,workplace_invitation_status,workplace_terms_version) VALUES (?,?,?,'company_admin',?,'pending',?,?,?, 'company_staff',NULL,?,?,?,'owner','pending',NULL)", (admin_id,admin_email,data.admin_name.strip(),hash_password(secrets.token_urlsafe(32)),now,referral_code,company_id,hash_token(token),expires_at,now))
         population = data.population_range if data.population_range is not None else (data.employee_population_range or demo.get("population_range") or demo.get("employee_population_range"))
         conn.execute("INSERT INTO workplace_settings (company_id,work_email_domains_json,privacy_notice_version,provider_service_enabled,legal_review_complete,privacy_contact_encrypted,employee_population_range,retention_days,policy_status,created_at,updated_at) VALUES (?,?,?,0,0,?,?,?,'draft',?,?)", (company_id,json.dumps(domains),NOTICE_VERSION,encrypt_pii(str(data.privacy_contact_email).lower()),population,data.retention_days,now,now))
+        ensure_commercial_account(conn, company_id, population_range=population, starts_on=now[:10], plan_key="pilot")
+        record_commercial_event(conn, company_id, actor["id"], "ACCOUNT_CREATED", None, "PILOT", "Initial workplace pilot account created from company demo", at=now)
         conn.execute("UPDATE demo_requests SET status='institution_provisioning',institution_id=?,converted_by=?,converted_at=?,updated_at=? WHERE id=? AND institution_id IS NULL", (company_id,actor["id"],now,now,demo_request_id))
         if conn.execute("SELECT changes()").fetchone()[0] != 1:
             raise HTTPException(409, "This demo request has already been converted")
@@ -694,6 +946,10 @@ async def list_workplace_companies(actor: dict = Depends(require_auth)):
     ).fetchall()
     result = []
     for row in rows:
+        resolve_commercial_account(conn, row["id"])
+        offboarding = sync_offboarding(conn, row["id"])
+        active_obligations = conn.execute("SELECT COUNT(*) FROM workplace_support_cases WHERE company_id=? AND status IN ('open','active') AND withdrawn_at IS NULL", (row["id"],)).fetchone()[0]
+        ending_providers = conn.execute("SELECT COUNT(*) FROM workplace_providers WHERE company_id=? AND status IN ('ending','ended')", (row["id"],)).fetchone()[0]
         admins = conn.execute("SELECT id,name,email,status FROM users WHERE institution_id=? AND role_type='company_admin' ORDER BY created_at LIMIT 10", (row["id"],)).fetchall()
         result.append({
             "id": row["id"], "name": row["name"], "status": row["status"],
@@ -704,7 +960,216 @@ async def list_workplace_companies(actor: dict = Depends(require_auth)):
             "employee_population_range": row["employee_population_range"],
             "retention_days": row["retention_days"], "policy_status": row["policy_status"],
             "administrators": [dict(admin) for admin in admins],
+            "commercial": commercial_summary(conn, row["id"], internal=True),
+            "offboarding": ({"status": offboarding["status"], "effective_date": offboarding["effective_date"],
+                             "retention_deadline": offboarding["retention_deadline"],
+                             "continuity_deadline": offboarding["continuity_deadline"],
+                             "active_support_obligations": active_obligations,
+                             "provider_relationships_ending_or_ended": ending_providers,
+                             "completion_ready": bool(offboarding["status"] == "RETENTION_PERIOD" and not active_obligations and offboarding["retention_deadline"] and offboarding["retention_deadline"] <= _now())} if offboarding else {"status": "NOT_STARTED", "active_support_obligations": active_obligations, "provider_relationships_ending_or_ended": ending_providers, "completion_ready": False}),
         })
+    conn.commit()
+    conn.close()
+    return result
+
+
+@router.post("/admin/companies/{company_id}/offboarding")
+async def advance_workplace_offboarding(company_id: str, data: WorkplaceOffboardingAction, actor: dict = Depends(require_auth)):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    if not conn.execute("SELECT 1 FROM institutions WHERE id=? AND type='company'", (company_id,)).fetchone():
+        conn.rollback(); conn.close()
+        raise HTTPException(404, "Workplace company not found")
+    resolve_commercial_account(conn, company_id)
+    state = sync_offboarding(conn, company_id, actor_id=actor["id"])
+    if data.action != "complete" or not state:
+        conn.rollback(); conn.close()
+        raise HTTPException(409, "Schedule cancellation through the commercial lifecycle before progressing offboarding")
+    try:
+        result = complete_offboarding(conn, company_id, actor_id=actor["id"])
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback(); conn.close()
+        raise HTTPException(409, str(exc)) from exc
+    conn.close()
+    return {"status": result["status"], "completed_at": result["completed_at"]}
+
+
+@router.get("/admin/commercial")
+async def company_commercial_view(user: dict = Depends(require_auth)):
+    """Company-scoped, read-only commercial status; internal notes are never returned."""
+    company_id = _company_admin(user)
+    conn = get_db()
+    result = commercial_summary(conn, company_id)
+    conn.commit()
+    conn.close()
+    if not result:
+        raise HTTPException(404, "Workplace commercial account not found")
+    return result
+
+
+@router.get("/admin/offboarding-status")
+async def company_offboarding_status(user: dict = Depends(require_auth)):
+    """Temporary, read-only offboarding status; never returns worker or case data."""
+    if user.get("role_type") != "company_admin" or not user.get("institution_id"):
+        raise HTTPException(403, "Company administrator access required")
+    conn = get_db()
+    company = conn.execute("SELECT type,status FROM institutions WHERE id=?", (user["institution_id"],)).fetchone()
+    if not company or str(company["type"]).lower() != "company" or str(company["status"]).upper() != "ACTIVE":
+        conn.close()
+        raise HTTPException(403, "This workplace is unavailable")
+    if str(user.get("status") or "").lower() not in {"approved", "active"} or user.get("workplace_terms_version") != WORKPLACE_ADMIN_TERMS_VERSION:
+        conn.close()
+        raise HTTPException(403, "Active company administrator access is required")
+    resolve_commercial_account(conn, user["institution_id"])
+    state = sync_offboarding(conn, user["institution_id"])
+    commercial = commercial_summary(conn, user["institution_id"])
+    conn.commit()
+    conn.close()
+    if not state:
+        return {"status": "NOT_STARTED", "commercial_status": commercial["status"] if commercial else None}
+    if state["status"] == "COMPLETED" or (state["retention_deadline"] and state["retention_deadline"] <= _now()):
+        raise HTTPException(403, "The workplace read-only access period has ended")
+    return {
+        "status": state["status"],
+        "effective_date": state["effective_date"],
+        "retention_deadline": state["retention_deadline"],
+        "message": "Your workplace service is scheduled to end. Participation and wellbeing records remain private.",
+        "commercial_status": commercial["status"] if commercial else None,
+    }
+
+
+@router.put("/admin/companies/{company_id}/commercial")
+async def update_workplace_commercial(company_id: str, data: WorkplaceCommercialUpdate, actor: dict = Depends(require_auth)):
+    """MindGuard-only commercial setup and transition endpoint."""
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    values = data.model_dump(exclude_unset=True)
+    if "population_band" in values and values["population_band"] not in POPULATION_BANDS:
+        raise HTTPException(400, "Choose a supported workforce population band")
+    if "plan_key" in values and values["plan_key"] not in WORKPLACE_PLANS:
+        raise HTTPException(400, "Choose a supported workplace plan")
+    if "enabled_capabilities" in values:
+        caps = values["enabled_capabilities"] or {}
+        if set(caps) - COMMERCIAL_CAPABILITIES:
+            raise HTTPException(400, "One or more workplace capabilities are not supported")
+        if caps.get("voice_support"):
+            raise HTTPException(403, "Voice support is not commercially available until separately launch-approved")
+    date_fields = ("contract_start_date", "contract_end_date", "renewal_date", "grace_period_end", "cancellation_effective_date")
+    for field in date_fields:
+        if field in values and values[field] is not None:
+            values[field] = values[field].isoformat()
+    start_date = values.get("contract_start_date")
+    end_date = values.get("contract_end_date")
+    if start_date and end_date and date.fromisoformat(end_date) < date.fromisoformat(start_date):
+        raise HTTPException(400, "Contract end date must be on or after its start date")
+    if "status" in values and values["status"] == "CANCELLED":
+        if not values.get("cancellation_effective_date") or not str(values.get("cancellation_reason") or "").strip():
+            raise HTTPException(400, "Scheduling cancellation requires an effective date and reason")
+    now = _now()
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        company = conn.execute("SELECT id FROM institutions WHERE id=? AND lower(type)='company'", (company_id,)).fetchone()
+        if not company:
+            raise HTTPException(404, "Workplace company not found")
+        ensure_commercial_account(conn, company_id)
+        current = resolve_commercial_account(conn, company_id)
+        if not current:
+            raise HTTPException(404, "Workplace commercial account not found")
+        old_status = str(current["status"]).upper()
+        new_status = values.get("status")
+        reason = str(values.get("reason") or values.get("cancellation_reason") or "").strip() or None
+        reference = values.get("internal_reference", None)
+        effective_start = values.get("contract_start_date", current.get("contract_start_date"))
+        effective_end = values.get("contract_end_date", current.get("contract_end_date"))
+        if effective_start and effective_end and date.fromisoformat(str(effective_end)[:10]) < date.fromisoformat(str(effective_start)[:10]):
+            raise HTTPException(400, "Contract end date must be on or after its start date")
+        if new_status and new_status != old_status and (not reason or len(reason) < 3):
+            raise HTTPException(400, "Enter a reason of at least 3 characters for the commercial status transition")
+        today = datetime.now(timezone.utc).date()
+        period_end = date.fromisoformat(str(effective_end)[:10]) if effective_end else None
+        stored_period_end = date.fromisoformat(current["contract_end_date"][:10]) if current.get("contract_end_date") else None
+        stored_grace_end = date.fromisoformat(current["grace_period_end"][:10]) if current.get("grace_period_end") else None
+        commercially_expired = bool(
+            (old_status in {"PILOT", "TRIAL", "ACTIVE"} and stored_period_end and stored_period_end < today)
+            or (old_status == "SUSPENDED" and ((stored_period_end and stored_period_end < today) or (stored_grace_end and stored_grace_end < today)))
+        )
+        if new_status == "ACTIVE" and (old_status == "GRACE_PERIOD" or commercially_expired) and (not period_end or period_end < today):
+            raise HTTPException(400, "Reactivation after commercial expiry requires a renewed contract end date")
+        # A cancellation can only be reversed before its scheduled effective date.
+        if old_status == "CANCELLED" and new_status == "ACTIVE":
+            effective = values.get("cancellation_effective_date", current.get("cancellation_effective_date"))
+            if effective and date.fromisoformat(str(effective)[:10]) <= datetime.now(timezone.utc).date():
+                raise HTTPException(409, "An effective cancellation cannot be reversed; contact MindGuard to review the account")
+        if new_status and new_status != old_status:
+            transition_commercial_account(conn, company_id, new_status, actor_id=actor["id"], reason=reason, reference=reference, occurred_at=now)
+
+        updates: dict[str, object] = {}
+        direct_fields = {
+            "plan_key": "plan_key", "contract_start_date": "contract_start_date", "contract_end_date": "contract_end_date",
+            "billing_cycle": "billing_cycle", "population_band": "population_band", "renewal_date": "renewal_date",
+            "grace_period_end": "grace_period_end", "external_customer_reference": "external_customer_reference",
+            "external_subscription_reference": "external_subscription_reference", "billing_provider": "billing_provider",
+        }
+        for source, target in direct_fields.items():
+            if source in values:
+                updates[target] = values[source]
+        if "enabled_capabilities" in values:
+            updates["capabilities_json"] = json.dumps(values["enabled_capabilities"] or {}, sort_keys=True)
+        if "internal_reference" in values:
+            updates["internal_reference_encrypted"] = encrypt_pii(values["internal_reference"]) if values["internal_reference"] else None
+        if "internal_notes" in values:
+            updates["internal_notes_encrypted"] = encrypt_pii(values["internal_notes"]) if values["internal_notes"] else None
+        if "cancellation_effective_date" in values:
+            updates["cancellation_effective_date"] = values["cancellation_effective_date"]
+        if "cancellation_reason" in values:
+            updates["cancellation_reason_encrypted"] = encrypt_pii(values["cancellation_reason"]) if values["cancellation_reason"] else None
+        if new_status == "ACTIVE":
+            updates.update({"cancellation_effective_date": None, "cancellation_reason_encrypted": None, "grace_period_end": None})
+        if new_status == "TERMINATED":
+            updates["terminated_at"] = now
+        if new_status == "GRACE_PERIOD" and "grace_period_end" not in updates:
+            updates["grace_period_end"] = (datetime.now(timezone.utc).date() + timedelta(days=grace_period_days())).isoformat()
+        if updates:
+            updates["updated_at"] = now
+            assignment_sql = ",".join(f"{column}=?" for column in updates)
+            conn.execute(f"UPDATE workplace_commercial_accounts SET {assignment_sql} WHERE company_id=?", (*updates.values(), company_id))
+
+        if new_status == "CANCELLED":
+            effective = values.get("cancellation_effective_date", current.get("cancellation_effective_date"))
+            if effective:
+                schedule_offboarding(conn, company_id, str(effective)[:10], actor_id=actor["id"], reason=reason, reference=reference,
+                                     now=datetime.fromisoformat(now))
+        elif old_status == "CANCELLED" and new_status == "ACTIVE":
+            scheduled = conn.execute("SELECT status FROM workplace_offboarding WHERE company_id=?", (company_id,)).fetchone()
+            if scheduled and scheduled["status"] == "SCHEDULED":
+                conn.execute("UPDATE workplace_offboarding SET status='NOT_STARTED',effective_date=NULL,updated_at=? WHERE company_id=?", (now, company_id))
+                _audit(conn, company_id, actor["id"], "WORKPLACE_OFFBOARDING_CANCELLATION_REVERSED")
+
+        for field, event_type in (("plan_key", "PLAN_CHANGED"), ("renewal_date", "RENEWAL_RECORDED"), ("population_band", "POPULATION_BAND_CHANGED"), ("capabilities_json", "ENTITLEMENTS_CHANGED")):
+            if field in updates and updates[field] != current.get(field):
+                record_commercial_event(conn, company_id, actor["id"], event_type, old_status, new_status or old_status, reason, reference, now)
+        if ("contract_start_date" in updates and updates["contract_start_date"] != current.get("contract_start_date")) or ("contract_end_date" in updates and updates["contract_end_date"] != current.get("contract_end_date")):
+            event_type = "PILOT_EXTENDED" if old_status == "PILOT" and current.get("contract_end_date") and updates.get("contract_end_date", current.get("contract_end_date")) != current.get("contract_end_date") else "PILOT_CONFIGURED" if new_status == "PILOT" or old_status == "PILOT" else "CONTRACT_PERIOD_UPDATED"
+            record_commercial_event(conn, company_id, actor["id"], event_type, old_status, new_status or old_status, reason, reference, now)
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except ValueError as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(409, "Unable to update the workplace commercial account") from exc
+    result = commercial_summary(conn, company_id, internal=True)
+    conn.commit()
     conn.close()
     return result
 
@@ -787,8 +1252,10 @@ async def workplace_setup(user: dict = Depends(require_auth)):
     conn = get_db()
     company = conn.execute("SELECT i.name,i.status,s.* FROM institutions i JOIN workplace_settings s ON s.company_id=i.id WHERE i.id=?", (company_id,)).fetchone()
     admins = conn.execute("SELECT id,name,email,status,workplace_admin_role,workplace_invitation_status,invitation_expires_at FROM users WHERE institution_id=? AND role_type='company_admin' ORDER BY CASE WHEN workplace_admin_role='owner' THEN 0 ELSE 1 END,name", (company_id,)).fetchall()
-    providers = conn.execute("SELECT COUNT(*) AS n FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id AND c.status='verified' JOIN users u ON u.id=p.provider_id WHERE p.company_id=? AND p.status='active' AND u.status IN ('approved','active')", (company_id,)).fetchone()["n"]
+    providers = conn.execute("SELECT COUNT(*) AS n FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id AND c.status='verified' JOIN users u ON u.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=? AND p.status='active' AND u.status IN ('approved','active') AND COALESCE(po.access_status,'active')='active' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now'))", (company_id,)).fetchone()["n"]
     links = conn.execute("SELECT COUNT(*) AS n FROM workplace_enrollment_links WHERE company_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)", (company_id, _now())).fetchone()["n"]
+    commercial = commercial_summary(conn, company_id)
+    conn.commit()
     conn.close()
     active_admins = sum(1 for row in admins if str(row["status"]).lower() in {"approved", "active"})
     checks = {
@@ -811,6 +1278,7 @@ async def workplace_setup(user: dict = Depends(require_auth)):
     else: readiness = "ready"
     return {
         "company": {"id": company_id, "name": company["name"], "status": company["status"]},
+        "commercial": commercial,
         "readiness": readiness,
         "checklist": checks,
         "current_admin_role": user.get("workplace_admin_role") or "admin",
@@ -888,6 +1356,15 @@ async def invite_company_administrator(data: CompanyAdminInvite, user: dict = De
     company_id = _company_admin(user)
     email = str(data.email).lower()
     conn = get_db()
+    if not commercial_can_use(conn, company_id, "administrator_management"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "Administrator changes are unavailable for this workplace commercial status")
+    account = resolve_commercial_account(conn, company_id)
+    administrator_limit = commercial_plan_limit(account, "administrator_limit") if account else 0
+    active_administrator_count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE institution_id=? AND role_type='company_admin' AND status IN ('approved','active','pending','invited')", (company_id,)).fetchone()["n"]
+    if administrator_limit is not None and active_administrator_count >= administrator_limit:
+        conn.close()
+        raise HTTPException(409, "This workplace plan has reached its administrator limit")
     settings = conn.execute("SELECT work_email_domains_json FROM workplace_settings WHERE company_id=?", (company_id,)).fetchone()
     existing = conn.execute("SELECT id FROM users WHERE lower(email)=?", (email,)).fetchone()
     conn.close()
@@ -903,6 +1380,13 @@ async def invite_company_administrator(data: CompanyAdminInvite, user: dict = De
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        if not commercial_can_use(conn, company_id, "administrator_management"):
+            raise HTTPException(403, "Administrator changes are unavailable for this workplace commercial status")
+        current_account = resolve_commercial_account(conn, company_id)
+        current_limit = commercial_plan_limit(current_account, "administrator_limit") if current_account else 0
+        current_count = conn.execute("SELECT COUNT(*) AS n FROM users WHERE institution_id=? AND role_type='company_admin' AND status IN ('approved','active','pending','invited')", (company_id,)).fetchone()["n"]
+        if current_limit is not None and current_count >= current_limit:
+            raise HTTPException(409, "This workplace plan has reached its administrator limit")
         if conn.execute("SELECT 1 FROM users WHERE lower(email)=?", (email,)).fetchone():
             raise HTTPException(409, "An account already exists for this email")
         referral_code = _make_referral_code()
@@ -1023,6 +1507,7 @@ async def provision_workplace_provider(
     """Record a human-verified professional credential before enabling provider access."""
     if actor.get("role_type") != "admin":
         raise HTTPException(403, "Global administrator access required")
+    _validate_credential_period(data.valid_from, data.expires_at)
     conn = get_db()
     provider = conn.execute(
         "SELECT * FROM users WHERE email = ? AND role_type = 'student' AND user_category = 'adult' AND institution_id IS NULL AND status IN ('approved','active')",
@@ -1037,16 +1522,27 @@ async def provision_workplace_provider(
     now = _now()
     try:
         conn.execute(
-            "INSERT INTO workplace_provider_credentials (provider_id, title_encrypted, qualification_encrypted, registration_encrypted, verification_reference_encrypted, status, reviewed_by, reviewed_at) VALUES (?,?,?,?,?,'verified',?,?)",
+            "INSERT INTO workplace_provider_credentials (provider_id, professional_type, title_encrypted, qualification_encrypted, registration_encrypted, verification_reference_encrypted, status, reviewed_by, reviewed_at, valid_from, expires_at) VALUES (?,?,?,?,?,?,'verified',?,?,?,?)",
             (
                 provider["id"],
+                encrypt_pii(data.professional_type.strip()) if data.professional_type else None,
                 encrypt_pii(data.professional_title.strip()),
                 encrypt_pii(data.qualification.strip()),
                 encrypt_pii(data.registration_number.strip()),
                 encrypt_pii(data.verification_reference.strip()),
                 actor["id"],
                 now,
+                data.valid_from,
+                data.expires_at,
             ),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,changed_by,changed_at) VALUES (?,'active','available',?,?)",
+            (provider["id"], actor["id"], now),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at) VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?,?)",
+            (str(uuid.uuid4()), provider["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), encrypt_pii(data.verification_reference.strip()), now, actor["id"], now, data.valid_from, data.expires_at),
         )
         conn.execute(
             "UPDATE users SET role_type = 'workplace_provider', user_category = 'workplace_provider', professional_title = ?, terms_accepted_at = NULL WHERE id = ?",
@@ -1064,18 +1560,262 @@ async def provision_workplace_provider(
     write_audit(
         actor["id"],
         "admin",
-        "WORKPLACE_PROVIDER_CREDENTIAL_REVIEWED",
+        "WORKPLACE_PROVIDER_CREDENTIAL_VERIFIED",
         "user",
         provider["id"],
         {"registration_reference_recorded": True},
     )
     return {
         "provider_enabled": True,
+        "credential_status": "verified",
+        "expires_at": data.expires_at,
         "email": str(data.provider_email).lower(),
         "credential_reviewed_by": actor["id"],
         "reviewed_at": now,
         "note": "The entered verification reference records a human review; this endpoint does not validate a professional registry automatically.",
     }
+
+
+@router.get("/provider/status")
+async def workplace_provider_status(user: dict = Depends(require_auth)):
+    if user.get("role_type") != "workplace_provider":
+        raise HTTPException(403, "Workplace provider access required")
+    conn = get_db()
+    live_user = conn.execute("SELECT status FROM users WHERE id=? AND role_type='workplace_provider'", (user["id"],)).fetchone()
+    credential = _provider_credential_state(conn, user["id"])
+    if not credential:
+        conn.close()
+        raise HTTPException(404, "Provider credential record not found")
+    conn.execute(
+        "INSERT OR IGNORE INTO workplace_provider_operations (provider_id,access_status,availability,changed_at) VALUES (?,'active','available',?)",
+        (user["id"], _now()),
+    )
+    counts = conn.execute(
+        "SELECT SUM(CASE WHEN status IN ('open','active') AND assignment_status='assigned' THEN 1 ELSE 0 END) AS active_cases, "
+        "SUM(CASE WHEN status IN ('open','active') AND assignment_status='reassignment_required' THEN 1 ELSE 0 END) AS action_required "
+        "FROM workplace_support_cases WHERE provider_id=?",
+        (user["id"],),
+    ).fetchone()
+    pending_review = conn.execute(
+        "SELECT 1 FROM workplace_provider_credential_history WHERE provider_id=? AND status='pending_review' LIMIT 1",
+        (user["id"],),
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    return {
+        "credential_status": credential["status"],
+        "reverification_pending": bool(pending_review),
+        "credential_valid": credential["credential_valid"],
+        "valid_from": credential["valid_from"],
+        "expires_at": credential["expires_at"],
+        "access_status": credential["access_status"],
+        "account_status": str(live_user["status"]).lower() if live_user else "unavailable",
+        "availability": credential["availability"],
+        "active_case_count": int(counts["active_cases"] or 0),
+        "action_required_count": int(counts["action_required"] or 0),
+        "can_receive_new_cases": bool(live_user and str(live_user["status"]).lower() in {"approved", "active"}) and credential["credential_valid"] and credential["access_status"] == "active" and credential["availability"] == "available",
+    }
+
+
+@router.post("/provider/availability")
+async def set_provider_availability(data: ProviderAvailability, user: dict = Depends(require_auth)):
+    if user.get("role_type") != "workplace_provider" or str(user.get("status") or "").lower() not in {"approved", "active"}:
+        raise HTTPException(403, "Active workplace provider access required")
+    conn = get_db()
+    credential = _provider_credential_state(conn, user["id"])
+    if not credential or not credential["credential_valid"] or credential["access_status"] != "active":
+        conn.close()
+        raise HTTPException(403, "A current verified credential and active provider account are required")
+    now = _now()
+    conn.execute(
+        "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,changed_by,changed_at) VALUES (?,'active',?,?,?) "
+        "ON CONFLICT(provider_id) DO UPDATE SET availability=excluded.availability,changed_at=excluded.changed_at",
+        (user["id"], data.availability, user["id"], now),
+    )
+    associated = conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (user["id"],)).fetchall()
+    for row in associated:
+        _audit(conn, row["company_id"], None, "WORKPLACE_PROVIDER_AVAILABILITY_CHANGED")
+    conn.commit()
+    conn.close()
+    return {"availability": data.availability}
+
+
+@router.post("/provider/credentials/reverification", status_code=201)
+async def submit_provider_reverification(data: ProviderCredentialSubmission, user: dict = Depends(require_auth)):
+    if user.get("role_type") != "workplace_provider":
+        raise HTTPException(403, "Workplace provider access required")
+    now = _now()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,status,submitted_at) VALUES (?,?,?,?,?,?,'pending_review',?)",
+        (str(uuid.uuid4()), user["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), now),
+    )
+    for row in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (user["id"],)).fetchall():
+        _audit(conn, row["company_id"], None, "WORKPLACE_PROVIDER_CREDENTIAL_SUBMITTED")
+    conn.commit()
+    conn.close()
+    return {"submitted": True, "credential_review_status": "pending_review", "submitted_at": now}
+
+
+@router.post("/provider/departure")
+async def provider_departure(user: dict = Depends(require_auth)):
+    if user.get("role_type") != "workplace_provider":
+        raise HTTPException(403, "Workplace provider access required")
+    now = _now()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,reason_encrypted,changed_by,changed_at) VALUES (?,'deactivated','unavailable',?,?,?) "
+        "ON CONFLICT(provider_id) DO UPDATE SET access_status='deactivated',availability='unavailable',reason_encrypted=excluded.reason_encrypted,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+        (user["id"], encrypt_pii("Provider departure"), user["id"], now),
+    )
+    conn.execute("UPDATE workplace_providers SET status='inactive' WHERE provider_id=? AND status='active'", (user["id"],))
+    _mark_provider_cases_for_reassignment(conn, user["id"], "provider_departure")
+    for row in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (user["id"],)).fetchall():
+        _audit(conn, row["company_id"], None, "WORKPLACE_PROVIDER_DEACTIVATED")
+    conn.commit()
+    conn.close()
+    return {"deactivated": True, "active_cases_require_worker_reassignment": True}
+
+
+@router.get("/admin/provider-operations")
+async def admin_provider_operations(actor: dict = Depends(require_auth)):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT u.id,u.name,u.email,u.status AS account_status,pc.*,COALESCE(po.access_status,'active') AS access_status, "
+        "COALESCE(po.availability,'available') AS availability FROM users u "
+        "JOIN workplace_provider_credentials pc ON pc.provider_id=u.id LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id "
+        "WHERE u.role_type='workplace_provider' ORDER BY u.name COLLATE NOCASE"
+    ).fetchall()
+    providers = []
+    for row in rows:
+        state = _provider_credential_state(conn, row["id"])
+        associations = conn.execute(
+            "SELECT i.id,i.name,p.status FROM workplace_providers p JOIN institutions i ON i.id=p.company_id WHERE p.provider_id=? ORDER BY i.name COLLATE NOCASE",
+            (row["id"],),
+        ).fetchall()
+        pending = conn.execute(
+            "SELECT id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,submitted_at "
+            "FROM workplace_provider_credential_history WHERE provider_id=? AND status='pending_review' ORDER BY submitted_at DESC",
+            (row["id"],),
+        ).fetchall()
+        providers.append({
+            "id": row["id"], "name": row["name"], "email": row["email"], "account_status": row["account_status"],
+            "credential_status": state["status"] if state else "pending_review", "credential_valid": bool(state and state["credential_valid"]),
+            "expires_at": state["expires_at"] if state else None, "access_status": state["access_status"] if state else "active",
+            "expires_soon": bool(state and state["expires_at"] and datetime.now(timezone.utc).date() <= date.fromisoformat(str(state["expires_at"])[:10]) <= datetime.now(timezone.utc).date() + timedelta(days=30)),
+            "availability": state["availability"] if state else "unavailable",
+            "professional_type": decrypt_pii(row["professional_type"]) if row["professional_type"] else None,
+            "title": decrypt_pii(row["title_encrypted"]),
+            "associations": [dict(item) for item in associations],
+            "pending_reviews": [{"id": item["id"], "professional_type": decrypt_pii(item["professional_type_encrypted"]) if item["professional_type_encrypted"] else None, "title": decrypt_pii(item["title_encrypted"]), "qualification": decrypt_pii(item["qualification_encrypted"]), "registration_number": decrypt_pii(item["registration_encrypted"]), "submitted_at": item["submitted_at"]} for item in pending],
+        })
+    conn.commit()
+    conn.close()
+    return providers
+
+
+@router.post("/admin/provider-credential-reviews/{review_id}")
+async def review_provider_credential(review_id: str, data: ProviderCredentialReview, actor: dict = Depends(require_auth)):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    if data.decision == "verify" and not data.verification_reference:
+        raise HTTPException(400, "Record the verification reference before approving this credential")
+    _validate_credential_period(data.valid_from, data.expires_at)
+    now = _now()
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        review = conn.execute("SELECT * FROM workplace_provider_credential_history WHERE id=? AND status='pending_review'", (review_id,)).fetchone()
+        if not review:
+            raise HTTPException(404, "Pending provider credential review not found")
+        if data.decision == "verify":
+            conn.execute(
+                "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at) "
+                "SELECT ?,provider_id,professional_type,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_at,reviewed_by,reviewed_at,valid_from,expires_at FROM workplace_provider_credentials WHERE provider_id=?",
+                (str(uuid.uuid4()), review["provider_id"]),
+            )
+            conn.execute(
+                "UPDATE workplace_provider_credentials SET professional_type=?,title_encrypted=?,qualification_encrypted=?,registration_encrypted=?,verification_reference_encrypted=?,status='verified',reviewed_by=?,reviewed_at=?,valid_from=?,expires_at=?,reason_encrypted=NULL WHERE provider_id=?",
+                (review["professional_type_encrypted"], review["title_encrypted"], review["qualification_encrypted"], review["registration_encrypted"], encrypt_pii(data.verification_reference.strip()), actor["id"], now, data.valid_from, data.expires_at, review["provider_id"]),
+            )
+            conn.execute(
+                "UPDATE workplace_provider_credential_history SET status='verified',reviewed_by=?,reviewed_at=?,verification_reference_encrypted=?,valid_from=?,expires_at=? WHERE id=?",
+                (actor["id"], now, encrypt_pii(data.verification_reference.strip()), data.valid_from, data.expires_at, review_id),
+            )
+            conn.execute("UPDATE users SET professional_title=? WHERE id=?", (review["title_encrypted"], review["provider_id"]))
+            event = "WORKPLACE_PROVIDER_CREDENTIAL_VERIFIED"
+        else:
+            conn.execute("UPDATE workplace_provider_credential_history SET status='rejected',reviewed_by=?,reviewed_at=?,reason_encrypted=?,verification_reference_encrypted=? WHERE id=?", (actor["id"], now, encrypt_pii(data.reason.strip()) if data.reason else None, encrypt_pii(data.verification_reference.strip()) if data.verification_reference else None, review_id))
+            event = "WORKPLACE_PROVIDER_CREDENTIAL_REJECTED"
+        for company in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (review["provider_id"],)).fetchall():
+            _audit(conn, company["company_id"], None, event)
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(409, "Unable to record provider credential review") from exc
+    conn.close()
+    write_audit(actor["id"], "admin", event, "user", review["provider_id"], {"review_id": review_id})
+    return {"reviewed": True, "decision": data.decision, "status": "verified" if data.decision == "verify" else "rejected"}
+
+
+@router.post("/admin/providers/{provider_id}/access")
+async def update_provider_access(provider_id: str, data: ProviderAccessAction, actor: dict = Depends(require_auth)):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    status = {"suspend": "suspended", "reactivate": "active", "revoke": "revoked", "deactivate": "deactivated"}[data.action]
+    now = _now()
+    conn = get_db()
+    provider = conn.execute("SELECT id FROM users WHERE id=? AND role_type='workplace_provider'", (provider_id,)).fetchone()
+    if not provider:
+        conn.close()
+        raise HTTPException(404, "Workplace provider not found")
+    conn.execute(
+        "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,reason_encrypted,changed_by,changed_at) VALUES (?,?,?, ?,?,?) "
+        "ON CONFLICT(provider_id) DO UPDATE SET access_status=excluded.access_status,availability=excluded.availability,reason_encrypted=excluded.reason_encrypted,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+        (provider_id, status, "unavailable" if status != "active" else "available", encrypt_pii(data.reason.strip()), actor["id"], now),
+    )
+    if data.action in {"suspend", "revoke", "deactivate"}:
+        _mark_provider_cases_for_reassignment(conn, provider_id, status)
+    if data.action == "deactivate":
+        conn.execute("UPDATE workplace_providers SET status='inactive' WHERE provider_id=? AND status='active'", (provider_id,))
+    event = {"suspend": "WORKPLACE_PROVIDER_SUSPENDED", "reactivate": "WORKPLACE_PROVIDER_REACTIVATED", "revoke": "WORKPLACE_PROVIDER_REVOKED", "deactivate": "WORKPLACE_PROVIDER_DEACTIVATED"}[data.action]
+    for company in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (provider_id,)).fetchall():
+        _audit(conn, company["company_id"], None, event)
+    conn.commit()
+    conn.close()
+    write_audit(actor["id"], "admin", event, "user", provider_id, {"reason_recorded": True})
+    return {"access_status": status, "active_cases_marked_for_reassignment": data.action in {"suspend", "revoke", "deactivate"}}
+
+
+@router.post("/admin/providers/{provider_id}/credential-revoke")
+async def revoke_provider_credential(provider_id: str, data: ProviderCredentialRevoke, actor: dict = Depends(require_auth)):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    now = _now()
+    conn = get_db()
+    credential = conn.execute("SELECT * FROM workplace_provider_credentials WHERE provider_id=?", (provider_id,)).fetchone()
+    if not credential:
+        conn.close()
+        raise HTTPException(404, "Provider credential not found")
+    conn.execute("UPDATE workplace_provider_credentials SET status='revoked',reviewed_by=?,reviewed_at=?,reason_encrypted=? WHERE provider_id=?", (actor["id"], now, encrypt_pii(data.reason.strip()), provider_id))
+    conn.execute(
+        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,reason_encrypted) VALUES (?,?,?,?,?,? ,?,'revoked',?,?,?,?,?,?)",
+        (str(uuid.uuid4()), provider_id, credential["professional_type"], credential["title_encrypted"], credential["qualification_encrypted"], credential["registration_encrypted"], credential["verification_reference_encrypted"], now, actor["id"], now, credential["valid_from"], credential["expires_at"], encrypt_pii(data.reason.strip())),
+    )
+    _mark_provider_cases_for_reassignment(conn, provider_id, "credential_revoked")
+    for company in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (provider_id,)).fetchall():
+        _audit(conn, company["company_id"], None, "WORKPLACE_PROVIDER_CREDENTIAL_REVOKED")
+    conn.commit()
+    conn.close()
+    write_audit(actor["id"], "admin", "WORKPLACE_PROVIDER_CREDENTIAL_REVOKED", "user", provider_id, {"reason_recorded": True})
+    return {"credential_status": "revoked"}
 
 
 @router.post("/enrollment/verify")
@@ -1089,12 +1829,15 @@ async def verify_enrollment(data: EnrollmentVerify):
         "WHERE c.id = ? AND c.used_at IS NULL AND c.expires_at > ? AND l.revoked_at IS NULL "
         "AND (l.expires_at IS NULL OR l.expires_at > ?) AND s.legal_review_complete = 1 "
         "AND s.policy_status = 'approved' AND i.type = 'company' AND i.status = 'ACTIVE' "
-        "AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pu.status IN ('approved','active'))",
+        "AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
         (data.challenge_id, _now(), _now()),
     ).fetchone()
     if not challenge:
         conn.close()
         raise HTTPException(400, "The verification code is invalid or expired")
+    if not commercial_can_use(conn, challenge["company_id"], "enrollment"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "New workplace enrollment is temporarily unavailable for this company")
     if not secrets.compare_digest(challenge["code_hash"], hash_token(data.code)):
         new_attempts = challenge["attempts_count"] + 1
         conn.execute(
@@ -1191,8 +1934,11 @@ async def workplace_me(user: dict = Depends(require_auth)):
 async def available_providers(user: dict = Depends(require_auth)):
     membership = _employee(user)
     conn = get_db()
+    if not commercial_can_use(conn, membership["company_id"], "provider_services"):
+        conn.commit(); conn.close()
+        return []
     rows = conn.execute(
-        "SELECT u.id, u.name, u.professional_title FROM workplace_providers p JOIN users u ON u.id = p.provider_id JOIN workplace_provider_credentials pc ON pc.provider_id=u.id AND pc.status='verified' WHERE p.company_id = ? AND p.status = 'active' AND u.status IN ('approved','active') ORDER BY u.name COLLATE NOCASE",
+        "SELECT u.id, u.name, u.professional_title FROM workplace_providers p JOIN users u ON u.id = p.provider_id JOIN workplace_provider_credentials pc ON pc.provider_id=u.id AND pc.status='verified' LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id WHERE p.company_id = ? AND p.status = 'active' AND u.status IN ('approved','active') AND COALESCE(po.access_status,'active')='active' AND COALESCE(po.availability,'available')='available' AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) ORDER BY u.name COLLATE NOCASE",
         (membership["company_id"],),
     ).fetchall()
     conn.close()
@@ -1213,6 +1959,11 @@ async def create_checkin(data: CheckinCreate, user: dict = Depends(require_auth)
     membership = _employee(user)
     now = _now()
     conn = get_db()
+    resolve_commercial_account(conn, membership["company_id"])
+    sync_offboarding(conn, membership["company_id"])
+    if termination_effective(conn, membership["company_id"]):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "New workplace-funded activity has ended for this company")
     conn.execute(
         "INSERT INTO workplace_checkins (id, company_id, user_id, answers_json, created_at) VALUES (?,?,?,?,?)",
         (
@@ -1244,6 +1995,10 @@ async def request_provider_support(
             "Explicitly choose whether to share your latest check-in with the provider",
         )
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    if not commercial_can_use(conn, membership["company_id"], "provider_services"):
+        conn.rollback(); conn.close()
+        raise HTTPException(403, "New provider support requests are unavailable for this workplace plan")
     provider = conn.execute(
         "SELECT 1 FROM workplace_providers WHERE company_id = ? AND provider_id = ? AND status = 'active'",
         (membership["company_id"], data.provider_id),
@@ -1256,7 +2011,7 @@ async def request_provider_support(
         "SELECT id FROM workplace_checkins WHERE company_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 1",
         (membership["company_id"], user["id"]),
     ).fetchone()
-    if not provider or not provider_account:
+    if not provider or not provider_account or not _provider_can_receive_case(conn, data.provider_id, membership["company_id"]):
         conn.close()
         raise HTTPException(
             400, "That care provider is not available through your workplace"
@@ -1267,7 +2022,7 @@ async def request_provider_support(
     now = _now()
     case_id = str(uuid.uuid4())
     conn.execute(
-        "INSERT INTO workplace_support_cases (id, company_id, user_id, provider_id, status, share_consent_at, shared_checkin_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO workplace_support_cases (id, company_id, user_id, provider_id, status, share_consent_at, shared_checkin_id, created_at, updated_at, assignment_status, assigned_at) VALUES (?,?,?,?,?,?,?,?,?,'assigned',?)",
         (
             case_id,
             membership["company_id"],
@@ -1276,6 +2031,7 @@ async def request_provider_support(
             "open",
             now,
             latest["id"],
+            now,
             now,
             now,
         ),
@@ -1359,12 +2115,59 @@ async def own_workplace_checkins(user: dict = Depends(require_auth)):
 async def own_workplace_support_requests(user: dict = Depends(require_auth)):
     membership = _employee(user)
     conn = get_db()
+    assigned = conn.execute("SELECT DISTINCT provider_id FROM workplace_support_cases WHERE company_id=? AND user_id=? AND assignment_status='assigned' AND status IN ('open','active')", (membership["company_id"], user["id"])).fetchall()
+    for provider in assigned:
+        _provider_credential_state(conn, provider["provider_id"])
     rows = conn.execute(
-        "SELECT id, status, created_at, withdrawn_at FROM workplace_support_cases WHERE company_id = ? AND user_id = ? ORDER BY created_at DESC",
+        "SELECT id, status, assignment_status, created_at, assigned_at, closed_at, withdrawn_at FROM workplace_support_cases WHERE company_id = ? AND user_id = ? ORDER BY created_at DESC",
         (membership["company_id"], user["id"]),
     ).fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+@router.post("/support-requests/{case_id}/reassign")
+async def employee_reassign_support_case(case_id: str, data: WorkplaceCaseReassignment, user: dict = Depends(require_auth)):
+    membership = _employee(user)
+    if not data.confirm_shared_history:
+        raise HTTPException(400, "Confirm before sharing previously shared case information with the new provider")
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        case = conn.execute(
+            "SELECT id,company_id,provider_id,status,assignment_status FROM workplace_support_cases "
+            "WHERE id=? AND user_id=? AND company_id=? AND withdrawn_at IS NULL",
+            (case_id, user["id"], membership["company_id"]),
+        ).fetchone()
+        if not case or case["assignment_status"] != "reassignment_required" or case["status"] not in {"open", "active"}:
+            raise HTTPException(409, "This support case is not awaiting a provider change")
+        if data.provider_id == case["provider_id"]:
+            raise HTTPException(400, "Choose a different provider")
+        if not _provider_can_receive_case(conn, data.provider_id, membership["company_id"]):
+            raise HTTPException(400, "Choose a currently eligible provider who is available for new support")
+        now = _now()
+        conn.execute(
+            "UPDATE workplace_support_cases SET provider_id=?,assignment_status='assigned',assigned_at=?,updated_at=? WHERE id=? AND assignment_status='reassignment_required'",
+            (data.provider_id, now, now, case_id),
+        )
+        conn.execute(
+            "INSERT INTO workplace_case_assignment_history (id,case_id,company_id,previous_provider_id,new_provider_id,event_type,worker_consent_at,occurred_at) VALUES (?,?,?,?,?,'worker_consented_reassignment',?,?)",
+            (str(uuid.uuid4()), case_id, membership["company_id"], case["provider_id"], data.provider_id, now, now),
+        )
+        _audit(conn, membership["company_id"], user["id"], "WORKPLACE_CASE_REASSIGNED_WITH_WORKER_CONSENT")
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(409, "Unable to reassign this support case") from exc
+    conn.close()
+    from backend.database import create_notification
+    create_notification(data.provider_id, "A workplace support case is ready", "A worker has confirmed sharing a workplace support case with you. Sign in to review it.", "general")
+    return {"reassigned": True, "case_id": case_id, "assignment_status": "assigned", "shared_history_confirmed": True}
 
 
 @router.post("/support-requests/{case_id}/withdraw")
@@ -1390,6 +2193,9 @@ async def create_enrollment_link(user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     token = secrets.token_urlsafe(40)
     conn = get_db()
+    if not commercial_can_use(conn, company_id, "enrollment"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "New enrollment links are unavailable for this workplace plan or commercial status")
     setup = conn.execute(
         "SELECT legal_review_complete, policy_status,work_email_domains_json FROM workplace_settings WHERE company_id = ?",
         (company_id,),
@@ -1400,7 +2206,7 @@ async def create_enrollment_link(user: dict = Depends(require_auth)):
             403,
             "A documented Kenyan legal/privacy review is required before enabling employee enrollment",
         )
-    provider = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
+    provider = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
     if setup["policy_status"] != "approved" or not provider:
         conn.close()
         raise HTTPException(403, "Complete company privacy policy and configure an operational independent provider before enabling enrollment")
@@ -1448,8 +2254,14 @@ async def list_enrollment_links(user: dict = Depends(require_auth)):
 async def attach_provider(data: ProviderAttach, user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
+    if not commercial_can_use(conn, company_id, "provider_services"):
+        conn.commit(); conn.close()
+        raise HTTPException(403, "Provider services are unavailable for this workplace plan or commercial status")
+    account = resolve_commercial_account(conn, company_id)
+    provider_limit = commercial_plan_limit(account, "provider_limit") if account else 0
     provider = conn.execute(
-        "SELECT u.id FROM users u JOIN workplace_provider_credentials c ON c.provider_id = u.id AND c.status = 'verified' WHERE u.email = ? AND u.role_type = 'workplace_provider' AND u.status IN ('approved','active')",
+        "SELECT u.id FROM users u JOIN workplace_provider_credentials c ON c.provider_id = u.id AND c.status = 'verified' LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id WHERE u.email = ? AND u.role_type = 'workplace_provider' AND u.status IN ('approved','active') AND COALESCE(po.access_status,'active')='active' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now'))",
         (str(data.provider_email).lower(),),
     ).fetchone()
     if not provider:
@@ -1457,6 +2269,11 @@ async def attach_provider(data: ProviderAttach, user: dict = Depends(require_aut
         raise HTTPException(
             404, "No approved workplace provider is registered for that email"
         )
+    already_attached = conn.execute("SELECT 1 FROM workplace_providers WHERE company_id=? AND provider_id=? AND status='active'", (company_id, provider["id"])).fetchone()
+    active_provider_count = conn.execute("SELECT COUNT(*) AS n FROM workplace_providers WHERE company_id=? AND status='active'", (company_id,)).fetchone()["n"]
+    if not already_attached and provider_limit is not None and active_provider_count >= provider_limit:
+        conn.close()
+        raise HTTPException(409, "This workplace plan has reached its provider limit")
     conn.execute(
         "INSERT OR IGNORE INTO workplace_providers (company_id, provider_id, status, created_at) VALUES (?,?, 'active', ?)",
         (company_id, provider["id"], _now()),
@@ -1473,7 +2290,7 @@ async def company_provider_list(user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
     rows = conn.execute(
-        "SELECT u.id, u.name, u.professional_title, p.status FROM workplace_providers p JOIN users u ON u.id = p.provider_id WHERE p.company_id = ? ORDER BY u.name COLLATE NOCASE",
+        "SELECT u.id, u.name, u.status AS account_status, u.professional_title, p.status AS association_status, c.status AS credential_status,c.valid_from,c.expires_at,COALESCE(o.access_status,'active') AS access_status,COALESCE(o.availability,'available') AS availability,EXISTS (SELECT 1 FROM workplace_provider_credential_history h WHERE h.provider_id=u.id AND h.status='pending_review') AS review_pending FROM workplace_providers p JOIN users u ON u.id = p.provider_id LEFT JOIN workplace_provider_credentials c ON c.provider_id=u.id LEFT JOIN workplace_provider_operations o ON o.provider_id=u.id WHERE p.company_id = ? ORDER BY u.name COLLATE NOCASE",
         (company_id,),
     ).fetchall()
     result = [
@@ -1483,7 +2300,8 @@ async def company_provider_list(user: dict = Depends(require_auth)):
             "title": decrypt_pii(row["professional_title"])
             if str(row["professional_title"] or "").startswith("gcm1:")
             else row["professional_title"],
-            "status": row["status"],
+            "association_status": row["association_status"],
+            "status": "unavailable" if row["association_status"] != "active" or row["access_status"] != "active" or str(row["account_status"]).lower() not in {"approved", "active"} or row["availability"] == "unavailable" else "review_required" if row["credential_status"] != "verified" or bool(row["review_pending"]) or (row["expires_at"] and row["expires_at"] < datetime.now(timezone.utc).date().isoformat()) or (row["valid_from"] and row["valid_from"] > datetime.now(timezone.utc).date().isoformat()) else "verified",
         }
         for row in rows
     ]
@@ -1495,12 +2313,14 @@ async def company_provider_list(user: dict = Depends(require_auth)):
 async def deactivate_provider(provider_id: str, user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.execute(
         "UPDATE workplace_providers SET status = 'inactive' WHERE company_id = ? AND provider_id = ? AND status = 'active'",
         (company_id, provider_id),
     )
     if cur.rowcount:
-        remaining = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
+        _mark_provider_cases_for_reassignment(conn, provider_id, "company_relationship_removed", company_id=company_id)
+        remaining = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
         if not remaining:
             conn.execute("UPDATE workplace_settings SET provider_service_enabled=0,updated_at=? WHERE company_id=?", (_now(), company_id))
         _audit(conn, company_id, user["id"], "WORKPLACE_PROVIDER_DEACTIVATED")
@@ -1532,89 +2352,65 @@ async def revoke_enrollment_link(link_id: str, user: dict = Depends(require_auth
 async def workplace_aggregate_report(user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
-    row = conn.execute(
-        "SELECT COUNT(DISTINCT c.user_id) AS people FROM workplace_checkins c JOIN workplace_memberships m ON m.company_id = c.company_id AND m.user_id = c.user_id WHERE c.company_id = ? AND m.status = 'active' AND m.withdrawn_at IS NULL",
-        (company_id,),
-    ).fetchone()
-    if row["people"] < MIN_REPORT_COHORT:
-        conn.close()
-        return {
-            "suppressed": True,
-            "minimum_cohort": MIN_REPORT_COHORT,
-            "message": "Aggregate reporting becomes available when at least 10 distinct employees have completed check-ins. No participation list is available.",
-        }
-    # Fixed organization-wide buckets only: no date, department, demographic, or other filters.
-    rows = conn.execute(
-        "SELECT c.user_id, c.answers_json FROM workplace_checkins c JOIN workplace_memberships m ON m.company_id = c.company_id AND m.user_id = c.user_id WHERE c.company_id = ? AND m.status = 'active' AND m.withdrawn_at IS NULL",
-        (company_id,),
-    ).fetchall()
+    insights = get_workplace_insights(conn, company_id, actor_id=user["id"])
+    overview = insights.get("overview") or {}
+    conn.commit()
     conn.close()
-    aggregates = {"mood": 0, "stress": 0, "support_access": 0}
-    totals = {key: 0 for key in aggregates}
-    people: dict[str, dict[str, list[int]]] = {}
-    for record in rows:
-        try:
-            answers = json.loads(decrypt_pii(record["answers_json"]))
-        except (ValueError, TypeError, RuntimeError):
-            continue
-        person_answers = people.setdefault(
-            record["user_id"], {key: [] for key in aggregates}
-        )
-        for key in aggregates:
-            if isinstance(answers.get(key), int):
-                person_answers[key].append(answers[key])
-    for person_answers in people.values():
-        for key, values in person_answers.items():
-            if values:
-                aggregates[key] += sum(values) / len(values)
-                totals[key] += 1
-    return {
-        "suppressed": False,
-        "cohort_size": "10+",
-        "checkins": "10+",
-        "averages": {
-            key: round(aggregates[key] / totals[key], 1)
-            if totals[key] >= MIN_REPORT_COHORT
-            else None
-            for key in aggregates
-        },
-        "scope": "whole workplace only; no filters or export",
+    response = {
+        "state": insights["state"],
+        "suppressed": insights["state"] != ANALYTICS_AVAILABLE,
+        "minimum_cohort": insights["minimum_cohort"],
+        "message": insights.get("privacy_message"),
+        "period": insights.get("period"),
+        "scope": "whole workplace; latest completed month; no filters or individual data",
     }
+    if not response["suppressed"]:
+        response.update({
+            "cohort_size": overview["contributors"],
+            "checkins": overview["checkins"],
+            "averages": {theme["key"]: theme["average"] for theme in insights.get("themes", [])},
+        })
+    return response
 
 
 @router.get("/admin/report/trends")
 async def workplace_aggregate_trends(user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
-    rows = conn.execute(
-        "SELECT substr(c.created_at,1,7) AS period,c.user_id,c.answers_json FROM workplace_checkins c JOIN workplace_memberships m ON m.company_id=c.company_id AND m.user_id=c.user_id WHERE c.company_id=? AND m.status='active' AND m.withdrawn_at IS NULL ORDER BY period",
-        (company_id,),
-    ).fetchall()
+    insights = get_workplace_insights(conn, company_id, actor_id=user["id"])
+    conn.commit()
     conn.close()
-    periods: dict[str, dict[str, list[dict]]] = {}
-    for row in rows:
-        try: answers = json.loads(decrypt_pii(row["answers_json"]))
-        except (ValueError, TypeError, RuntimeError): continue
-        periods.setdefault(row["period"], {}).setdefault(row["user_id"], []).append(answers)
-    output = []
-    for period, people in sorted(periods.items()):
-        if len(people) < MIN_REPORT_COHORT:
-            continue
-        averages = {}
-        for key in ("mood", "stress", "support_access"):
-            person_values = []
-            for answers in people.values():
-                values = [a[key] for a in answers if isinstance(a.get(key), int)]
-                if values: person_values.append(sum(values) / len(values))
-            averages[key] = round(sum(person_values) / len(person_values), 1) if len(person_values) >= MIN_REPORT_COHORT else None
-        output.append({"period": period, "suppressed": False, "cohort_size": "10+", "averages": averages})
+    periods = []
+    for period in insights["trends"]:
+        item = {
+            "period": period["period"],
+            "state": period["state"],
+            "suppressed": period["state"] != ANALYTICS_AVAILABLE,
+        }
+        if not item["suppressed"]:
+            item.update({
+                "averages": period["averages"],
+                "wellbeing_indicator": period["wellbeing_indicator"],
+            })
+        periods.append(item)
     return {
-        "scope": "fixed whole-company monthly periods",
-        "suppressed": not bool(output),
-        "minimum_cohort": MIN_REPORT_COHORT,
-        "message": "Monthly trends are unavailable until at least 10 distinct employees contribute in a period." if not output else None,
-        "periods": output,
+        "scope": "fixed whole-company completed months",
+        "suppressed": not any(period["state"] == ANALYTICS_AVAILABLE for period in insights["trends"]),
+        "minimum_cohort": insights["minimum_cohort"],
+        "message": insights.get("privacy_message"),
+        "periods": periods,
     }
+
+
+@router.get("/admin/insights")
+async def workplace_insights(user: dict = Depends(require_auth)):
+    """Executive whole-workplace report; the privacy layer owns all aggregation."""
+    company_id = _company_admin(user)
+    conn = get_db()
+    result = get_workplace_insights(conn, company_id, actor_id=user["id"])
+    conn.commit()
+    conn.close()
+    return result
 
 
 @router.get("/provider/cases")
@@ -1622,8 +2418,8 @@ async def provider_cases(user: dict = Depends(require_auth)):
     _provider_access(user)
     conn = get_db()
     rows = conn.execute(
-        "SELECT c.id, c.company_id, c.user_id, c.shared_checkin_id, c.status, c.created_at, u.name, u.email FROM workplace_support_cases c JOIN users u ON u.id = c.user_id JOIN workplace_providers p ON p.company_id = c.company_id AND p.provider_id = c.provider_id AND p.status = 'active' JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.provider_id = ? AND c.withdrawn_at IS NULL ORDER BY c.created_at DESC",
-        (user["id"],),
+        "SELECT c.id, c.company_id, c.user_id, c.shared_checkin_id, c.status, c.created_at, u.name, u.email FROM workplace_support_cases c JOIN users u ON u.id = c.user_id JOIN workplace_providers p ON p.company_id = c.company_id AND p.provider_id = c.provider_id AND (p.status='active' OR (p.status='ending' AND c.continuity_until>?)) JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.provider_id = ? AND c.assignment_status='assigned' AND c.withdrawn_at IS NULL ORDER BY c.created_at DESC",
+        (_now(), user["id"]),
     ).fetchall()
     result = []
     for row in rows:
@@ -1656,7 +2452,7 @@ async def provider_cases(user: dict = Depends(require_auth)):
 async def provider_case_detail(case_id: str, user: dict = Depends(require_auth)):
     _provider_access(user, case_id=case_id)
     conn = get_db()
-    case = conn.execute("SELECT c.id,c.status,c.created_at,u.name,u.email FROM workplace_support_cases c JOIN users u ON u.id=c.user_id JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND p.status='active' JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.provider_id=? AND c.withdrawn_at IS NULL", (case_id, user["id"])).fetchone()
+    case = conn.execute("SELECT c.id,c.status,c.created_at,u.name,u.email FROM workplace_support_cases c JOIN users u ON u.id=c.user_id JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND (p.status='active' OR (p.status='ending' AND c.continuity_until>?)) JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.provider_id=? AND c.assignment_status='assigned' AND c.withdrawn_at IS NULL", (_now(), case_id, user["id"])).fetchone()
     if not case:
         conn.close(); raise HTTPException(404, "Active workplace case not found")
     notes = conn.execute("SELECT id,private_note_encrypted,employee_update_encrypted,shared_at,created_at FROM workplace_case_notes WHERE case_id=? AND provider_id=? ORDER BY created_at DESC", (case_id, user["id"])).fetchall()
@@ -1668,7 +2464,7 @@ async def provider_case_detail(case_id: str, user: dict = Depends(require_auth))
 async def create_workplace_case_note(case_id: str, data: WorkplaceCaseNoteCreate, user: dict = Depends(require_auth)):
     _provider_access(user, case_id=case_id, writable=True)
     conn = get_db()
-    case = conn.execute("SELECT c.company_id,c.user_id FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND p.status='active' JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.provider_id=? AND c.withdrawn_at IS NULL AND c.status IN ('open','active')", (case_id, user["id"])).fetchone()
+    case = conn.execute("SELECT c.company_id,c.user_id FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND (p.status='active' OR (p.status='ending' AND c.continuity_until>?)) JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.provider_id=? AND c.withdrawn_at IS NULL AND c.status IN ('open','active')", (_now(), case_id, user["id"])).fetchone()
     if not case:
         conn.close(); raise HTTPException(404, "Active workplace case not found")
     now = _now(); note_id = str(uuid.uuid4()); employee_update = data.employee_update.strip() if data.employee_update else ""
@@ -1688,7 +2484,7 @@ async def close_workplace_case(case_id: str, user: dict = Depends(require_auth))
     row=conn.execute("SELECT c.company_id,c.user_id FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND p.status='active' JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.provider_id=? AND c.withdrawn_at IS NULL AND c.status IN ('open','active')",(case_id,user["id"])).fetchone()
     if not row:
         conn.close(); raise HTTPException(404,"Active workplace case not found")
-    now=_now();conn.execute("UPDATE workplace_support_cases SET status='closed',updated_at=? WHERE id=?",(now,case_id));_audit(conn,row["company_id"],user["id"],"WORKPLACE_CASE_CLOSED");conn.commit();conn.close()
+    now=_now();conn.execute("UPDATE workplace_support_cases SET status='closed',closed_by=?,closed_at=?,updated_at=? WHERE id=?",(user["id"],now,now,case_id));conn.execute("UPDATE workplace_appointments SET status='cancelled',updated_at=? WHERE case_id=? AND status='scheduled'",(now,case_id));_audit(conn,row["company_id"],user["id"],"WORKPLACE_CASE_CLOSED");conn.commit();conn.close()
     from backend.database import create_notification
     create_notification(row["user_id"],"Workplace support case closed","Your provider closed the current support case. You can request support again if needed.","general")
     return {"ok":True,"status":"closed"}
@@ -1716,7 +2512,7 @@ async def employee_workplace_messages(user: dict = Depends(require_auth)):
 async def send_employee_workplace_message(data: WorkplaceMessageCreate, user: dict = Depends(require_auth)):
     membership = _employee(user)
     conn = get_db()
-    case = conn.execute("SELECT c.provider_id,c.company_id FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND p.status='active' JOIN workplace_provider_credentials pc ON pc.provider_id=c.provider_id AND pc.status='verified' JOIN users u ON u.id=c.provider_id AND u.status IN ('approved','active') JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.user_id=? AND c.company_id=? AND c.withdrawn_at IS NULL AND c.status IN ('open','active')", (data.case_id, user["id"], membership["company_id"])).fetchone()
+    case = conn.execute("SELECT c.provider_id,c.company_id FROM workplace_support_cases c JOIN workplace_providers p ON p.company_id=c.company_id AND p.provider_id=c.provider_id AND p.status='active' JOIN workplace_provider_credentials pc ON pc.provider_id=c.provider_id AND pc.status='verified' LEFT JOIN workplace_provider_operations po ON po.provider_id=c.provider_id JOIN users u ON u.id=c.provider_id AND u.status IN ('approved','active') JOIN institutions i ON i.id=c.company_id AND i.type='company' AND i.status='ACTIVE' WHERE c.id=? AND c.user_id=? AND c.company_id=? AND c.assignment_status='assigned' AND c.withdrawn_at IS NULL AND c.status IN ('open','active') AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active'", (data.case_id, user["id"], membership["company_id"])).fetchone()
     if not case:
         conn.close(); raise HTTPException(404, "Active provider support case not found")
     now = _now(); conn.execute("INSERT INTO workplace_messages (id,case_id,sender_id,body_encrypted,created_at) VALUES (?,?,?,?,?)", (str(uuid.uuid4()), data.case_id, user["id"], encrypt_pii(data.message.strip()), now))
@@ -1789,13 +2585,18 @@ async def send_provider_workplace_message(case_id: str, data: WorkplaceMessageBo
 async def provider_workplace_appointments(user: dict = Depends(require_auth)):
     _provider_access(user)
     conn=get_db()
-    rows=conn.execute("SELECT a.id,a.case_id,a.starts_at,a.mode,a.location_or_link_encrypted,a.status,a.created_at,u.name AS employee_name FROM workplace_appointments a JOIN workplace_support_cases c ON c.id=a.case_id JOIN users u ON u.id=a.user_id JOIN workplace_providers p ON p.company_id=a.company_id AND p.provider_id=a.provider_id AND p.status='active' JOIN institutions i ON i.id=a.company_id AND i.type='company' AND i.status='ACTIVE' WHERE a.provider_id=? AND c.withdrawn_at IS NULL ORDER BY a.starts_at DESC",(user["id"],)).fetchall();conn.close()
+    rows=conn.execute("SELECT a.id,a.case_id,a.starts_at,a.mode,a.location_or_link_encrypted,a.status,a.created_at,u.name AS employee_name FROM workplace_appointments a JOIN workplace_support_cases c ON c.id=a.case_id AND c.provider_id=a.provider_id AND c.assignment_status='assigned' JOIN users u ON u.id=a.user_id JOIN workplace_providers p ON p.company_id=a.company_id AND p.provider_id=a.provider_id AND p.status='active' JOIN institutions i ON i.id=a.company_id AND i.type='company' AND i.status='ACTIVE' WHERE a.provider_id=? AND c.withdrawn_at IS NULL ORDER BY a.starts_at DESC",(user["id"],)).fetchall();conn.close()
     return [{"id":r["id"],"case_id":r["case_id"],"starts_at":r["starts_at"],"mode":r["mode"],"location_or_link":decrypt_pii(r["location_or_link_encrypted"]) if r["location_or_link_encrypted"] else None,"status":r["status"],"created_at":r["created_at"],"employee_name":r["employee_name"]} for r in rows]
 
 
 @router.post("/provider/appointments/{appointment_id}/status")
 async def update_workplace_appointment_status(appointment_id: str, data: WorkplaceAppointmentStatus, user: dict = Depends(require_auth)):
-    _provider_access(user)
+    assignment = get_db()
+    case_row = assignment.execute("SELECT case_id FROM workplace_appointments WHERE id=? AND provider_id=?", (appointment_id, user["id"])).fetchone()
+    assignment.close()
+    if not case_row:
+        raise HTTPException(404, "Scheduled workplace appointment not found")
+    _provider_access(user, case_id=case_row["case_id"], writable=True)
     conn = get_db()
     row = conn.execute("SELECT a.company_id,a.user_id FROM workplace_appointments a JOIN workplace_support_cases c ON c.id=a.case_id AND c.withdrawn_at IS NULL JOIN workplace_providers p ON p.company_id=a.company_id AND p.provider_id=a.provider_id AND p.status='active' JOIN institutions i ON i.id=a.company_id AND i.type='company' AND i.status='ACTIVE' WHERE a.id=? AND a.provider_id=? AND a.status='scheduled'", (appointment_id, user["id"])).fetchone()
     if not row:

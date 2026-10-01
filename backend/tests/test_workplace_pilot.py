@@ -244,10 +244,20 @@ def test_aggregate_report_suppresses_below_ten_active_respondents(db):
             conn.execute(
                 "INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES (?,?,?,?,?)",
                 (
-                    f"c-{i}",
+                    f"a-{i}",
                     company["id"],
                     person["id"],
                     encrypt_pii('{"mood": 4, "stress": 2, "support_access": 3}'),
+                    "2026-08-27T10:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES (?,?,?,?,?)",
+                (
+                    f"c-{i}",
+                    company["id"],
+                    person["id"],
+                    encrypt_pii('{"mood": 4, "stress": 2, "support_access": 3, "comment": "private raw participant text"}'),
                     now,
                 ),
             )
@@ -260,8 +270,13 @@ def test_aggregate_report_suppresses_below_ten_active_respondents(db):
         trends = client.get("/api/v1/workplace/admin/report/trends", headers=headers)
         assert trends.status_code == 200
         assert trends.json()["suppressed"] is True
-        assert trends.json()["periods"] == []
-        assert "2026-09" not in trends.text
+        september = next(period for period in trends.json()["periods"] if period["period"] == "2026-09")
+        august = next(period for period in trends.json()["periods"] if period["period"] == "2026-08")
+        assert september["state"] == august["state"] == "INSUFFICIENT_DATA"
+        assert "averages" not in september and "wellbeing_indicator" not in september
+        insufficient = client.get("/api/v1/workplace/admin/insights", headers=headers).json()
+        assert insufficient["state"] == "INSUFFICIENT_DATA"
+        assert insufficient["overview"] is None and insufficient["recommendations"] == []
         conn = db.get_db()
         person = conn.execute(
             "SELECT user_id FROM workplace_memberships WHERE company_id=? LIMIT 1",
@@ -304,6 +319,56 @@ def test_aggregate_report_suppresses_below_ten_active_respondents(db):
         assert response.status_code == 200 and response.json()["suppressed"] is False
         assert response.json()["cohort_size"] == "10+"
         assert "Person " not in response.text and "@acme.test" not in response.text
+        insights_response = client.get("/api/v1/workplace/admin/insights", headers=headers)
+        assert insights_response.status_code == 200, insights_response.text
+        insights = insights_response.json()
+        assert insights["state"] == "AVAILABLE" and insights["overview"]["contributors"] == "10+"
+        assert insights["period"] == "2026-09"
+        assert "private raw participant text" not in insights_response.text
+        conn = db.get_db()
+        identities = conn.execute("SELECT u.id,u.email,u.name FROM users u JOIN workplace_memberships m ON m.user_id=u.id WHERE m.company_id=?", (company["id"],)).fetchall()
+        conn.close()
+        assert all(identity["id"] not in insights_response.text and identity["email"] not in insights_response.text and identity["name"] not in insights_response.text for identity in identities)
+        assert all(period["state"] == "INSUFFICIENT_DATA" for period in insights["trends"] if period["period"] == "2026-08")
+        assert "averages" not in next(period for period in insights["trends"] if period["period"] == "2026-08")
+        assert insights["comparison"]["state"] == "INSUFFICIENT_DATA" and insights["comparison"]["changes"] is None
+        assert insights["recommendations"]
+        assert insights["risk_distribution"]["state"] == "UNAVAILABLE"
+        conn = db.get_db()
+        august_missing = conn.execute("SELECT m.user_id FROM workplace_memberships m WHERE m.company_id=? AND m.status='active' AND NOT EXISTS (SELECT 1 FROM workplace_checkins c WHERE c.company_id=m.company_id AND c.user_id=m.user_id AND substr(c.created_at,1,7)='2026-08') LIMIT 1", (company["id"],)).fetchone()
+        conn.execute("INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES ('a-10',?,?,?,?)", (company["id"], august_missing["user_id"], encrypt_pii('{"mood": 3, "stress": 3, "support_access": 3}'), "2026-08-28T10:00:00+00:00"))
+        conn.commit()
+        conn.close()
+        both_periods_safe = client.get("/api/v1/workplace/admin/insights", headers=headers).json()
+        assert both_periods_safe["comparison"]["state"] == "AVAILABLE"
+        assert set(both_periods_safe["comparison"]["changes"]) == {"mood", "stress", "support_access"}
+        employer_audit = client.get("/api/v1/workplace/admin/audit", headers=headers)
+        assert "WORKPLACE_INSIGHTS_VIEWED" not in employer_audit.text
+        conn = db.get_db()
+        assert conn.execute("SELECT COUNT(*) FROM workplace_audit_events WHERE company_id=? AND event_type='WORKPLACE_INSIGHTS_VIEWED'", (company["id"],)).fetchone()[0] > 0
+        conn.close()
+
+        other_company, other_admin = _company(db, admin_email="other-insights@other.test")
+        other_headers = _login(client, other_admin["email"])
+        other_insights = client.get("/api/v1/workplace/admin/insights", headers=other_headers)
+        assert other_insights.status_code == 200 and other_insights.json()["state"] == "NO_DATA"
+        assert "Person " not in other_insights.text and other_company["id"] not in other_insights.text
+        conn = db.get_db()
+        conn.execute("UPDATE workplace_commercial_accounts SET capabilities_json=? WHERE company_id=?", ('{"aggregate_analytics":false}', company["id"]))
+        conn.commit()
+        conn.close()
+        not_entitled = client.get("/api/v1/workplace/admin/insights", headers=headers)
+        assert not_entitled.status_code == 200 and not_entitled.json()["state"] == "NOT_ENTITLED"
+        assert not_entitled.json()["overview"] is None and not_entitled.json()["recommendations"] == []
+
+
+def test_workplace_analytics_threshold_cannot_be_configured_below_ten(monkeypatch):
+    from backend.services.workplace_analytics import minimum_cohort
+
+    monkeypatch.setenv("WORKPLACE_ANALYTICS_MIN_COHORT", "3")
+    assert minimum_cohort() == 10
+    monkeypatch.setenv("WORKPLACE_ANALYTICS_MIN_COHORT", "25")
+    assert minimum_cohort() == 25
 
 
 def test_workplace_demo_request_has_employee_population_while_legacy_student_range_remains(
@@ -774,7 +839,7 @@ def test_provider_status_and_credential_are_checked_on_all_sensitive_routes(db):
         ]
         assert [response.status_code for response in calls] == [403] * len(calls)
         conn = db.get_db(); conn.execute("UPDATE users SET status='approved' WHERE id=?", (provider["id"],)); conn.execute("UPDATE workplace_provider_credentials SET status='revoked' WHERE provider_id=?", (provider["id"],)); conn.commit(); conn.close()
-        assert client.get("/api/v1/workplace/provider/cases/guard-case", headers=headers).status_code == 404
+        assert client.get("/api/v1/workplace/provider/cases/guard-case", headers=headers).status_code == 403
 
 
 def test_workplace_terms_domains_admin_invites_and_ownership_are_enforced(db, monkeypatch):
@@ -865,3 +930,281 @@ def test_existing_verified_account_joins_once_and_withdrawal_stays_private(db, m
         internal = conn.execute("SELECT actor_user_id FROM workplace_audit_events WHERE company_id=? AND event_type='EMPLOYEE_WITHDREW_PARTICIPATION'", (company["id"],)).fetchone()
         conn.close()
         assert internal and internal["actor_user_id"] == existing["id"]
+
+
+def _workplace_case(db, company, provider, case_id="continuity-case", email="worker@acme.test"):
+    from datetime import datetime, timezone
+
+    employee = db.create_user(email, "Workplace Participant", hash_password("workplace-test-password"), role_type="workplace_employee", institution_id=company["id"])
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db.get_db()
+    conn.execute("UPDATE users SET status='approved',user_category='workplace_employee',workplace_terms_version='workplace-participant-v1',terms_accepted_at=? WHERE id=?", (now, employee["id"]))
+    conn.execute("INSERT INTO workplace_memberships (id,company_id,user_id,status,notice_version,consented_at,created_at,updated_at) VALUES (?,?,?,'active','v1',?,?,?)", (f"{case_id}-membership", company["id"], employee["id"], now, now, now))
+    conn.execute("INSERT INTO workplace_checkins (id,company_id,user_id,answers_json,created_at) VALUES (?,?,?, ?,?)", (f"{case_id}-checkin", company["id"], employee["id"], encrypt_pii('{"mood":3,"stress":2,"support_access":4}'), now))
+    conn.execute("INSERT INTO workplace_support_cases (id,company_id,user_id,provider_id,status,share_consent_at,shared_checkin_id,created_at,updated_at,assignment_status,assigned_at) VALUES (?,?,?,?,'open',?,?,?,?,'assigned',?)", (case_id, company["id"], employee["id"], provider["id"], now, f"{case_id}-checkin", now, now, now))
+    conn.commit()
+    conn.close()
+    return employee
+
+
+def _second_provider(db, company, admin, email="replacement@care.test"):
+    provider = db.create_user(email, "Replacement Provider", hash_password("workplace-test-password"), role_type="workplace_provider")
+    now = "2026-10-01T10:00:00+00:00"
+    conn = db.get_db()
+    conn.execute("UPDATE users SET status='approved',user_category='workplace_provider' WHERE id=?", (provider["id"],))
+    conn.execute("INSERT INTO workplace_provider_credentials (provider_id,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_by,reviewed_at) VALUES (?,?,?,?,?,'verified',?,?)", (provider["id"], encrypt_pii("Counsellor"), encrypt_pii("Qualification"), encrypt_pii("REG-2"), encrypt_pii("review ref"), admin["id"], now))
+    conn.execute("INSERT INTO workplace_providers (company_id,provider_id,status,created_at) VALUES (?,?,'active',?)", (company["id"], provider["id"], now))
+    conn.commit()
+    conn.close()
+    return provider
+
+
+def test_provider_availability_expiry_and_reverification_are_enforced(db):
+    from datetime import date, timedelta
+
+    company, company_admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, company_admin)
+    employee = _workplace_case(db, company, provider)
+    root = _global_admin(db)
+    with _client() as client:
+        provider_headers = _login(client, provider["email"])
+        employee_headers = _login(client, employee["email"])
+        admin_headers = _login(client, root["email"])
+        unavailable = client.post("/api/v1/workplace/provider/availability", headers=provider_headers, json={"availability":"unavailable"})
+        assert unavailable.status_code == 200
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 200
+        declined = client.post("/api/v1/workplace/support-requests", headers=employee_headers, json={"provider_id":provider["id"],"share_latest_checkin":True})
+        assert declined.status_code == 400
+
+        conn = db.get_db()
+        conn.execute("UPDATE workplace_provider_credentials SET expires_at=? WHERE provider_id=?", ((date.today()-timedelta(days=1)).isoformat(), provider["id"]))
+        conn.commit()
+        conn.close()
+        status = client.get("/api/v1/workplace/provider/status", headers=provider_headers)
+        assert status.status_code == 200 and status.json()["credential_status"] == "expired"
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 403
+        conn = db.get_db()
+        case = conn.execute("SELECT assignment_status FROM workplace_support_cases WHERE id='continuity-case'").fetchone()
+        conn.close()
+        assert case["assignment_status"] == "reassignment_required"
+
+        submitted = client.post("/api/v1/workplace/provider/credentials/reverification", headers=provider_headers, json={"professional_type":"Counsellor","professional_title":"Counsellor","qualification":"Updated qualification","registration_number":"REG-NEW"})
+        assert submitted.status_code == 201
+        review = client.get("/api/v1/workplace/admin/provider-operations", headers=admin_headers)
+        assert review.status_code == 200 and review.json()[0]["pending_reviews"]
+        review_id = review.json()[0]["pending_reviews"][0]["id"]
+        approved = client.post(f"/api/v1/workplace/admin/provider-credential-reviews/{review_id}", headers=admin_headers, json={"review_id":review_id,"decision":"verify","verification_reference":"Manual register check 2026","valid_from":date.today().isoformat(),"expires_at":(date.today()+timedelta(days=365)).isoformat()})
+        assert approved.status_code == 200, approved.text
+        assert client.get("/api/v1/workplace/provider/status", headers=provider_headers).json()["credential_valid"] is True
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 404
+
+
+def test_provider_suspension_requires_explicit_worker_consent_for_reassignment(db):
+    company, company_admin = _company(db)
+    previous = _configure_enrollment_readiness(db, company, company_admin)
+    replacement = _second_provider(db, company, company_admin)
+    employee = _workplace_case(db, company, previous)
+    root = _global_admin(db)
+    with _client() as client:
+        previous_headers = _login(client, previous["email"])
+        replacement_headers = _login(client, replacement["email"])
+        employee_headers = _login(client, employee["email"])
+        company_headers = _login(client, company_admin["email"])
+        suspended = client.post(f"/api/v1/workplace/admin/providers/{previous['id']}/access", headers=_login(client, root["email"]), json={"action":"suspend","reason":"Temporary safety review"})
+        assert suspended.status_code == 200
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=previous_headers).status_code == 403
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=replacement_headers).status_code == 404
+        assert client.post("/api/v1/workplace/support-requests/continuity-case/reassign", headers=employee_headers, json={"provider_id":replacement["id"],"confirm_shared_history":False}).status_code == 400
+        reassigned = client.post("/api/v1/workplace/support-requests/continuity-case/reassign", headers=employee_headers, json={"provider_id":replacement["id"],"confirm_shared_history":True})
+        assert reassigned.status_code == 200, reassigned.text
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=replacement_headers).status_code == 200
+        provider_cases = client.get("/api/v1/workplace/provider/cases", headers=replacement_headers)
+        assert provider_cases.status_code == 200 and provider_cases.json()[0]["shared_checkin"] == {"mood":3,"stress":2,"support_access":4}
+        audit = client.get("/api/v1/workplace/admin/audit", headers=company_headers)
+        assert audit.status_code == 200 and employee["id"] not in audit.text and "continuity-case" not in audit.text
+        conn = db.get_db()
+        history = conn.execute("SELECT previous_provider_id,new_provider_id,worker_consent_at FROM workplace_case_assignment_history WHERE case_id='continuity-case' AND event_type='worker_consented_reassignment'").fetchone()
+        retained = conn.execute("SELECT 1 FROM workplace_support_cases WHERE id='continuity-case'").fetchone()
+        conn.close()
+        assert history and history["previous_provider_id"] == previous["id"] and history["new_provider_id"] == replacement["id"] and history["worker_consent_at"]
+        assert retained
+
+
+def test_commercial_lifecycle_entitlements_and_company_scope(db):
+    from datetime import date, timedelta
+
+    company, company_admin = _company(db)
+    root = _global_admin(db)
+    other_company, other_admin = _company(db, admin_email="other-owner@other.test")
+    with _client() as client:
+        company_headers = _login(client, company_admin["email"])
+        other_headers = _login(client, other_admin["email"])
+        admin_headers = _login(client, root["email"])
+
+        legacy = client.get("/api/v1/workplace/admin/commercial", headers=company_headers)
+        assert legacy.status_code == 200 and legacy.json()["status"] == "PILOT"
+        assert legacy.json()["plan_key"] == "legacy_pilot"
+        assert "internal_notes" not in legacy.json() and "internal_reference" not in legacy.json()
+        assert client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=company_headers, json={"plan_key":"enterprise"}).status_code == 403
+        assert client.get("/api/v1/workplace/admin/commercial", headers=other_headers).json()["population_band"] == "not_recorded"
+
+        invalid = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"status":"TERMINATED","reason":"Invalid direct termination"})
+        assert invalid.status_code == 409
+        active = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={
+            "status":"ACTIVE", "reason":"Contract signed", "plan_key":"team", "billing_cycle":"annual",
+            "contract_start_date":date.today().isoformat(), "contract_end_date":(date.today()+timedelta(days=90)).isoformat(),
+            "renewal_date":(date.today()+timedelta(days=75)).isoformat(), "population_band":"51-200",
+            "internal_reference":"MG-CONTRACT-42", "internal_notes":"Commercial details for MindGuard only",
+            "enabled_capabilities":{"enrollment":False,"aggregate_analytics":True,"provider_services":True,"voice_support":False},
+        })
+        assert active.status_code == 200 and active.json()["status"] == "ACTIVE"
+        assert active.json()["population_band"] == "51-200"
+        assert "Commercial details for MindGuard only" in active.json()["internal_notes"]
+        company_view = client.get("/api/v1/workplace/admin/commercial", headers=company_headers).json()
+        other_view = client.get("/api/v1/workplace/admin/commercial", headers=other_headers).json()
+        assert company_view["status"] == "ACTIVE" and company_view["population_band"] == "51-200"
+        assert company_view.get("internal_notes") is None and other_view["population_band"] == "not_recorded"
+        assert client.post("/api/v1/workplace/admin/enrollment-link", headers=company_headers).status_code == 403
+
+        updated = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"enabled_capabilities":{"enrollment":True,"aggregate_analytics":True,"provider_services":True,"voice_support":False}})
+        assert updated.status_code == 200
+        conn = db.get_db()
+        history = conn.execute("SELECT previous_status,new_status,actor_user_id,reason_encrypted FROM workplace_commercial_events WHERE company_id=? AND event_type='CONTRACT_ACTIVATED'", (company["id"],)).fetchone()
+        conn.close()
+        assert history and history["previous_status"] == "PILOT" and history["new_status"] == "ACTIVE" and history["actor_user_id"] == root["id"] and history["reason_encrypted"]
+
+
+def test_commercial_expiry_suspension_preserves_workers_and_support(db):
+    from datetime import date, timedelta
+
+    company, company_admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, company_admin)
+    employee = _workplace_case(db, company, provider)
+    root = _global_admin(db)
+    with _client() as client:
+        company_headers = _login(client, company_admin["email"])
+        provider_headers = _login(client, provider["email"])
+        employee_headers = _login(client, employee["email"])
+        admin_headers = _login(client, root["email"])
+        dates = {"contract_start_date":(date.today()-timedelta(days=40)).isoformat(),"contract_end_date":(date.today()+timedelta(days=20)).isoformat(),"plan_key":"pilot","population_band":"1-50","reason":"Pilot configured"}
+        active = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"status":"ACTIVE",**dates})
+        assert active.status_code == 200 and active.json()["status"] == "ACTIVE"
+        disabled_provider_services = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"enabled_capabilities":{"enrollment":True,"aggregate_analytics":True,"provider_services":False,"voice_support":False}})
+        assert disabled_provider_services.status_code == 200
+        assert client.post("/api/v1/workplace/support-requests", headers=employee_headers, json={"provider_id":provider["id"],"share_latest_checkin":True}).status_code == 403
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 200
+        enabled_provider_services = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"enabled_capabilities":{"enrollment":True,"aggregate_analytics":True,"provider_services":True,"voice_support":False}})
+        assert enabled_provider_services.status_code == 200
+
+        expired = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"contract_end_date":(date.today()-timedelta(days=5)).isoformat()})
+        assert expired.status_code == 200 and expired.json()["status"] == "GRACE_PERIOD"
+        assert expired.json()["grace_period_end"]
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 200
+        new_support = client.post("/api/v1/workplace/support-requests", headers=employee_headers, json={"provider_id":provider["id"],"share_latest_checkin":True})
+        assert new_support.status_code == 201, new_support.text
+
+        suspended = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"status":"SUSPENDED","reason":"Grace period ended; contract renewal is pending"})
+        assert suspended.status_code == 200 and suspended.json()["status"] == "SUSPENDED"
+        assert client.post("/api/v1/workplace/admin/enrollment-link", headers=company_headers).status_code == 403
+        assert client.get("/api/v1/workplace/admin/report", headers=company_headers).status_code == 403
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 200
+        assert client.get("/api/v1/workplace/support-requests", headers=employee_headers).status_code == 200
+        assert client.get("/api/v1/workplace/checkins", headers=employee_headers).status_code == 200
+
+        reactivated = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"status":"ACTIVE","reason":"Renewal executed","contract_end_date":(date.today()+timedelta(days=365)).isoformat(),"renewal_date":(date.today()+timedelta(days=350)).isoformat()})
+        assert reactivated.status_code == 200 and reactivated.json()["status"] == "ACTIVE"
+        assert client.get("/api/v1/workplace/admin/report", headers=company_headers).status_code == 200
+        assert client.post("/api/v1/workplace/admin/enrollment-link", headers=company_headers).status_code == 200
+        cancelled = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={"status":"CANCELLED","reason":"Company elected to end at term","cancellation_effective_date":(date.today()+timedelta(days=30)).isoformat(),"cancellation_reason":"Company elected not to renew"})
+        assert cancelled.status_code == 200 and cancelled.json()["status"] == "CANCELLED"
+        conn = db.get_db()
+        retained = conn.execute("SELECT (SELECT COUNT(*) FROM workplace_memberships WHERE company_id=? AND user_id=?),(SELECT COUNT(*) FROM workplace_support_cases WHERE company_id=? AND user_id=?),(SELECT COUNT(*) FROM workplace_checkins WHERE company_id=? AND user_id=?)", (company["id"],employee["id"],company["id"],employee["id"],company["id"],employee["id"])).fetchone()
+        conn.close()
+        assert retained[0] == 1 and retained[1] == 2 and retained[2] == 1
+
+
+def test_effective_termination_offboards_without_deleting_worker_or_case(db, monkeypatch):
+    from datetime import date, datetime, timedelta, timezone
+    from backend.services.workplace_lifecycle import sync_offboarding
+
+    monkeypatch.setenv("WORKPLACE_OFFBOARDING_CONTINUITY_DAYS", "2")
+    company, company_admin = _company(db)
+    provider = _configure_enrollment_readiness(db, company, company_admin)
+    employee = _workplace_case(db, company, provider)
+    root = _global_admin(db)
+    with _client() as client:
+        company_headers = _login(client, company_admin["email"])
+        provider_headers = _login(client, provider["email"])
+        employee_headers = _login(client, employee["email"])
+        admin_headers = _login(client, root["email"])
+        link_response = client.post("/api/v1/workplace/admin/enrollment-link", headers=company_headers)
+        assert link_response.status_code == 200, link_response.text
+        token = link_response.json()["token"]
+
+        future = (date.today() + timedelta(days=10)).isoformat()
+        scheduled = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={
+            "status":"CANCELLED", "reason":"Company elected to end at term", "cancellation_effective_date":future,
+            "cancellation_reason":"Company elected not to renew",
+        })
+        assert scheduled.status_code == 200, scheduled.text
+        assert client.get("/api/v1/workplace/admin/offboarding-status", headers=company_headers).json()["status"] == "SCHEDULED"
+        conn = db.get_db()
+        assert conn.execute("SELECT status FROM workplace_memberships WHERE user_id=?", (employee["id"],)).fetchone()["status"] == "active"
+        assert conn.execute("SELECT status FROM workplace_support_cases WHERE id='continuity-case'").fetchone()["status"] == "open"
+        assert conn.execute("SELECT status FROM workplace_providers WHERE company_id=? AND provider_id=?", (company["id"], provider["id"])).fetchone()["status"] == "active"
+        conn.close()
+
+        effective = client.put(f"/api/v1/workplace/admin/companies/{company['id']}/commercial", headers=admin_headers, json={
+            "cancellation_effective_date":date.today().isoformat(),
+        })
+        assert effective.status_code == 200, effective.text
+        assert client.post("/api/v1/workplace/support-requests", headers=employee_headers, json={"provider_id":provider["id"],"share_latest_checkin":True}).status_code == 403
+        assert client.get("/api/v1/workplace/admin/report", headers=company_headers).status_code == 403
+        assert client.get("/api/v1/workplace/admin/insights", headers=company_headers).status_code == 403
+        assert client.get("/api/v1/workplace/provider/cases/continuity-case", headers=provider_headers).status_code == 200
+        denied_link = client.post("/api/v1/workplace/enrollment/start", json={
+            "token":token,"name":"New Worker","email":"new@acme.co.ke","password":"long-workplace-password",
+            "accepted_notice":True,"accepted_workplace_terms":True,
+        })
+        assert denied_link.status_code in {400,403}
+
+    now = datetime.now(timezone.utc)
+    conn = db.get_db()
+    initial = conn.execute("SELECT status,continuity_deadline,retention_deadline FROM workplace_offboarding WHERE company_id=?", (company["id"],)).fetchone()
+    assert initial["status"] == "IN_PROGRESS" and initial["continuity_deadline"] and initial["retention_deadline"]
+    assert conn.execute("SELECT status,continuity_until FROM workplace_support_cases WHERE id='continuity-case'").fetchone()["continuity_until"]
+    conn.close()
+
+    conn = db.get_db()
+    ended = sync_offboarding(conn, company["id"], actor_id=root["id"], now=now + timedelta(days=3))
+    repeated = sync_offboarding(conn, company["id"], actor_id=root["id"], now=now + timedelta(days=4))
+    conn.commit()
+    membership = conn.execute("SELECT status,ended_at FROM workplace_memberships WHERE company_id=? AND user_id=?", (company["id"], employee["id"])).fetchone()
+    account = conn.execute("SELECT role_type,institution_id,status FROM users WHERE id=?", (employee["id"],)).fetchone()
+    case = conn.execute("SELECT status FROM workplace_support_cases WHERE id='continuity-case'").fetchone()
+    association = conn.execute("SELECT status,ended_at FROM workplace_providers WHERE company_id=? AND provider_id=?", (company["id"], provider["id"])).fetchone()
+    retained_company = conn.execute("SELECT 1 FROM institutions WHERE id=?", (company["id"],)).fetchone()
+    import sqlite3
+    try:
+        conn.execute("DELETE FROM institutions WHERE id=?", (company["id"],))
+        deletion_blocked = False
+    except sqlite3.IntegrityError:
+        deletion_blocked = True
+        conn.rollback()
+    conn.close()
+    assert ended["status"] == repeated["status"] == "RETENTION_PERIOD"
+    assert membership["status"] == "ended" and membership["ended_at"]
+    assert account["role_type"] == "student" and account["institution_id"] is None and account["status"] == "approved"
+    assert case["status"] == "closed" and association["status"] == "ended" and association["ended_at"]
+    assert retained_company and deletion_blocked
+
+
+def test_workplace_retention_decisions_respect_live_dependencies():
+    from datetime import datetime, timedelta, timezone
+    from backend.services.workplace_lifecycle import retention_decision
+
+    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+    assert retention_decision("closed_case", old, 365, active_dependency=True) == "RETAIN"
+    assert retention_decision("closed_case", old, 365) == "DELETE"
+    assert retention_decision("membership", old, 365) == "RETAIN"
+    assert retention_decision("audit_event", old, 365) == "RETAIN"
