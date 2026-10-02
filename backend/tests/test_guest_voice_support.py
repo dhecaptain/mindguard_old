@@ -417,7 +417,7 @@ def test_voice_session_uses_server_controls_and_explicit_help_for_minor(
         ended = client.post(
             f"/api/v1/voice/sessions/{session_id}/close",
             headers=headers,
-            json={"summary": "A private user-written note"},
+            json={},
         )
         assert ended.status_code == 200
         assert ended.json()["status"] == "ending"
@@ -435,7 +435,7 @@ def test_voice_session_uses_server_controls_and_explicit_help_for_minor(
     ).fetchone()
     conn.close()
     assert session["consent_version"] == "voice-v2"
-    assert session["summary_encrypted"] != "A private user-written note"
+    assert session["summary_encrypted"] is None
     assert session["safety_outcome"] == "user_requested_help"
     assert session["status"] == "completed"
     assert session["provider_call_id"] == "rtc_voice_test_1"

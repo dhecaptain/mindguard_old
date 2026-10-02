@@ -1956,6 +1956,13 @@ async def available_providers(user: dict = Depends(require_auth)):
 
 @router.post("/checkins", status_code=201)
 async def create_checkin(data: CheckinCreate, user: dict = Depends(require_auth)):
+    return _store_workplace_checkin(data, user, origin="web")
+
+
+def _store_workplace_checkin(data: CheckinCreate, user: dict, *, origin: str) -> dict:
+    """Persist the existing workplace check-in schema with trusted provenance."""
+    if origin not in {"web", "voice"}:
+        raise ValueError("Unsupported workplace check-in origin")
     membership = _employee(user)
     now = _now()
     conn = get_db()
@@ -1965,13 +1972,14 @@ async def create_checkin(data: CheckinCreate, user: dict = Depends(require_auth)
         conn.commit(); conn.close()
         raise HTTPException(403, "New workplace-funded activity has ended for this company")
     conn.execute(
-        "INSERT INTO workplace_checkins (id, company_id, user_id, answers_json, created_at) VALUES (?,?,?,?,?)",
+        "INSERT INTO workplace_checkins (id, company_id, user_id, answers_json, created_at, origin) VALUES (?,?,?,?,?,?)",
         (
             str(uuid.uuid4()),
             membership["company_id"],
             user["id"],
             encrypt_pii(json.dumps(data.model_dump())),
             now,
+            origin,
         ),
     )
     _audit(conn, membership["company_id"], user["id"], "PRIVATE_CHECKIN_CREATED")
@@ -2095,7 +2103,7 @@ async def own_workplace_checkins(user: dict = Depends(require_auth)):
     membership = _employee(user)
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, answers_json, created_at FROM workplace_checkins WHERE company_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 50",
+        "SELECT id, answers_json, created_at, origin FROM workplace_checkins WHERE company_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 50",
         (membership["company_id"], user["id"]),
     ).fetchall()
     conn.close()
@@ -2105,9 +2113,7 @@ async def own_workplace_checkins(user: dict = Depends(require_auth)):
             answers = json.loads(decrypt_pii(row["answers_json"]))
         except (ValueError, TypeError, RuntimeError):
             continue
-        result.append(
-            {"id": row["id"], "answers": answers, "created_at": row["created_at"]}
-        )
+        result.append({"id": row["id"], "answers": answers, "created_at": row["created_at"], "origin": row["origin"]})
     return result
 
 

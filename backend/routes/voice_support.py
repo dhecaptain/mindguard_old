@@ -9,15 +9,17 @@ import time
 import uuid
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.auth import require_auth
 from backend.database import consume_rate_limit, create_notification, get_db, write_audit
 from backend.services.crypto import decrypt_pii, encrypt_pii
 from backend.secrets_manager import get_secret
 from backend.services.voice_realtime import OpenAIRealtimeProvider, VoiceProviderError
+from backend.services.voice_actions import ACTION_SENSITIVITY, NAVIGATION_TARGETS
 from backend.services.voice_safety import (
     DISTRESS,
     HEIGHTENED_CONCERN,
@@ -75,8 +77,29 @@ class VoiceWebrtcOffer(BaseModel):
 
 
 class VoiceClose(BaseModel):
-    summary: str = Field(default="", max_length=2000)
+    model_config = ConfigDict(extra="forbid")
     exercise: str | None = Field(default=None, max_length=80)
+
+
+class VoiceActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal[
+        "get_my_current_support",
+        "get_my_upcoming_appointments",
+        "get_my_available_providers",
+        "navigate",
+        "prepare_for_appointment",
+        "propose_workplace_checkin",
+        "propose_human_support",
+        "propose_private_summary",
+        "propose_summary_share",
+    ]
+    payload: dict[str, object] = Field(default_factory=dict)
+
+
+class VoiceActionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed: bool
 
 
 def _session_for_user(conn, session_id: str, user_id: str):
@@ -84,6 +107,419 @@ def _session_for_user(conn, session_id: str, user_id: str):
     if not row:
         raise HTTPException(404, "Voice support session not found")
     return row
+
+
+def _active_voice_session(session_id: str, user: dict):
+    if not _enabled("VOICE_SUPPORT_ENABLED") or not _server_side_controls_ready():
+        raise HTTPException(503, "Voice actions are not enabled")
+    conn = get_db()
+    try:
+        row = _session_for_user(conn, session_id, user["id"])
+    except HTTPException:
+        conn.close()
+        raise
+    now = _now()
+    if row["status"] != "active":
+        conn.close()
+        raise HTTPException(409, "Voice actions require an active voice session")
+    if not row["sideband_connected_at"]:
+        conn.close()
+        raise HTTPException(409, "Voice actions are waiting for server-side controls")
+    if row["active_expires_at"] <= now:
+        conn.execute(
+            "UPDATE voice_support_sessions SET status='ending',pending_action_id=NULL,"
+            "pending_action_type=NULL,pending_action_payload_encrypted=NULL,"
+            "pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? "
+            "WHERE id=? AND status='active'",
+            (now, session_id),
+        )
+        conn.commit()
+        conn.close()
+        raise HTTPException(410, "The voice session expired; pending actions were discarded")
+    return conn, row
+
+
+def _workplace_employee(user: dict) -> bool:
+    return user.get("role_type") == "workplace_employee"
+
+
+async def _safe_appointments(user: dict) -> list[dict]:
+    now = datetime.now(timezone.utc)
+    if _workplace_employee(user):
+        from backend.routes.workplace import employee_workplace_appointments
+
+        appointments = await employee_workplace_appointments(user)
+        result = []
+        for item in appointments:
+            try:
+                starts = datetime.fromisoformat(item["starts_at"].replace("Z", "+00:00"))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if starts >= now and item["status"] == "scheduled":
+                result.append(
+                    {
+                        "id": item["id"],
+                        "starts_at": item["starts_at"],
+                        "status": item["status"],
+                        "provider_name": item["provider_name"],
+                        "mode": item["mode"],
+                    }
+                )
+        return result[:20]
+    if user.get("role_type") != "student":
+        raise HTTPException(403, "Appointments are not available for this account")
+    from backend.database import list_appointments
+
+    appointments = list_appointments(user["id"])
+    result = []
+    for item in appointments:
+        try:
+            starts = datetime.fromisoformat(item["start_at"].replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if item.get("student_id") == user["id"] and starts >= now and item["status"] in {"REQUESTED", "CONFIRMED"}:
+            result.append(
+                {
+                    "id": item["id"],
+                    "starts_at": item["start_at"],
+                    "ends_at": item["end_at"],
+                    "status": item["status"],
+                    "title": item["title"],
+                    "provider_name": item["counsellor_name"] if item["student_id"] == user["id"] else item["student_name"],
+                    "mode": item["mode"],
+                }
+            )
+    return result[:20]
+
+
+async def _current_support(user: dict) -> dict:
+    if _workplace_employee(user):
+        from backend.routes.workplace import own_workplace_support_requests
+
+        cases = await own_workplace_support_requests(user)
+        return {
+            "state": "active" if any(item["status"] in {"open", "active"} for item in cases) else "none",
+            "cases": [
+                {
+                    "case_id": item["id"],
+                    "status": item["status"],
+                    "created_at": item["created_at"],
+                }
+                for item in cases
+            ],
+        }
+    if user.get("role_type") != "student":
+        raise HTTPException(403, "Support information is not available for this account")
+    conn = get_db()
+    recipient, kind = _care_recipient(conn, user)
+    name = None
+    if recipient:
+        row = conn.execute("SELECT name FROM users WHERE id=? AND status IN ('approved','active')", (recipient,)).fetchone()
+        name = row["name"] if row else None
+    conn.close()
+    return {"state": "connected" if recipient and name else "none", "provider_name": name, "relationship": kind if name else "none"}
+
+
+def _prepare_pending_action(session_id: str, user: dict, action: str, payload: dict) -> dict:
+    if action not in ACTION_SENSITIVITY:
+        raise HTTPException(400, "This Voice action is not available")
+    conn, row = _active_voice_session(session_id, user)
+    if row["pending_action_id"]:
+        conn.close()
+        raise HTTPException(409, "Finish or cancel the pending Voice action first")
+    action_id = str(uuid.uuid4())
+    expiry = min(
+        datetime.fromisoformat(row["active_expires_at"]),
+        datetime.now(timezone.utc) + timedelta(minutes=5),
+    ).isoformat()
+    updated = conn.execute(
+        "UPDATE voice_support_sessions SET pending_action_id=?,pending_action_type=?,"
+        "pending_action_payload_encrypted=?,pending_action_expires_at=?,pending_action_state='awaiting_confirmation',updated_at=? "
+        "WHERE id=? AND user_id=? AND status='active' AND pending_action_id IS NULL",
+        (action_id, action, encrypt_pii(json.dumps(payload)), expiry, _now(), session_id, user["id"]),
+    )
+    if updated.rowcount != 1:
+        conn.close()
+        raise HTTPException(409, "Unable to start the pending Voice action")
+    conn.commit()
+    conn.close()
+    return {
+        "result": "CONFIRMATION_REQUIRED",
+        "pending_action_id": action_id,
+        "sensitivity": ACTION_SENSITIVITY[action],
+        "expires_at": expiry,
+        "action": action,
+    }
+
+
+def _finish_voice_action(session_id: str, action_id: str, state: str) -> None:
+    conn = get_db()
+    conn.execute(
+        "UPDATE voice_support_sessions SET pending_action_id=NULL,pending_action_type=NULL,"
+        "pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,"
+        "pending_action_state=?,updated_at=? WHERE id=? AND pending_action_id=?",
+        (state, _now(), session_id, action_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+@router.post("/sessions/{session_id}/actions")
+async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = Depends(require_auth)):
+    """Execute read-only allowlisted actions or stage a confirmed action."""
+    conn, _session = _active_voice_session(session_id, user)
+    conn.close()
+    payload = data.payload
+
+    if data.action == "get_my_current_support":
+        try:
+            value = await _current_support(user)
+        except HTTPException as exc:
+            return {"result": "NOT_ALLOWED" if exc.status_code == 403 else "FAILED", "message": "I couldn't access your support information right now."}
+        write_audit(user["id"], user["role_type"], "VOICE_SUPPORT_STATUS_ACCESSED", "voice_session", session_id, payload={"voice_action": True})
+        return {"result": "SUCCESS", "support": value}
+
+    if data.action == "get_my_upcoming_appointments":
+        try:
+            appointments = await _safe_appointments(user)
+        except HTTPException as exc:
+            return {"result": "NOT_ALLOWED" if exc.status_code == 403 else "FAILED", "message": "I couldn't access your appointments right now."}
+        write_audit(user["id"], user["role_type"], "VOICE_APPOINTMENTS_ACCESSED", "voice_session", session_id, payload={"count": len(appointments)})
+        return {"result": "SUCCESS", "appointments": appointments}
+
+    if data.action == "get_my_available_providers":
+        if not _workplace_employee(user):
+            return {"result": "PROVIDER_UNAVAILABLE", "providers": []}
+        from backend.routes.workplace import available_providers
+
+        try:
+            providers = await available_providers(user)
+        except HTTPException:
+            return {"result": "PROVIDER_UNAVAILABLE", "providers": []}
+        return {"result": "SUCCESS" if providers else "PROVIDER_UNAVAILABLE", "providers": providers}
+
+    if data.action == "navigate":
+        if set(payload) != {"target"} or not isinstance(payload.get("target"), str) or payload["target"] not in NAVIGATION_TARGETS:
+            return {"result": "NOT_ALLOWED", "message": "That MindGuard destination isn't available."}
+        if payload["target"] == "workplace_space" and not _workplace_employee(user):
+            return {"result": "NOT_ALLOWED", "message": "That MindGuard destination isn't available for this account."}
+        route_id = NAVIGATION_TARGETS[payload["target"]]
+        if _workplace_employee(user) and payload["target"] == "checkins":
+            route_id = "workplace-checkins"
+        if _workplace_employee(user) and payload["target"] == "support":
+            route_id = "workplace-support"
+        return {"result": "SUCCESS", "navigation_target": payload["target"], "route_id": route_id}
+
+    if data.action == "prepare_for_appointment":
+        if set(payload) != {"appointment_id"} or not isinstance(payload.get("appointment_id"), str):
+            return {"result": "NOT_FOUND", "message": "Choose one of your upcoming appointments first."}
+        try:
+            appointment = next((item for item in await _safe_appointments(user) if item["id"] == payload["appointment_id"]), None)
+        except HTTPException:
+            appointment = None
+        if not appointment:
+            return {"result": "NOT_FOUND", "message": "That upcoming appointment isn't available."}
+        return {
+            "result": "SUCCESS",
+            "appointment": appointment,
+            "preparation_prompts": [
+                "What has changed since you last spoke?",
+                "What has been difficult, and what has helped?",
+                "What would you like to ask or remember?",
+            ],
+            "saved": False,
+        }
+
+    if data.action == "propose_workplace_checkin":
+        if not _workplace_employee(user):
+            return {"result": "NOT_ALLOWED", "message": "A private check-in is not available for this account type."}
+        if set(payload) != {"mood", "stress", "support_access"} or any(type(payload.get(key)) is not int or not 1 <= payload[key] <= 5 for key in ("mood", "stress", "support_access")):
+            return {"result": "FAILED", "message": "Check-in answers must use the current 1-to-5 MindGuard options."}
+        from backend.routes.workplace import CheckinCreate, _employee
+
+        try:
+            _employee(user)
+            CheckinCreate(**payload)
+        except HTTPException:
+            return {"result": "WORKPLACE_UNAVAILABLE", "message": "Your workplace check-in isn't available right now."}
+        return _prepare_pending_action(session_id, user, data.action, payload) | {
+            "confirmation_prompt": "Would you like to save these answers as a private workplace check-in?"
+        }
+
+    if data.action == "propose_human_support":
+        if _workplace_employee(user):
+            if set(payload) != {"provider_id", "share_latest_checkin"} or payload.get("share_latest_checkin") is not True or not isinstance(payload.get("provider_id"), str):
+                return {"result": "CONSENT_REQUIRED", "message": "Choose an available provider and explicitly choose whether to share your latest check-in."}
+            from backend.routes.workplace import available_providers, own_workplace_support_requests
+
+            try:
+                if not any(item["id"] == payload["provider_id"] for item in await available_providers(user)):
+                    return {"result": "PROVIDER_UNAVAILABLE", "message": "That provider is not currently available."}
+                existing = await own_workplace_support_requests(user)
+            except HTTPException:
+                return {"result": "WORKPLACE_UNAVAILABLE", "message": "Workplace support isn't available right now."}
+            active = next((item for item in existing if item["status"] in {"open", "active"}), None)
+            if active:
+                return {"result": "SUCCESS", "already_active": True, "case_id": active["id"], "message": "You already have an active support request."}
+            return _prepare_pending_action(session_id, user, data.action, payload) | {
+                "sensitivity": "SHARE_REQUIRED",
+                "confirmation_prompt": "Would you like to request support from this provider and share your latest workplace check-in?",
+            }
+        if user.get("role_type") != "student" or payload:
+            return {"result": "NOT_ALLOWED", "message": "Support requests aren't available for this account."}
+        conn = get_db()
+        recipient, _kind = _care_recipient(conn, user)
+        provider = conn.execute("SELECT name FROM users WHERE id=? AND role_type='counsellor' AND status IN ('approved','active')", (recipient,)).fetchone() if recipient else None
+        conn.close()
+        if not recipient or not provider:
+            return {"result": "PROVIDER_UNAVAILABLE", "message": "No assigned counsellor is currently available for a support request."}
+        return _prepare_pending_action(session_id, user, data.action, {"provider_id": recipient}) | {
+            "confirmation_prompt": f"Would you like me to send a support request to your assigned counsellor, {provider['name']}? No voice transcript or summary will be included."
+        }
+
+    if data.action == "propose_private_summary":
+        if set(payload) != {"summary"} or not isinstance(payload.get("summary"), str) or not payload["summary"].strip() or len(payload["summary"]) > 2000:
+            return {"result": "FAILED", "message": "Enter a private note of up to 2,000 characters to review."}
+        return _prepare_pending_action(session_id, user, data.action, {"summary": payload["summary"].strip()}) | {
+            "confirmation_prompt": "Would you like to save this note privately to your MindGuard account? It will not be shared with a provider or employer."
+        }
+
+    if data.action == "propose_summary_share":
+        if not _workplace_employee(user) or set(payload) != {"case_id"} or not isinstance(payload.get("case_id"), str):
+            return {"result": "NOT_ALLOWED", "message": "Summary sharing is available only through your own active workplace support case."}
+        conn = get_db()
+        stored = conn.execute("SELECT summary_encrypted FROM voice_support_sessions WHERE id=? AND user_id=?", (session_id, user["id"])).fetchone()
+        conn.close()
+        if not stored or not stored["summary_encrypted"]:
+            return {"result": "NOT_FOUND", "message": "Save a private note before choosing to share it."}
+        from backend.routes.workplace import own_workplace_support_requests
+
+        try:
+            case = next((item for item in await own_workplace_support_requests(user) if item["id"] == payload["case_id"] and item["status"] in {"open", "active"}), None)
+        except HTTPException:
+            case = None
+        if not case:
+            return {"result": "NOT_FOUND", "message": "That active support case isn't available."}
+        return _prepare_pending_action(session_id, user, data.action, {"case_id": case["id"]}) | {
+            "sensitivity": "SHARE_REQUIRED",
+            "confirmation_prompt": "Would you like to share your saved private note with the provider on this support case? Only this note will be shared, not the conversation or audio.",
+        }
+
+    return {"result": "NOT_ALLOWED", "message": "That Voice action isn't available."}
+
+
+@router.post("/sessions/{session_id}/actions/{action_id}/confirm")
+async def confirm_voice_action(session_id: str, action_id: str, data: VoiceActionConfirmation, request: Request, user: dict = Depends(require_auth)):
+    conn, row = _active_voice_session(session_id, user)
+    now = _now()
+    if row["pending_action_id"] != action_id or row["pending_action_state"] != "awaiting_confirmation":
+        conn.close()
+        return {"result": "NOT_FOUND", "message": "That pending Voice action is no longer available."}
+    if not row["pending_action_expires_at"] or row["pending_action_expires_at"] <= now:
+        conn.close()
+        _finish_voice_action(session_id, action_id, "expired")
+        return {"result": "FAILED", "message": "That confirmation expired. Please request the action again."}
+    if not data.confirmed:
+        conn.close()
+        _finish_voice_action(session_id, action_id, "cancelled")
+        return {"result": "SUCCESS", "cancelled": True, "message": "Nothing was changed or shared."}
+    action = row["pending_action_type"]
+    try:
+        payload = json.loads(decrypt_pii(row["pending_action_payload_encrypted"]))
+    except (TypeError, ValueError, RuntimeError):
+        conn.close()
+        _finish_voice_action(session_id, action_id, "failed")
+        return {"result": "FAILED", "message": "I couldn't complete that action right now."}
+    claimed = conn.execute(
+        "UPDATE voice_support_sessions SET pending_action_state='executing',updated_at=? "
+        "WHERE id=? AND user_id=? AND pending_action_id=? AND pending_action_state='awaiting_confirmation' "
+        "AND status='active' AND active_expires_at>?",
+        (now, session_id, user["id"], action_id, now),
+    )
+    if claimed.rowcount != 1:
+        conn.close()
+        return {"result": "FAILED", "message": "That action is no longer waiting for confirmation."}
+    conn.commit()
+    conn.close()
+
+    try:
+        if action == "propose_workplace_checkin":
+            if not _workplace_employee(user):
+                raise HTTPException(403, "Action not allowed")
+            from backend.routes.workplace import CheckinCreate, _store_workplace_checkin
+
+            saved = _store_workplace_checkin(CheckinCreate(**payload), user, origin="voice")
+            write_audit(user["id"], user["role_type"], "VOICE_CHECKIN_CONFIRMED", "voice_session", session_id, payload={"origin": "voice", "private": True})
+            result = {"result": "SUCCESS", "checkin": {"saved": bool(saved.get("saved")), "visibility": saved.get("visibility")}, "message": "Your check-in was saved privately. It wasn't shared."}
+        elif action == "propose_human_support":
+            provider_id = payload.get("provider_id")
+            if _workplace_employee(user):
+                from backend.routes.workplace import SupportRequest, own_workplace_support_requests, request_provider_support
+
+                existing = await own_workplace_support_requests(user)
+                active = next((item for item in existing if item["status"] in {"open", "active"}), None)
+                if active:
+                    result = {"result": "SUCCESS", "already_active": True, "case_id": active["id"], "message": "Your existing support request remains active; no duplicate case was created."}
+                else:
+                    from backend.routes.workplace import available_providers
+
+                    if not any(item["id"] == provider_id for item in await available_providers(user)):
+                        raise HTTPException(404, "Provider unavailable")
+                    created = await request_provider_support(SupportRequest(provider_id=provider_id, share_latest_checkin=True), user)
+                    write_audit(user["id"], user["role_type"], "VOICE_SUPPORT_REQUEST_CONFIRMED", "voice_session", session_id, payload={"case_id": created["case_id"], "latest_checkin_shared": True})
+                    result = {"result": "SUCCESS", "case_id": created["case_id"], "message": "Your support request was sent to the selected provider, and your latest workplace check-in was shared with your permission."}
+            else:
+                if user.get("role_type") != "student":
+                    raise HTTPException(403, "Action not allowed")
+                conn = get_db()
+                recipient, _kind = _care_recipient(conn, user)
+                provider = conn.execute("SELECT name FROM users WHERE id=? AND role_type='counsellor' AND status IN ('approved','active')", (recipient,)).fetchone() if recipient else None
+                conn.close()
+                if not provider_id or recipient != provider_id or not provider:
+                    raise HTTPException(404, "Assigned care relationship unavailable")
+                from backend.database import create_notification, send_message
+
+                sent = send_message(user["id"], recipient, "I would like to request human support. Please contact me through MindGuard when you are available.")
+                create_notification(recipient, "Support request", "A person you are authorized to support requested contact through MindGuard.", "message")
+                write_audit(user["id"], user["role_type"], "VOICE_SUPPORT_REQUEST_CONFIRMED", "voice_session", session_id, payload={"message_id": sent["id"], "summary_shared": False})
+                result = {"result": "SUCCESS", "message": "Your assigned counsellor received your request. No voice transcript or summary was included."}
+        elif action == "propose_private_summary":
+            conn = get_db()
+            changed = conn.execute("UPDATE voice_support_sessions SET summary_encrypted=?,summary_saved_at=?,updated_at=? WHERE id=? AND user_id=? AND status='active' AND active_expires_at>?", (encrypt_pii(payload["summary"]), now, now, session_id, user["id"], now))
+            conn.commit()
+            conn.close()
+            if not changed.rowcount:
+                raise HTTPException(410, "Voice session expired")
+            write_audit(user["id"], user["role_type"], "VOICE_SUMMARY_SAVED", "voice_session", session_id, payload={"private": True, "shared": False})
+            result = {"result": "SUCCESS", "message": "Your note was saved privately. It wasn't shared."}
+        elif action == "propose_summary_share":
+            if not _workplace_employee(user):
+                raise HTTPException(403, "Action not allowed")
+            from backend.routes.workplace import WorkplaceMessageCreate, own_workplace_support_requests, send_employee_workplace_message
+
+            current_case = next((item for item in await own_workplace_support_requests(user) if item["id"] == payload["case_id"] and item["status"] in {"open", "active"}), None)
+            conn = get_db()
+            current_session = conn.execute("SELECT summary_encrypted FROM voice_support_sessions WHERE id=? AND user_id=? AND status='active'", (session_id, user["id"])).fetchone()
+            conn.close()
+            if not current_case or not current_session or not current_session["summary_encrypted"]:
+                raise HTTPException(404, "The saved note or support case is no longer available")
+            content = decrypt_pii(current_session["summary_encrypted"])
+            await send_employee_workplace_message(WorkplaceMessageCreate(case_id=payload["case_id"], message=content), user)
+            write_audit(user["id"], user["role_type"], "VOICE_SUMMARY_SHARED", "voice_session", session_id, payload={"case_id": payload["case_id"], "summary_reference": "encrypted_voice_session_note", "transcript_shared": False, "audio_shared": False})
+            result = {"result": "SUCCESS", "message": "Only your approved note was shared with the provider through your support case."}
+        else:
+            raise HTTPException(400, "Action unavailable")
+        _finish_voice_action(session_id, action_id, "completed")
+        return result
+    except HTTPException as exc:
+        _finish_voice_action(session_id, action_id, "failed")
+        code = "NOT_ALLOWED" if exc.status_code == 403 else "NOT_FOUND" if exc.status_code == 404 else "WORKPLACE_UNAVAILABLE" if exc.status_code in {409, 410} else "FAILED"
+        message = "That action isn't available for this account." if code == "NOT_ALLOWED" else "I couldn't complete that action right now. Your note was not shared." if action == "propose_summary_share" else "I couldn't complete that action right now."
+        return {"result": code, "message": message}
+    except Exception:
+        logger.warning("Voice action failed for session %s and action %s", session_id, action, exc_info=False)
+        _finish_voice_action(session_id, action_id, "failed")
+        return {"result": "FAILED", "message": "I couldn't complete that action right now. You can continue the conversation."}
 
 
 def _care_recipient(conn, user: dict) -> tuple[str | None, str]:
@@ -170,7 +606,7 @@ def _mark_session_ending(session_id: str, *, final_status: str = "completed", re
         except (ValueError, TypeError):
             duration = None
         updated = conn.execute(
-            "UPDATE voice_support_sessions SET status=?,ended_at=COALESCE(ended_at,?),duration_seconds=COALESCE(duration_seconds,?),failure_reason=?,client_secret_encrypted=NULL,sideband_worker_id=NULL,sideband_lease_until=NULL,updated_at=? WHERE id=? AND status NOT IN ('completed','failed','expired')",
+            "UPDATE voice_support_sessions SET status=?,ended_at=COALESCE(ended_at,?),duration_seconds=COALESCE(duration_seconds,?),failure_reason=?,client_secret_encrypted=NULL,sideband_worker_id=NULL,sideband_lease_until=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? WHERE id=? AND status NOT IN ('completed','failed','expired')",
             (final_status, now, duration, reason, now, session_id),
         )
         conn.commit()
@@ -419,6 +855,8 @@ async def voice_availability(user: dict = Depends(require_auth)):
         "configuration_blockers": configuration_blockers,
         "care_recipient_available": bool(recipient),
         "care_recipient_type": kind,
+        "role_type": user.get("role_type"),
+        "workplace_checkin_available": user.get("role_type") == "workplace_employee",
         "is_minor": minor,
         "language": "English",
         "stores_audio": False,
@@ -596,11 +1034,20 @@ async def voice_session_state(session_id: str, user: dict = Depends(require_auth
     conn = get_db()
     row = _session_for_user(conn, session_id, user["id"])
     if row["status"] == "active" and row["active_expires_at"] <= _now():
-        conn.execute("UPDATE voice_support_sessions SET status='ending',updated_at=? WHERE id=? AND status='active'", (_now(), session_id))
+        conn.execute(
+            "UPDATE voice_support_sessions SET status='ending',pending_action_id=NULL,"
+            "pending_action_type=NULL,pending_action_payload_encrypted=NULL,"
+            "pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? "
+            "WHERE id=? AND status='active'",
+            (_now(), session_id),
+        )
         conn.commit()
-        row = conn.execute("SELECT status,safety_outcome,alert_delivery_status FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
+        row = conn.execute("SELECT status,safety_outcome,alert_delivery_status,pending_action_id,pending_action_type,pending_action_expires_at,pending_action_state FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
     conn.close()
-    return {"status": row["status"], "safety_state": row["safety_outcome"], "alert_delivery_status": row["alert_delivery_status"]}
+    pending = None
+    if row["pending_action_id"] and row["pending_action_state"] == "awaiting_confirmation":
+        pending = {"id": row["pending_action_id"], "action": row["pending_action_type"], "expires_at": row["pending_action_expires_at"]}
+    return {"status": row["status"], "safety_state": row["safety_outcome"], "alert_delivery_status": row["alert_delivery_status"], "pending_action": pending}
 
 
 @router.post("/sessions/{session_id}/request-help")
@@ -623,21 +1070,20 @@ async def close_voice_session(session_id: str, data: VoiceClose, request: Reques
     conn = get_db(); row = _session_for_user(conn, session_id, user["id"])
     now = _now()
     if row["status"] == "expired" or row["active_expires_at"] <= now:
-        conn.execute("UPDATE voice_support_sessions SET status='expired',summary_encrypted=NULL,ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?", (now, now, session_id))
+        conn.execute("UPDATE voice_support_sessions SET status='expired',summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?", (now, now, session_id))
         conn.commit(); conn.close()
         raise HTTPException(410, "The voice-support session time limit has ended; no summary was saved")
-    summary = data.summary.strip()
     if row["status"] in {"completed", "failed"}:
         conn.close()
         return {"ok": True, "status": row["status"]}
     target_status = "ending" if row["provider_call_id"] and row["status"] in {"active", "ending"} else "completed"
     conn.execute(
-        "UPDATE voice_support_sessions SET status=?,summary_encrypted=?,exercise=COALESCE(?,exercise),client_secret_encrypted=NULL,ended_at=CASE WHEN ?='completed' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=? WHERE id=?",
-        (target_status, encrypt_pii(summary) if summary else None, data.exercise, target_status, now, now, session_id),
+        "UPDATE voice_support_sessions SET status=?,exercise=COALESCE(?,exercise),client_secret_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',ended_at=CASE WHEN ?='completed' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=? WHERE id=?",
+        (target_status, data.exercise, target_status, now, now, session_id),
     )
     conn.commit(); conn.close()
     action = "VOICE_SESSION_END_REQUESTED" if target_status == "ending" else "VOICE_SESSION_COMPLETED"
-    write_audit(user["id"], user["role_type"], action, "voice_session", session_id, payload={"summary_saved": bool(summary), "audio_stored": False, "transcript_stored": False}, ip=request.client.host if request.client else None)
+    write_audit(user["id"], user["role_type"], action, "voice_session", session_id, payload={"summary_saved": False, "audio_stored": False, "transcript_stored": False}, ip=request.client.host if request.client else None)
     return {"ok": True, "status": target_status}
 
 
@@ -685,6 +1131,6 @@ async def voice_alerts_for_recipient(user: dict = Depends(require_auth)):
 def purge_expired_voice_summaries() -> int:
     conn = get_db(); now = _now()
     rows = conn.execute("SELECT id FROM voice_support_sessions WHERE expires_at<=? AND summary_encrypted IS NOT NULL", (now,)).fetchall()
-    conn.execute("UPDATE voice_support_sessions SET summary_encrypted=NULL, status=CASE WHEN status='active' THEN 'expired' ELSE status END, updated_at=? WHERE expires_at<=?", (now, now))
+    conn.execute("UPDATE voice_support_sessions SET summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',status=CASE WHEN status='active' THEN 'expired' ELSE status END,updated_at=? WHERE expires_at<=?", (now, now))
     conn.commit(); conn.close()
     return len(rows)

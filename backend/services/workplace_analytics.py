@@ -123,7 +123,7 @@ def get_workplace_insights(conn, company_id: str, *, now: datetime | None = None
             "FROM workplace_checkins c "
             "JOIN workplace_memberships m ON m.company_id=c.company_id AND m.user_id=c.user_id "
             "JOIN users u ON u.id=m.user_id "
-            "WHERE c.company_id=? AND c.created_at>=? AND c.created_at<? "
+            "WHERE c.company_id=? AND c.created_at>=? AND c.created_at<? AND c.origin='web' "
             "AND m.status='active' AND m.withdrawn_at IS NULL AND m.consented_at IS NOT NULL "
             "AND u.role_type='workplace_employee' AND lower(u.status) IN ('approved','active') "
             "ORDER BY c.created_at",
