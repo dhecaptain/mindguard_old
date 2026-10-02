@@ -12,14 +12,20 @@ from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from backend.auth import require_auth
+from backend.auth import _is_token_revoked, decode_token, require_auth
 from backend.database import consume_rate_limit, create_notification, get_db, write_audit
 from backend.services.crypto import decrypt_pii, encrypt_pii
 from backend.secrets_manager import get_secret
-from backend.services.voice_realtime import OpenAIRealtimeProvider, VoiceProviderError
+from backend.services.voice_realtime import (
+    DeepgramVoiceAgentProvider,
+    OpenAIRealtimeProvider,
+    VoiceProviderError,
+    configured_voice_provider,
+    deepgram_voice_settings,
+)
 from backend.services.voice_actions import CONFIRM_REQUIRED, SHARE_REQUIRED, ACTION_SENSITIVITY, NAVIGATION_TARGETS, voice_tool_definitions
 from backend.services.voice_safety import (
     DISTRESS,
@@ -46,7 +52,41 @@ def _enabled(name: str, default: bool = False) -> bool:
 
 
 def _launch_ready() -> bool:
+    return _production_review_complete() or _non_production_testing()
+
+
+def _production_review_complete() -> bool:
     return all(_enabled(name) for name in ("VOICE_CLINICAL_REVIEW_COMPLETE", "VOICE_CHILD_SAFEGUARDING_REVIEW_COMPLETE", "VOICE_PRIVACY_REVIEW_COMPLETE", "VOICE_ACCESSIBILITY_REVIEW_COMPLETE"))
+
+
+def _non_production_testing() -> bool:
+    # MINDGUARD_ENV is the existing application deployment indicator; it is
+    # documented as unset/development locally and explicitly production in prod.
+    environment = os.getenv("MINDGUARD_ENV", "").strip().lower()
+    recognized_nonproduction = environment in {"", "development", "dev", "local", "test", "testing", "staging", "preview"}
+    return _enabled("VOICE_NON_PRODUCTION_TESTING_ENABLED") and recognized_nonproduction
+
+
+def _provider_configuration_blockers() -> list[str]:
+    provider = configured_voice_provider()
+    blockers = []
+    if provider == "openai":
+        if not get_secret("OPENAI_API_KEY").strip():
+            blockers.append("The OpenAI Realtime provider is not configured")
+    elif provider == "deepgram":
+        if not get_secret("DEEPGRAM_API_KEY").strip():
+            blockers.append("The Deepgram Voice Agent provider is not configured")
+        # MindGuard's existing authoritative safety classifier uses OpenAI
+        # moderation independently of the selected conversation transport.
+        if not get_secret("OPENAI_API_KEY").strip():
+            blockers.append("The server-side safety monitor is not configured")
+    else:
+        blockers.append("The configured realtime provider is not supported")
+    if not _safety_salt():
+        blockers.append("A private safety-identifier salt is not configured")
+    if not _server_side_controls_ready():
+        blockers.append("Server-side Voice monitoring and shutdown are not enabled")
+    return blockers
 
 
 def _max_session_seconds() -> int:
@@ -750,7 +790,7 @@ def _claim_sideband_session() -> dict | None:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             "SELECT id,user_id,provider_call_id,status,active_expires_at FROM voice_support_sessions "
-            "WHERE status IN ('active','ending') AND provider_call_id IS NOT NULL "
+            "WHERE status IN ('active','ending') AND provider_call_id IS NOT NULL AND provider_call_id NOT GLOB 'deepgram_*' "
             "AND (sideband_lease_until IS NULL OR sideband_lease_until<=?) ORDER BY created_at LIMIT 1",
             (now,),
         ).fetchone()
@@ -1240,16 +1280,13 @@ async def voice_sideband_maintenance_loop() -> None:
 @router.get("/availability")
 async def voice_availability(user: dict = Depends(require_auth)):
     conn = get_db(); recipient, kind = _care_recipient(conn, user); minor = _is_minor(conn, user); conn.close()
-    configuration_blockers = []
-    if not get_secret("OPENAI_API_KEY").strip():
-        configuration_blockers.append("OpenAI Realtime provider is not configured")
-    if not _safety_salt():
-        configuration_blockers.append("A private safety-identifier salt of at least 32 characters is not configured")
-    if not _server_side_controls_ready():
-        configuration_blockers.append("Server-side Realtime monitoring and shutdown are not enabled")
+    configuration_blockers = _provider_configuration_blockers()
     return {
         "enabled": _enabled("VOICE_SUPPORT_ENABLED"),
-        "review_gate_ready": _launch_ready(),
+        "review_gate_ready": _production_review_complete(),
+        "production_review_complete": _production_review_complete(),
+        "non_production_testing": _non_production_testing(),
+        "provider": configured_voice_provider() if configured_voice_provider() in {"openai", "deepgram"} else None,
         "configuration_ready": not configuration_blockers,
         "configuration_blockers": configuration_blockers,
         "care_recipient_available": bool(recipient),
@@ -1265,6 +1302,245 @@ async def voice_availability(user: dict = Depends(require_auth)):
     }
 
 
+class _DeepgramConfirmationSocket:
+    """Translate the shared confirmation engine's speech request to Agent API."""
+
+    def __init__(self, provider_socket):
+        self.provider_socket = provider_socket
+
+    async def send(self, message: str) -> None:
+        try:
+            event = json.loads(message)
+        except (json.JSONDecodeError, TypeError):
+            return
+        if event.get("type") != "response.create":
+            return
+        instructions = (event.get("response") or {}).get("instructions", "")
+        if not isinstance(instructions, str):
+            return
+        marker = ": "
+        prompt = instructions.rsplit(marker, 1)[-1]
+        try:
+            decoded = json.loads(prompt)
+        except (json.JSONDecodeError, TypeError):
+            decoded = prompt
+        if isinstance(decoded, dict):
+            prompt = str(decoded.get("message") or instructions)
+        elif not isinstance(decoded, str):
+            prompt = instructions
+        await self.provider_socket.send(json.dumps({"type": "InjectAgentMessage", "message": prompt[:1000], "behavior": "interrupt"}))
+
+
+async def _deepgram_browser_audio(websocket: WebSocket, provider_socket, disconnected: asyncio.Event) -> None:
+    try:
+        while True:
+            packet = await websocket.receive()
+            if packet.get("type") == "websocket.disconnect":
+                disconnected.set()
+                return
+            audio = packet.get("bytes")
+            if audio:
+                await provider_socket.send(audio)
+            # JSON is intentionally not forwarded: the browser cannot alter
+            # provider settings, prompts, tools, or MindGuard action results.
+    except (WebSocketDisconnect, RuntimeError):
+        disconnected.set()
+    except Exception:
+        disconnected.set()
+
+
+@router.websocket("/sessions/{session_id}/stream")
+async def deepgram_voice_stream(websocket: WebSocket, session_id: str):
+    """Authenticated audio relay: provider credentials and action policy stay server-side."""
+    await websocket.accept()
+    user = None
+    claimed = False
+    try:
+        auth_message = await asyncio.wait_for(websocket.receive_json(), timeout=8)
+        token = auth_message.get("token") if isinstance(auth_message, dict) and auth_message.get("type") == "auth" else None
+        if not isinstance(token, str) or len(token) > 4096:
+            await websocket.close(code=4401)
+            return
+        try:
+            token_payload = decode_token(token)
+        except HTTPException:
+            await websocket.close(code=4401)
+            return
+        if token_payload.get("jti") and _is_token_revoked(token_payload["jti"]):
+            await websocket.close(code=4401)
+            return
+        user = _voice_user(token_payload.get("sub", ""))
+        if not user:
+            await websocket.close(code=4401)
+            return
+
+        if (
+            configured_voice_provider() != "deepgram"
+            or not _enabled("VOICE_SUPPORT_ENABLED")
+            or not _launch_ready()
+            or not _server_side_controls_ready()
+            or _provider_configuration_blockers()
+        ):
+            await websocket.close(code=4403)
+            return
+
+        conn = get_db()
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM voice_support_sessions WHERE id=? AND user_id=?", (session_id, user["id"])).fetchone()
+        now = _now()
+        if not row or row["status"] != "connecting" or row["provider_session_id"] != "deepgram-server-agent":
+            conn.rollback()
+            conn.close()
+            await websocket.close(code=4409)
+            return
+        if row["active_expires_at"] <= now:
+            conn.rollback()
+            conn.close()
+            _mark_session_ending(session_id, final_status="expired", reason="session_expired_before_connect")
+            await websocket.close(code=4410)
+            return
+        updated = conn.execute("UPDATE voice_support_sessions SET status='connecting_call',updated_at=? WHERE id=? AND user_id=? AND status='connecting'", (now, session_id, user["id"]))
+        claimed = updated.rowcount == 1
+        conn.commit()
+        conn.close()
+        if not claimed:
+            await websocket.close(code=4409)
+            return
+
+        provider = DeepgramVoiceAgentProvider(get_secret("DEEPGRAM_API_KEY").strip())
+        async with provider.connect() as provider_socket:
+            conn = get_db()
+            recipient, _kind = _care_recipient(conn, user)
+            minor = _is_minor(conn, user)
+            conn.close()
+            welcome = await asyncio.wait_for(provider_socket.recv(), timeout=8)
+            if isinstance(welcome, bytes) or json.loads(welcome).get("type") != "Welcome":
+                raise VoiceProviderError("The voice provider did not establish the session")
+            await provider_socket.send(json.dumps(deepgram_voice_settings(_instructions(minor, bool(recipient)), voice_tool_definitions(user))))
+            configured = False
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                event = await asyncio.wait_for(provider_socket.recv(), timeout=max(0.1, deadline - time.monotonic()))
+                if isinstance(event, bytes):
+                    continue
+                payload = json.loads(event)
+                if payload.get("type") == "Error":
+                    raise VoiceProviderError("The voice provider rejected this session")
+                if payload.get("type") == "SettingsApplied":
+                    configured = True
+                    break
+            if not configured:
+                raise VoiceProviderError("The voice provider did not confirm server-side controls")
+
+            now = _now()
+            provider_call_id = f"deepgram_{session_id}"
+            conn = get_db()
+            conn.execute(
+                "UPDATE voice_support_sessions SET provider_call_id=?,sideband_connected_at=?,status='active',started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND user_id=? AND status='connecting_call'",
+                (provider_call_id, now, now, now, session_id, user["id"]),
+            )
+            conn.commit()
+            conn.close()
+            write_audit(user["id"], user["role_type"], "VOICE_SESSION_CONNECTED", "voice_session", session_id, payload={"server_side_controls": True, "provider": "deepgram"}, ip=websocket.client.host if websocket.client else None)
+            await websocket.send_json({"type": "MindGuardReady"})
+
+            disconnected = asyncio.Event()
+            audio_task = asyncio.create_task(_deepgram_browser_audio(websocket, provider_socket, disconnected))
+            expected_prompt_action_id = None
+            compatibility_socket = _DeepgramConfirmationSocket(provider_socket)
+            try:
+                while not disconnected.is_set():
+                    current = _session_state(session_id)
+                    if not current or current["status"] in {"completed", "failed", "expired"}:
+                        break
+                    expired = current["active_expires_at"] <= _now()
+                    if current["status"] == "ending" or expired:
+                        with suppress(Exception):
+                            await provider_socket.close()
+                        _mark_session_ending(session_id, final_status="expired" if expired else "completed", reason="session_time_limit" if expired else None)
+                        break
+                    try:
+                        event = await asyncio.wait_for(provider_socket.recv(), timeout=1)
+                    except asyncio.TimeoutError:
+                        continue
+                    if isinstance(event, bytes):
+                        await websocket.send_bytes(event)
+                        continue
+                    payload = json.loads(event)
+                    event_type = payload.get("type")
+                    if event_type == "Error":
+                        raise VoiceProviderError("Voice provider processing failed")
+                    if event_type == "ConversationText":
+                        role = payload.get("role")
+                        content = payload.get("content")
+                        if role not in {"user", "assistant"} or not isinstance(content, str):
+                            continue
+                        await websocket.send_json({"type": "ConversationText", "role": role, "content": content[:4000]})
+                        if role != "user":
+                            continue
+                        openai_key = get_secret("OPENAI_API_KEY").strip()
+                        safety_state = await classify_voice_text(content[:4000], openai_key)
+                        changed, delivery = _record_safety_state(session_id, user["id"], safety_state)
+                        if changed and safety_state in {HEIGHTENED_CONCERN, POTENTIAL_IMMEDIATE_DANGER}:
+                            safety_prompt = _instructions(minor, bool(recipient)) + " Respond calmly and briefly. Do not diagnose or claim to know the user's risk level. Ask one clear question about immediate safety when appropriate. Encourage contacting a trusted person or an appropriate local professional. If the user indicates immediate danger, tell them to contact Kenya emergency services on 999, 112, or 911 or go to the nearest health facility. Never claim an alert was sent unless confirmed."
+                            await provider_socket.send(json.dumps({"type": "UpdatePrompt", "prompt": safety_prompt}))
+                            message = _urgent_fallback_message(minor) if safety_state == POTENTIAL_IMMEDIATE_DANGER else "It sounds like this may be especially difficult. You can pause, continue, or request support from a person."
+                            if safety_state == POTENTIAL_IMMEDIATE_DANGER and delivery in {"delivered", "acknowledged"}:
+                                message = "A person authorized to support you has been notified. If you are in immediate danger, call 999, 112, or 911 or go to the nearest health facility."
+                            await provider_socket.send(json.dumps({"type": "InjectAgentMessage", "message": message, "behavior": "interrupt"}))
+                        elif safety_state in {"none", NORMAL}:
+                            resolution = await _resolve_spoken_confirmation(session_id, user, content, compatibility_socket)
+                            if resolution and resolution.get("prompt"):
+                                expected_prompt_action_id = resolution["pending_action_id"]
+                        continue
+                    if event_type == "UserStartedSpeaking":
+                        await websocket.send_json({"type": "MindGuardUserStartedSpeaking"})
+                    elif event_type == "AgentThinking":
+                        await websocket.send_json({"type": "MindGuardPhase", "phase": "thinking"})
+                    elif event_type == "AgentStartedSpeaking":
+                        await websocket.send_json({"type": "MindGuardPhase", "phase": "speaking"})
+                        if expected_prompt_action_id:
+                            _mark_voice_prompt_delivered(session_id, expected_prompt_action_id)
+                            expected_prompt_action_id = None
+                    elif event_type == "AgentAudioDone":
+                        await websocket.send_json({"type": "MindGuardPhase", "phase": "listening"})
+                    elif event_type == "FunctionCallRequest":
+                        for call in payload.get("functions", []):
+                            if not isinstance(call, dict):
+                                continue
+                            call_id = call.get("id")
+                            name = call.get("name")
+                            arguments = call.get("arguments", "{}")
+                            if isinstance(arguments, dict):
+                                arguments = json.dumps(arguments)
+                            if not isinstance(call_id, str) or len(call_id) > 200 or not isinstance(name, str) or not isinstance(arguments, str):
+                                continue
+                            result = await _dispatch_realtime_tool(session_id, user, name, arguments)
+                            await provider_socket.send(json.dumps({"type": "FunctionCallResponse", "id": call_id, "name": name, "content": json.dumps(result, separators=(",", ":"))}))
+                            if result.get("result") == "CONFIRMATION_REQUIRED" and result.get("pending_action_id"):
+                                expected_prompt_action_id = result["pending_action_id"]
+                                await provider_socket.send(json.dumps({"type": "InjectAgentMessage", "message": result.get("confirmation_prompt", "Please review and confirm that request."), "behavior": "interrupt"}))
+                                await websocket.send_json({"type": "MindGuardActionPending"})
+            finally:
+                audio_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await audio_task
+                if disconnected.is_set():
+                    _mark_session_ending(session_id, final_status="failed", reason="client_disconnected")
+    except WebSocketDisconnect:
+        if claimed:
+            _mark_session_ending(session_id, final_status="failed", reason="client_disconnected")
+    except Exception as exc:
+        if user:
+            logger.warning("Deepgram Voice session %s failed (%s)", session_id, type(exc).__name__)
+        if claimed:
+            _mark_session_ending(session_id, final_status="failed", reason="provider_connection_failed")
+        with suppress(Exception):
+            await websocket.send_json({"type": "MindGuardUnavailable"})
+        with suppress(Exception):
+            await websocket.close(code=1011)
+
+
 @router.post("/sessions", status_code=201)
 async def create_voice_session(data: VoiceSessionCreate, request: Request, user: dict = Depends(require_auth)):
     if not _enabled("VOICE_SUPPORT_ENABLED"):
@@ -1275,9 +1551,10 @@ async def create_voice_session(data: VoiceSessionCreate, request: Request, user:
         raise HTTPException(503, "Voice support is awaiting server-side Realtime monitoring and shutdown")
     if not data.accepted_notice:
         raise HTTPException(400, "Accept the voice-support notice before starting")
-    api_key = get_secret("OPENAI_API_KEY").strip()
+    provider_name = configured_voice_provider()
+    api_key = get_secret("OPENAI_API_KEY").strip() if provider_name == "openai" else get_secret("DEEPGRAM_API_KEY").strip() if provider_name == "deepgram" else ""
     safety_salt = _safety_salt()
-    if not api_key or not safety_salt:
+    if not api_key or not safety_salt or _provider_configuration_blockers():
         raise HTTPException(503, "Voice support provider and privacy-preserving safety identifier are not fully configured")
     daily_limit = int(os.getenv("VOICE_DAILY_SESSION_LIMIT", "5"))
     if not consume_rate_limit(f"voice-session:{user['id']}", daily_limit, 86400):
@@ -1317,39 +1594,43 @@ async def create_voice_session(data: VoiceSessionCreate, request: Request, user:
     conn.commit()
     conn.close()
     safety_id = hashlib.sha256((str(user["id"]) + safety_salt).encode()).hexdigest()
-    model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
-    payload = {
-        "session": {
-            "type": "realtime",
-            "model": model,
-            "instructions": _instructions(minor, bool(recipient)),
-            "tools": voice_tool_definitions(user),
-            "tool_choice": "auto",
-            "audio": {
-                "input": {"transcription": {"model": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")}},
-                "output": {"voice": os.getenv("OPENAI_REALTIME_VOICE", "marin")},
-            },
+    model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1") if provider_name == "openai" else os.getenv("DEEPGRAM_LLM_MODEL", "gpt-4o-mini")
+    secret = None
+    if provider_name == "openai":
+        payload = {
+            "session": {
+                "type": "realtime",
+                "model": model,
+                "instructions": _instructions(minor, bool(recipient)),
+                "tools": voice_tool_definitions(user),
+                "tool_choice": "auto",
+                "audio": {
+                    "input": {"transcription": {"model": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")}},
+                    "output": {"voice": os.getenv("OPENAI_REALTIME_VOICE", "marin")},
+                },
+            }
         }
-    }
-    try:
-        secret = await OpenAIRealtimeProvider(api_key).create_client_secret(payload, safety_id)
-    except VoiceProviderError as exc:
-        _mark_session_ending(session_id, final_status="failed", reason="provider_session_creation_failed")
-        raise HTTPException(503, str(exc))
+        try:
+            secret = await OpenAIRealtimeProvider(api_key).create_client_secret(payload, safety_id)
+        except VoiceProviderError as exc:
+            _mark_session_ending(session_id, final_status="failed", reason="provider_session_creation_failed")
+            raise HTTPException(503, str(exc))
     now = _now()
     conn = get_db()
     conn.execute(
         "UPDATE voice_support_sessions SET provider_session_id=?,client_secret_encrypted=?,status='connecting',updated_at=? WHERE id=? AND user_id=? AND status='created'",
-        (secret.get("id") or secret.get("session", {}).get("id"), encrypt_pii(secret["value"]), now, session_id, user["id"]),
+        ((secret.get("id") or secret.get("session", {}).get("id")) if secret else "deepgram-server-agent", encrypt_pii(secret["value"]) if secret else None, now, session_id, user["id"]),
     )
     conn.commit()
     conn.close()
     write_audit(user["id"], user["role_type"], "VOICE_SESSION_STARTED", "voice_session", session_id, payload={"exercise": data.exercise, "care_recipient_type": recipient_type, "audio_stored": False}, ip=request.client.host if request.client else None)
-    return {"session_id": session_id, "status": "connecting", "model": model, "consent_version": CONSENT_NOTICE_VERSION, "care_recipient_available": bool(recipient), "care_recipient_type": recipient_type, "max_duration_seconds": max_duration}
+    return {"session_id": session_id, "status": "connecting", "provider": provider_name, "model": model, "consent_version": CONSENT_NOTICE_VERSION, "care_recipient_available": bool(recipient), "care_recipient_type": recipient_type, "max_duration_seconds": max_duration}
 
 
 @router.post("/sessions/{session_id}/connect")
 async def connect_voice_session(session_id: str, data: VoiceWebrtcOffer, request: Request, user: dict = Depends(require_auth)):
+    if configured_voice_provider() != "openai":
+        raise HTTPException(409, "This Voice session uses the configured server-controlled transport")
     conn = get_db()
     conn.execute("BEGIN IMMEDIATE")
     try:

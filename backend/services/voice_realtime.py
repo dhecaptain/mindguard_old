@@ -1,10 +1,52 @@
 """Vendor-specific Realtime transport behind the MindGuard voice boundary."""
 
 from contextlib import asynccontextmanager
+import os
 from urllib.parse import quote, urlparse
 
 import httpx
 from websockets.asyncio.client import connect
+
+
+def configured_voice_provider() -> str:
+    """Return the configured transport without silently changing providers."""
+    return os.getenv("VOICE_REALTIME_PROVIDER", "openai").strip().lower()
+
+
+def deepgram_voice_settings(instructions: str, tools: list[dict]) -> dict:
+    """Build the server-owned Deepgram Agent settings for one MindGuard session."""
+    functions = [
+        {
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+            # Function requests are returned to MindGuard's server-side broker.
+            "client_side": True,
+        }
+        for tool in tools
+    ]
+    return {
+        "type": "Settings",
+        "audio": {
+            "input": {"encoding": "linear16", "sample_rate": 24000},
+            "output": {"encoding": "linear16", "sample_rate": 24000, "container": "none"},
+        },
+        "agent": {
+            "language": "en",
+            "listen": {"provider": {"type": "deepgram", "version": "v2", "model": os.getenv("DEEPGRAM_STT_MODEL", "flux-general-en").strip()}},
+            "think": {
+                "provider": {
+                    "type": os.getenv("DEEPGRAM_LLM_PROVIDER", "open_ai").strip(),
+                    "model": os.getenv("DEEPGRAM_LLM_MODEL", "gpt-4o-mini").strip(),
+                },
+                "prompt": instructions,
+                "functions": functions,
+            },
+            "speak": {"provider": {"type": "deepgram", "version": os.getenv("DEEPGRAM_TTS_VERSION", "v1").strip(), "model": os.getenv("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en").strip()}},
+        },
+        "flags": {"history": False},
+        "mip_opt_out": True,
+    }
 
 
 class VoiceProviderError(RuntimeError):
@@ -77,3 +119,27 @@ class OpenAIRealtimeProvider:
             max_size=1_048_576,
         ) as socket:
             yield socket
+
+
+class DeepgramVoiceAgentProvider:
+    """Server-side Deepgram Voice Agent transport; MindGuard owns all actions."""
+
+    def __init__(self, api_key: str):
+        self._api_key = api_key
+
+    @asynccontextmanager
+    async def connect(self):
+        try:
+            async with connect(
+                "wss://agent.deepgram.com/v1/agent/converse",
+                additional_headers={"Authorization": f"Token {self._api_key}"},
+                open_timeout=10,
+                close_timeout=3,
+                ping_interval=10,
+                max_size=1_048_576,
+            ) as socket:
+                yield socket
+        except VoiceProviderError:
+            raise
+        except Exception as exc:
+            raise VoiceProviderError("Unable to reach the voice support provider") from exc

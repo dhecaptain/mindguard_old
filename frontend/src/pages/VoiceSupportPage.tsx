@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import api from '../api/client'
+import { getToken } from '../lib/tokenStorage'
 import { useUiStore, type PageKey } from '../store/uiStore'
 
-type Availability={enabled:boolean;review_gate_ready:boolean;configuration_ready:boolean;configuration_blockers:string[];care_recipient_available:boolean;care_recipient_type:string;role_type:string;workplace_checkin_available:boolean;is_minor:boolean;language:string;stores_audio:boolean;stores_transcripts:boolean;server_side_controls_ready:boolean;summary_retention_days:number}
+type Availability={enabled:boolean;review_gate_ready:boolean;production_review_complete:boolean;non_production_testing:boolean;provider:'openai'|'deepgram'|null;configuration_ready:boolean;configuration_blockers:string[];care_recipient_available:boolean;care_recipient_type:string;role_type:string;workplace_checkin_available:boolean;is_minor:boolean;language:string;stores_audio:boolean;stores_transcripts:boolean;server_side_controls_ready:boolean;summary_retention_days:number}
 type Session={id:string;exercise?:string;summary?:string;safety_outcome:string;alert_delivery_status?:string;created_at:string}
 type CareAlert={id:string;subject_user_id:string;subject_name:string;status:string;safety_outcome:string;alert_delivery_status?:string;alert_acknowledged_at?:string;created_at:string;updated_at:string}
 type ConversationPhase='listening'|'thinking'|'speaking'|'paused'
@@ -45,7 +46,12 @@ export default function VoiceSupportPage(){
   const setPage=useUiStore(s=>s.setPage)
   const pcRef=useRef<RTCPeerConnection|null>(null)
   const dcRef=useRef<RTCDataChannel|null>(null)
+  const voiceSocketRef=useRef<WebSocket|null>(null)
   const streamRef=useRef<MediaStream|null>(null)
+  const audioContextRef=useRef<AudioContext|null>(null)
+  const audioProcessorRef=useRef<ScriptProcessorNode|null>(null)
+  const playbackTimeRef=useRef(0)
+  const playbackSourcesRef=useRef(new Set<AudioBufferSourceNode>())
   const sessionRef=useRef<string>('')
   const audioRef=useRef<HTMLAudioElement|null>(null)
   const statusTimerRef=useRef<number|null>(null)
@@ -57,7 +63,48 @@ export default function VoiceSupportPage(){
   const providerSelectRef=useRef<HTMLSelectElement|null>(null)
 
   const refresh=async()=>{const [a,h]=await Promise.all([api.get('/v1/voice/availability'),api.get('/v1/voice/sessions')]);setAvailability(a.data);setHistory(h.data);try{setCareAlerts((await api.get('/v1/voice/alerts')).data)}catch{setCareAlerts([])}}
-  useEffect(()=>{void Promise.resolve().then(refresh).catch(()=>setMessage('Voice support status is temporarily unavailable.'));return()=>{const id=sessionRef.current;if(id)void api.post(`/v1/voice/sessions/${id}/close`,{}).catch(()=>{});if(statusTimerRef.current!==null)window.clearInterval(statusTimerRef.current);streamRef.current?.getTracks().forEach(t=>t.stop());pcRef.current?.close()}},[])
+  useEffect(()=>{void Promise.resolve().then(refresh).catch(()=>setMessage('Voice support status is temporarily unavailable.'));return()=>{const id=sessionRef.current;if(id)void api.post(`/v1/voice/sessions/${id}/close`,{}).catch(()=>{}).finally(()=>voiceSocketRef.current?.close());else voiceSocketRef.current?.close();if(statusTimerRef.current!==null)window.clearInterval(statusTimerRef.current);streamRef.current?.getTracks().forEach(t=>t.stop());audioProcessorRef.current?.disconnect();void audioContextRef.current?.close();pcRef.current?.close()}},[])
+
+  const stopDeepgramAudio=()=>{audioProcessorRef.current?.disconnect();audioProcessorRef.current=null;for(const source of playbackSourcesRef.current){try{source.stop()}catch{/* The node may already have ended. */}}playbackSourcesRef.current.clear();void audioContextRef.current?.close();audioContextRef.current=null;voiceSocketRef.current?.close();voiceSocketRef.current=null;playbackTimeRef.current=0}
+  const connectDeepgram=async(sessionId:string,stream:MediaStream)=>{
+    const token=getToken()
+    if(!token)throw new Error('Sign in again before starting a voice conversation.')
+    const base=import.meta.env.VITE_API_BASE_URL||(import.meta.env.DEV?'http://127.0.0.1:8000/api':`${window.location.origin}/api`)
+    const socketUrl=`${base.replace(/^http/,'ws').replace(/\/api\/?$/,'')}/api/v1/voice/sessions/${sessionId}/stream`
+    const socket=new WebSocket(socketUrl);socket.binaryType='arraybuffer';voiceSocketRef.current=socket
+    let providerReady=false
+    const context=new AudioContext();audioContextRef.current=context;await context.resume()
+    const source=context.createMediaStreamSource(stream);const processor=context.createScriptProcessor(4096,1,1);audioProcessorRef.current=processor
+    const silentGain=context.createGain();silentGain.gain.value=0
+    processor.onaudioprocess=event=>{
+      if(!providerReady||socket.readyState!==WebSocket.OPEN||stream.getAudioTracks().every(track=>!track.enabled))return
+      const input=event.inputBuffer.getChannelData(0);const ratio=context.sampleRate/24000;const outputLength=Math.max(1,Math.floor(input.length/ratio));const pcm=new Int16Array(outputLength)
+      for(let index=0;index<outputLength;index++){const position=index*ratio;const left=Math.floor(position);const fraction=position-left;const sample=(input[left]||0)*(1-fraction)+(input[Math.min(left+1,input.length-1)]||0)*fraction;pcm[index]=Math.max(-1,Math.min(1,sample))*32767}
+      socket.send(pcm.buffer)
+    }
+    source.connect(processor);processor.connect(silentGain);silentGain.connect(context.destination)
+    await new Promise<void>((resolve,reject)=>{
+      const timeout=window.setTimeout(()=>reject(new Error('The secure voice connection could not be established.')),12000)
+      socket.onopen=()=>socket.send(JSON.stringify({type:'auth',token}))
+      socket.onerror=()=>{window.clearTimeout(timeout);reject(new Error('The secure voice connection could not be established.'))}
+      socket.onclose=event=>{window.clearTimeout(timeout);if(!intentionalEndRef.current&&event.code!==1000){setState('error');setMessage('The conversation ended unexpectedly. Your audio and live captions were not stored by MindGuard.')}reject(new Error('The secure voice connection closed.'))}
+      socket.onmessage=event=>{
+        if(typeof event.data!=='string'){
+          const samples=new Int16Array(event.data as ArrayBuffer);const buffer=context.createBuffer(1,samples.length,24000);const channel=buffer.getChannelData(0)
+          for(let i=0;i<samples.length;i++)channel[i]=samples[i]/32768
+          const player=context.createBufferSource();player.buffer=buffer;player.connect(context.destination);playbackSourcesRef.current.add(player);player.addEventListener('ended',()=>playbackSourcesRef.current.delete(player),{once:true});const playAt=Math.max(context.currentTime+0.02,playbackTimeRef.current);player.start(playAt);playbackTimeRef.current=playAt+buffer.duration;return
+        }
+        try{const packet=JSON.parse(event.data) as {type:string;role?:string;content?:string;phase?:ConversationPhase}
+          if(packet.type==='MindGuardReady'){providerReady=true;window.clearTimeout(timeout);setState('connected');setPhase('listening');setMessage('');resolve()}
+          else if(packet.type==='ConversationText'&&packet.content){setTranscript(items=>[...items,`${packet.role==='assistant'?'MindGuard AI':'You'}: ${packet.content?.slice(0,4000)}`].slice(-8))}
+          else if(packet.type==='MindGuardPhase'&&packet.phase)setPhase(packet.phase)
+          else if(packet.type==='MindGuardUserStartedSpeaking'){for(const source of playbackSourcesRef.current){try{source.stop()}catch{/* The node may already have ended. */}}playbackSourcesRef.current.clear();playbackTimeRef.current=0;setPhase('listening')}
+          else if(packet.type==='MindGuardActionPending')setActionMessage('A MindGuard request is waiting for your confirmation.')
+          else if(packet.type==='MindGuardUnavailable'){window.clearTimeout(timeout);reject(new Error('Voice Companion is unavailable right now. Please try again later.'))}
+        }catch{/* Ignore malformed transport messages. */}
+      }
+    })
+  }
 
   const requestHumanHelp=async()=>{
     if(!sessionRef.current)return
@@ -104,6 +151,10 @@ export default function VoiceSupportPage(){
           }
         }catch{setMessage('Connection status is temporarily unavailable. Ending locally remains available.')}
       },2000)
+      if(data.provider==='deepgram'){
+        await connectDeepgram(data.session_id,stream)
+        return
+      }
       const pc=new RTCPeerConnection();pcRef.current=pc
       const audio=document.createElement('audio');audio.autoplay=true;audioRef.current=audio
       pc.ontrack=e=>{audio.srcObject=e.streams[0]}
@@ -118,7 +169,7 @@ export default function VoiceSupportPage(){
       const offer=await pc.createOffer();await pc.setLocalDescription(offer)
       const {data:answer}=await api.post(`/v1/voice/sessions/${data.session_id}/connect`,{sdp:offer.sdp})
       await pc.setRemoteDescription({type:'answer',sdp:answer.answer_sdp})
-    }catch(e){const id=sessionRef.current;if(id){await api.post(`/v1/voice/sessions/${id}/close`,{}).catch(()=>{});sessionRef.current=''}if(statusTimerRef.current!==null)window.clearInterval(statusTimerRef.current);statusTimerRef.current=null;streamRef.current?.getTracks().forEach(t=>t.stop());pcRef.current?.close();pcRef.current=null;dcRef.current=null;streamRef.current=null;setState('error');setMessage(e instanceof DOMException&&e.name==='NotAllowedError'?'Microphone permission was denied. You can change this in your browser settings and try again.':'Voice Companion is unavailable right now. Please try again later.')}
+    }catch(e){const id=sessionRef.current;if(id){await api.post(`/v1/voice/sessions/${id}/close`,{}).catch(()=>{});sessionRef.current=''}if(statusTimerRef.current!==null)window.clearInterval(statusTimerRef.current);statusTimerRef.current=null;streamRef.current?.getTracks().forEach(t=>t.stop());stopDeepgramAudio();pcRef.current?.close();pcRef.current=null;dcRef.current=null;streamRef.current=null;setState('error');setMessage(e instanceof DOMException&&e.name==='NotAllowedError'?'Microphone permission was denied. You can change this in your browser settings and try again.':e instanceof Error&&e.message!=='The secure voice connection closed.'?e.message:'Voice Companion is unavailable right now. Please try again later.')}
   }
   const finishEnd=async(completion='Conversation ended. Your audio and live captions were not stored by MindGuard.')=>{
     const id=sessionRef.current
@@ -127,6 +178,7 @@ export default function VoiceSupportPage(){
     if(statusTimerRef.current!==null)window.clearInterval(statusTimerRef.current)
     statusTimerRef.current=null
     if(id)try{await api.post(`/v1/voice/sessions/${id}/close`,{})}catch{/* Session can still close locally. */}
+    stopDeepgramAudio()
     streamRef.current?.getTracks().forEach(track=>track.stop())
     pcRef.current?.close();dcRef.current=null;pcRef.current=null;streamRef.current=null;sessionRef.current=''
     setPendingAction(null);setTranscript([]);setPrivateSummary('');setPrepNotes('');setPrepPrompts([])
@@ -182,9 +234,10 @@ export default function VoiceSupportPage(){
     if(response?.result==='SUCCESS'&&response.appointment){setPrepPrompts(response.preparation_prompts||[]);setPrepNotes(`Preparing for ${response.appointment.title||'my appointment'} on ${new Date(response.appointment.starts_at).toLocaleString()}\n\n`)}
   }
   const savePrepAsNote=()=>{setPrivateSummary(prepNotes.trim());setActionMessage('Your preparation remains a draft. Review it below and choose Save privately if you want to keep it.')}
-  const available=Boolean(availability?.enabled&&availability.review_gate_ready&&availability.configuration_ready&&availability.server_side_controls_ready)
+  const reviewAccess=Boolean(availability&&(availability.production_review_complete||availability.non_production_testing))
+  const available=Boolean(availability?.enabled&&reviewAccess&&availability.configuration_ready&&availability.server_side_controls_ready)
   const active=state==='connected'||state==='reconnecting'||state==='ending'
-  const assistantStatus=state==='connected'?(muted?'Paused':phase==='thinking'?'Thinking':phase==='speaking'?'Speaking':'Listening'):state==='reconnecting'?'Reconnecting':state==='ending'?'Ended':state==='ended'?'Ended':state==='connecting'?'Connecting':'Ready'
+  const assistantStatus=state==='connected'?(muted?'Paused':phase==='thinking'?'Thinking':phase==='speaking'?'Speaking':'Listening'):state==='reconnecting'?'Reconnecting':state==='ending'?'Ended':state==='ended'?'Ended':state==='connecting'?'Connecting':availability===null?'Checking':!available||state==='error'?'Unavailable':'Ready'
   const stateTone=state==='connected'?'border-teal-200 bg-teal-50 text-teal-900':state==='reconnecting'?'border-amber-200 bg-amber-50 text-amber-900':state==='error'?'border-slate-200 bg-slate-50 text-slate-700':'border-slate-200 bg-slate-50 text-slate-700'
   const focus='focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-700 focus-visible:ring-offset-2'
   const button='min-h-11 rounded-xl px-4 py-2 font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50'
@@ -200,6 +253,7 @@ export default function VoiceSupportPage(){
 
     {availability===null&&<section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600" role="status" aria-live="polite">Checking Voice Companion availability…</section>}
     {availability!==null&&!available&&<section className="rounded-2xl border border-slate-200 bg-slate-50 p-5" role="status"><h2 className="font-semibold">Voice Companion is unavailable right now</h2><p className="mt-1 text-sm text-slate-600">Please try again later. You can still explore the other ways MindGuard can help below.</p></section>}
+    {availability?.non_production_testing&&<p className="text-xs text-amber-800" role="note">Voice testing mode — not approved for production use</p>}
 
     <section aria-labelledby="conversation-title" className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -281,7 +335,7 @@ export default function VoiceSupportPage(){
         <details className="mt-3">
           <summary className={`${focus} cursor-pointer rounded-md py-2 text-sm font-semibold text-teal-800 underline`}>How voice privacy works</summary>
           <ul className="mt-3 list-disc space-y-2 pl-5 text-sm leading-6 text-slate-600">
-            <li>Live audio is streamed to OpenAI Realtime so the conversation can take place. Short transcript excerpts may be processed by OpenAI moderation for safety monitoring; MindGuard does not keep the raw audio or live transcript.</li>
+            <li>Live audio is streamed to the configured voice provider so the conversation can take place. Short transcript excerpts may be processed by MindGuard’s server-side safety monitor; MindGuard does not keep the raw audio or live transcript.</li>
             <li>A private note is stored only after you approve the draft. Saved notes are encrypted and retained for up to {availability?.summary_retention_days||30} days.</li>
             <li>A provider receives information only through an authorized support workflow and only after the consent and confirmation shown to you.</li>
             <li>Your authorized care team may see a follow-up alert only when the existing safety process requires one or you request human support. Alerts do not contain your audio or live transcript.</li>
