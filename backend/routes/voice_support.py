@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from contextlib import suppress
@@ -12,14 +13,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from backend.auth import require_auth
 from backend.database import consume_rate_limit, create_notification, get_db, write_audit
 from backend.services.crypto import decrypt_pii, encrypt_pii
 from backend.secrets_manager import get_secret
 from backend.services.voice_realtime import OpenAIRealtimeProvider, VoiceProviderError
-from backend.services.voice_actions import ACTION_SENSITIVITY, NAVIGATION_TARGETS
+from backend.services.voice_actions import CONFIRM_REQUIRED, SHARE_REQUIRED, ACTION_SENSITIVITY, NAVIGATION_TARGETS, voice_tool_definitions
 from backend.services.voice_safety import (
     DISTRESS,
     HEIGHTENED_CONCERN,
@@ -129,7 +130,8 @@ def _active_voice_session(session_id: str, user: dict):
         conn.execute(
             "UPDATE voice_support_sessions SET status='ending',pending_action_id=NULL,"
             "pending_action_type=NULL,pending_action_payload_encrypted=NULL,"
-            "pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? "
+            "pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,"
+            "pending_action_prompted_at=NULL,pending_action_state='expired',updated_at=? "
             "WHERE id=? AND status='active'",
             (now, session_id),
         )
@@ -141,6 +143,22 @@ def _active_voice_session(session_id: str, user: dict):
 
 def _workplace_employee(user: dict) -> bool:
     return user.get("role_type") == "workplace_employee"
+
+
+def _publish_voice_navigation(session_id: str, user_id: str, route_id: str) -> dict:
+    event_id = str(uuid.uuid4())
+    now = _now()
+    conn = get_db()
+    updated = conn.execute(
+        "UPDATE voice_support_sessions SET navigation_event_id=?,navigation_route_id=?,navigation_created_at=?,updated_at=? "
+        "WHERE id=? AND user_id=? AND status='active' AND active_expires_at>?",
+        (event_id, route_id, now, now, session_id, user_id, now),
+    )
+    conn.commit()
+    conn.close()
+    return {"result": "SUCCESS", "navigation_event_id": event_id, "route_id": route_id} if updated.rowcount == 1 else {
+        "result": "FAILED", "message": "This voice session has ended; I did not open a page."
+    }
 
 
 async def _safe_appointments(user: dict) -> list[dict]:
@@ -220,7 +238,15 @@ async def _current_support(user: dict) -> dict:
     return {"state": "connected" if recipient and name else "none", "provider_name": name, "relationship": kind if name else "none"}
 
 
-def _prepare_pending_action(session_id: str, user: dict, action: str, payload: dict) -> dict:
+def _prepare_pending_action(
+    session_id: str,
+    user: dict,
+    action: str,
+    payload: dict,
+    *,
+    source: str,
+    confirmation_prompt: str,
+) -> dict:
     if action not in ACTION_SENSITIVITY:
         raise HTTPException(400, "This Voice action is not available")
     conn, row = _active_voice_session(session_id, user)
@@ -234,21 +260,30 @@ def _prepare_pending_action(session_id: str, user: dict, action: str, payload: d
     ).isoformat()
     updated = conn.execute(
         "UPDATE voice_support_sessions SET pending_action_id=?,pending_action_type=?,"
-        "pending_action_payload_encrypted=?,pending_action_expires_at=?,pending_action_state='awaiting_confirmation',updated_at=? "
+        "pending_action_payload_encrypted=?,pending_action_expires_at=?,pending_action_state='awaiting_confirmation',"
+        "pending_action_source=?,pending_action_confirmation_prompt=?,pending_action_prompted_at=NULL,updated_at=? "
         "WHERE id=? AND user_id=? AND status='active' AND pending_action_id IS NULL",
-        (action_id, action, encrypt_pii(json.dumps(payload)), expiry, _now(), session_id, user["id"]),
+        (
+            action_id, action, encrypt_pii(json.dumps(payload)), expiry, source,
+            encrypt_pii(confirmation_prompt), _now(), session_id, user["id"],
+        ),
     )
     if updated.rowcount != 1:
         conn.close()
         raise HTTPException(409, "Unable to start the pending Voice action")
     conn.commit()
     conn.close()
+    write_audit(
+        user["id"], user["role_type"], "VOICE_ACTION_PROPOSED", "voice_session", session_id,
+        payload={"action": action, "source": source},
+    )
     return {
         "result": "CONFIRMATION_REQUIRED",
         "pending_action_id": action_id,
         "sensitivity": ACTION_SENSITIVITY[action],
         "expires_at": expiry,
         "action": action,
+        "confirmation_prompt": confirmation_prompt,
     }
 
 
@@ -257,6 +292,7 @@ def _finish_voice_action(session_id: str, action_id: str, state: str) -> None:
     conn.execute(
         "UPDATE voice_support_sessions SET pending_action_id=NULL,pending_action_type=NULL,"
         "pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,"
+        "pending_action_source=NULL,pending_action_confirmation_prompt=NULL,pending_action_prompted_at=NULL,"
         "pending_action_state=?,updated_at=? WHERE id=? AND pending_action_id=?",
         (state, _now(), session_id, action_id),
     )
@@ -266,6 +302,10 @@ def _finish_voice_action(session_id: str, action_id: str, state: str) -> None:
 
 @router.post("/sessions/{session_id}/actions")
 async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = Depends(require_auth)):
+    return await _voice_action_impl(session_id, data, user, source="ui")
+
+
+async def _voice_action_impl(session_id: str, data: VoiceActionRequest, user: dict, *, source: str) -> dict:
     """Execute read-only allowlisted actions or stage a confirmed action."""
     conn, _session = _active_voice_session(session_id, user)
     conn.close()
@@ -308,6 +348,8 @@ async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = D
             route_id = "workplace-checkins"
         if _workplace_employee(user) and payload["target"] == "support":
             route_id = "workplace-support"
+        if source == "voice":
+            return _publish_voice_navigation(session_id, user["id"], route_id)
         return {"result": "SUCCESS", "navigation_target": payload["target"], "route_id": route_id}
 
     if data.action == "prepare_for_appointment":
@@ -342,18 +384,23 @@ async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = D
             CheckinCreate(**payload)
         except HTTPException:
             return {"result": "WORKPLACE_UNAVAILABLE", "message": "Your workplace check-in isn't available right now."}
-        return _prepare_pending_action(session_id, user, data.action, payload) | {
-            "confirmation_prompt": "Would you like to save these answers as a private workplace check-in?"
-        }
+        return _prepare_pending_action(
+            session_id, user, data.action, payload, source=source,
+            confirmation_prompt="Would you like to save these answers as a private workplace check-in?",
+        )
 
     if data.action == "propose_human_support":
         if _workplace_employee(user):
-            if set(payload) != {"provider_id", "share_latest_checkin"} or payload.get("share_latest_checkin") is not True or not isinstance(payload.get("provider_id"), str):
+            expected = {"provider_id"} if source == "voice" else {"provider_id", "share_latest_checkin"}
+            if set(payload) != expected or not isinstance(payload.get("provider_id"), str):
+                return {"result": "CONSENT_REQUIRED", "message": "Choose an available provider and complete the separate check-in sharing consent."}
+            if source != "voice" and payload.get("share_latest_checkin") is not True:
                 return {"result": "CONSENT_REQUIRED", "message": "Choose an available provider and explicitly choose whether to share your latest check-in."}
             from backend.routes.workplace import available_providers, own_workplace_support_requests
 
             try:
-                if not any(item["id"] == payload["provider_id"] for item in await available_providers(user)):
+                selected_provider = next((item for item in await available_providers(user) if item["id"] == payload["provider_id"]), None)
+                if not selected_provider:
                     return {"result": "PROVIDER_UNAVAILABLE", "message": "That provider is not currently available."}
                 existing = await own_workplace_support_requests(user)
             except HTTPException:
@@ -361,10 +408,23 @@ async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = D
             active = next((item for item in existing if item["status"] in {"open", "active"}), None)
             if active:
                 return {"result": "SUCCESS", "already_active": True, "case_id": active["id"], "message": "You already have an active support request."}
-            return _prepare_pending_action(session_id, user, data.action, payload) | {
-                "sensitivity": "SHARE_REQUIRED",
-                "confirmation_prompt": "Would you like to request support from this provider and share your latest workplace check-in?",
-            }
+            if source == "voice":
+                return _prepare_pending_action(
+                    session_id, user, data.action,
+                    {"provider_id": payload["provider_id"], "share_latest_checkin": False},
+                    source=source,
+                    confirmation_prompt=(
+                        f"Would you like to share your latest workplace check-in with {selected_provider['name']} "
+                        "as part of this support request? Nothing will be sent yet."
+                    ),
+                ) | {"sensitivity": "SHARE_REQUIRED"}
+            return _prepare_pending_action(
+                session_id, user, data.action, payload, source=source,
+                confirmation_prompt=(
+                    f"Would you like to request support from {selected_provider['name']} and "
+                    "share your latest workplace check-in?"
+                ),
+            ) | {"sensitivity": "SHARE_REQUIRED"}
         if user.get("role_type") != "student" or payload:
             return {"result": "NOT_ALLOWED", "message": "Support requests aren't available for this account."}
         conn = get_db()
@@ -373,16 +433,25 @@ async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = D
         conn.close()
         if not recipient or not provider:
             return {"result": "PROVIDER_UNAVAILABLE", "message": "No assigned counsellor is currently available for a support request."}
-        return _prepare_pending_action(session_id, user, data.action, {"provider_id": recipient}) | {
-            "confirmation_prompt": f"Would you like me to send a support request to your assigned counsellor, {provider['name']}? No voice transcript or summary will be included."
-        }
+        return _prepare_pending_action(
+            session_id, user, data.action, {"provider_id": recipient}, source=source,
+            confirmation_prompt=(
+                f"Would you like me to send a support request to your assigned counsellor, "
+                f"{provider['name']}? No voice transcript or summary will be included."
+            ),
+        )
 
     if data.action == "propose_private_summary":
         if set(payload) != {"summary"} or not isinstance(payload.get("summary"), str) or not payload["summary"].strip() or len(payload["summary"]) > 2000:
             return {"result": "FAILED", "message": "Enter a private note of up to 2,000 characters to review."}
-        return _prepare_pending_action(session_id, user, data.action, {"summary": payload["summary"].strip()}) | {
-            "confirmation_prompt": "Would you like to save this note privately to your MindGuard account? It will not be shared with a provider or employer."
-        }
+        return _prepare_pending_action(
+            session_id, user, data.action, {"summary": payload["summary"].strip()}, source=source,
+            confirmation_prompt=(
+                "Here is the private note I prepared for you: " + payload["summary"].strip() + ". "
+                "Would you like to save this note privately to your MindGuard account? "
+                "It will not be shared with a provider or employer."
+            ),
+        )
 
     if data.action == "propose_summary_share":
         if not _workplace_employee(user) or set(payload) != {"case_id"} or not isinstance(payload.get("case_id"), str):
@@ -400,16 +469,23 @@ async def voice_action(session_id: str, data: VoiceActionRequest, user: dict = D
             case = None
         if not case:
             return {"result": "NOT_FOUND", "message": "That active support case isn't available."}
-        return _prepare_pending_action(session_id, user, data.action, {"case_id": case["id"]}) | {
-            "sensitivity": "SHARE_REQUIRED",
-            "confirmation_prompt": "Would you like to share your saved private note with the provider on this support case? Only this note will be shared, not the conversation or audio.",
-        }
+        return _prepare_pending_action(
+            session_id, user, data.action, {"case_id": case["id"]}, source=source,
+            confirmation_prompt=(
+                "Would you like to share your saved private note with this provider? "
+                "Only this note will be shared, not the conversation or audio."
+            ),
+        ) | {"sensitivity": "SHARE_REQUIRED"}
 
     return {"result": "NOT_ALLOWED", "message": "That Voice action isn't available."}
 
 
 @router.post("/sessions/{session_id}/actions/{action_id}/confirm")
 async def confirm_voice_action(session_id: str, action_id: str, data: VoiceActionConfirmation, request: Request, user: dict = Depends(require_auth)):
+    return await _confirm_voice_action_impl(session_id, action_id, data, user)
+
+
+async def _confirm_voice_action_impl(session_id: str, action_id: str, data: VoiceActionConfirmation, user: dict) -> dict:
     conn, row = _active_voice_session(session_id, user)
     now = _now()
     if row["pending_action_id"] != action_id or row["pending_action_state"] != "awaiting_confirmation":
@@ -430,6 +506,39 @@ async def confirm_voice_action(session_id: str, action_id: str, data: VoiceActio
         conn.close()
         _finish_voice_action(session_id, action_id, "failed")
         return {"result": "FAILED", "message": "I couldn't complete that action right now."}
+    if (
+        data.confirmed and action == "propose_human_support" and _workplace_employee(user)
+        and row["pending_action_source"] == "voice" and payload.get("share_latest_checkin") is False
+    ):
+        from backend.routes.workplace import available_providers
+
+        try:
+            provider = next((item for item in await available_providers(user) if item["id"] == payload.get("provider_id")), None)
+        except HTTPException:
+            provider = None
+        if not provider:
+            conn.close()
+            _finish_voice_action(session_id, action_id, "failed")
+            return {"result": "PROVIDER_UNAVAILABLE", "message": "That provider is no longer available. No support request was sent."}
+        followup_prompt = (
+            f"Would you like me to send the support request to {provider['name']} and share your latest workplace check-in? "
+            "This is the final confirmation; nothing has been sent yet."
+        )
+        changed = conn.execute(
+            "UPDATE voice_support_sessions SET pending_action_payload_encrypted=?,pending_action_confirmation_prompt=?,"
+            "pending_action_prompted_at=NULL,updated_at=? WHERE id=? AND user_id=? AND pending_action_id=? "
+            "AND pending_action_state='awaiting_confirmation' AND status='active' AND active_expires_at>?",
+            (encrypt_pii(json.dumps(payload | {"share_latest_checkin": True})), encrypt_pii(followup_prompt), now, session_id, user["id"], action_id, now),
+        )
+        conn.commit()
+        conn.close()
+        if changed.rowcount != 1:
+            return {"result": "FAILED", "message": "That action is no longer waiting for confirmation."}
+        return {
+            "result": "CONFIRMATION_REQUIRED", "pending_action_id": action_id,
+            "action": action, "stage": "final_confirmation", "sensitivity": SHARE_REQUIRED,
+            "confirmation_prompt": followup_prompt,
+        }
     claimed = conn.execute(
         "UPDATE voice_support_sessions SET pending_action_state='executing',updated_at=? "
         "WHERE id=? AND user_id=? AND pending_action_id=? AND pending_action_state='awaiting_confirmation' "
@@ -557,11 +666,17 @@ def _instructions(minor: bool, recipient_available: bool) -> str:
         "You are MindGuard's English-language AI wellbeing companion speaking with " + audience + ". "
         "You are not a therapist, counsellor, doctor, diagnostic system, or emergency service. Listen, reflect specifically on what the person said, help organize overwhelming thoughts, offer a short grounding exercise when useful, and help them find MindGuard support options. "
         "Keep spoken replies concise, warm, respectful, and non-judgmental. Ask one useful question at a time. The person may decline exercises, change topic, pause, interrupt, or end the session. Do not diagnose, prescribe, encourage dependence, promise secrecy, expose other users' information, or claim an action or alert occurred unless the application confirms it. "
-        "If the person asks for a check-in, provider support, or appointment help, explain that they can use the existing MindGuard workflow and that nothing is saved or shared without their explicit confirmation. Do not claim that you have saved a check-in or contacted a provider. "
+        "Use the supplied MindGuard functions when a person naturally asks for an available action; do not wait for exact phrases or use keyword rules. Never invent account facts: report only data in a successful function result, and state briefly when a lookup or action failed. You may request an action, but the application alone authorizes it. Never claim an action succeeded before its result says SUCCESS. Do not request or use arbitrary URLs, APIs, or tools. "
+        "Read-only lookups may be requested when relevant. Navigation may only use the supplied approved targets. Appointment preparation is private and must not be saved or shared unless the person separately asks. "
+        "For workplace check-ins, gather only the existing mood, stress-manageability, and perceived-support ratings from 1 to 5. Ask conversationally for an explicit rating for each; never infer or calculate ratings from what the person says. Stage the check-in only once all three explicit ratings are known, repeat the returned confirmation question, and wait for a clear answer. "
+        "For support requests, preserve provider eligibility and choice. For workplace users, offer returned eligible providers, ask which one they choose, then start the support flow with only that provider ID. The application—not you—will ask a separate check-in sharing consent question and then a distinct final request confirmation. Never put consent into tool arguments or infer it from the initial request. For non-workplace users, use only their assigned counsellor. Never send a transcript or private note with a support request. "
+        "A private summary is only a concise draft of topics and concerns the user expressed, useful observations, and actions the user decided to take. Distinguish user statements from assistant suggestions. Do not diagnose. Read the draft back to the user before asking whether to save it. Saving requires a separate clear confirmation; provider sharing requires its own separate consent and confirmation. Never conflate GENERATE, SAVE, and SHARE. "
+        "When a persistent action is staged, repeat the exact confirmation question supplied by the application and stop to wait. Do not treat the initial request as consent or confirmation. Only a clear, immediate yes/no to the current question can resolve it; if the user changes topic or the response is unclear, do not act. Cancellation means nothing was saved or shared. "
         "If the user mentions suicide, self-harm, immediate danger, abuse, or inability to stay safe, stop ordinary coaching, encourage immediate human help, and direct them to Kenya emergency numbers 999, 112, or 911 or the nearest health facility. "
         + child_help
         + " "
         + handoff
+        + " Safety monitoring and safety-state instructions take precedence over ordinary actions. If an action fails or is blocked, do not retry by another path or imply success; continue supportively."
     )
 
 
@@ -606,7 +721,7 @@ def _mark_session_ending(session_id: str, *, final_status: str = "completed", re
         except (ValueError, TypeError):
             duration = None
         updated = conn.execute(
-            "UPDATE voice_support_sessions SET status=?,ended_at=COALESCE(ended_at,?),duration_seconds=COALESCE(duration_seconds,?),failure_reason=?,client_secret_encrypted=NULL,sideband_worker_id=NULL,sideband_lease_until=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? WHERE id=? AND status NOT IN ('completed','failed','expired')",
+            "UPDATE voice_support_sessions SET status=?,ended_at=COALESCE(ended_at,?),duration_seconds=COALESCE(duration_seconds,?),failure_reason=?,client_secret_encrypted=NULL,sideband_worker_id=NULL,sideband_lease_until=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,pending_action_prompted_at=NULL,pending_action_state='expired',updated_at=? WHERE id=? AND status NOT IN ('completed','failed','expired')",
             (final_status, now, duration, reason, now, session_id),
         )
         conn.commit()
@@ -665,6 +780,157 @@ def _session_state(session_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _voice_user(user_id: str) -> dict | None:
+    from backend.database import get_user_by_id
+
+    user = get_user_by_id(user_id)
+    if not user or str(user.get("status", "")).lower() not in {"approved", "active"}:
+        return None
+    return user
+
+
+def _normalize_spoken_choice(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9']+", " ", text.lower()).split())
+
+
+def _spoken_confirmation(text: str) -> bool | None:
+    normalized = _normalize_spoken_choice(text)
+    if normalized in {
+        "yes", "yes please", "yeah", "yeah please", "yep", "yep please", "sure", "okay", "ok",
+        "go ahead", "please do", "i confirm", "confirm", "save it", "send it", "share it",
+        "yes save it", "yes please save it", "yes send it", "yes please send it", "yes share it", "yes please share it",
+    }:
+        return True
+    if normalized in {
+        "no", "no thanks", "no thank you", "no please", "cancel", "cancel it", "never mind", "nevermind",
+        "forget it", "stop", "dont", "dont save it", "do not save it", "dont send it", "do not send it",
+        "dont share it", "do not share it", "no cancel", "no cancel it",
+    }:
+        return False
+    return None
+
+
+def _clear_voice_prompt_eligibility(session_id: str, action_id: str) -> None:
+    conn = get_db()
+    conn.execute(
+        "UPDATE voice_support_sessions SET pending_action_prompted_at=NULL,updated_at=? "
+        "WHERE id=? AND pending_action_id=? AND pending_action_source='voice' AND pending_action_state='awaiting_confirmation'",
+        (_now(), session_id, action_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _mark_voice_prompt_delivered(session_id: str, action_id: str) -> bool:
+    conn = get_db()
+    updated = conn.execute(
+        "UPDATE voice_support_sessions SET pending_action_prompted_at=?,updated_at=? "
+        "WHERE id=? AND pending_action_id=? AND pending_action_source='voice' "
+        "AND pending_action_state='awaiting_confirmation' AND pending_action_expires_at>? "
+        "AND status='active' AND active_expires_at>?",
+        (_now(), _now(), session_id, action_id, _now(), _now()),
+    )
+    conn.commit()
+    conn.close()
+    return updated.rowcount == 1
+
+
+def _response_audio_transcripts(response: dict) -> list[str]:
+    transcripts = []
+    for item in response.get("output", []):
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") == "audio" and isinstance(content.get("transcript"), str):
+                transcripts.append(content["transcript"])
+            elif content.get("type") == "audio_transcript" and isinstance(content.get("text"), str):
+                transcripts.append(content["text"])
+    return transcripts
+
+
+async def _dispatch_realtime_tool(session_id: str, user: dict, name: str, arguments: str) -> dict:
+    """Validate a model request against role-scoped tools, then reuse Voice actions."""
+    allowed = {tool["name"] for tool in voice_tool_definitions(user)}
+    if name not in allowed or len(arguments) > 10_000:
+        return {"result": "NOT_ALLOWED", "message": "That MindGuard action is unavailable."}
+    if not consume_rate_limit(f"voice-tools:{user['id']}:{session_id}", 30, 60):
+        return {"result": "FAILED", "message": "Please wait a moment before asking MindGuard to check again."}
+    try:
+        request = VoiceActionRequest(action=name, payload=json.loads(arguments or "{}"))
+    except (json.JSONDecodeError, TypeError, ValidationError):
+        return {"result": "FAILED", "message": "I could not understand that action request."}
+    conn = get_db()
+    row = conn.execute(
+        "SELECT safety_outcome FROM voice_support_sessions WHERE id=? AND user_id=? AND status='active' AND active_expires_at>?",
+        (session_id, user["id"], _now()),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"result": "FAILED", "message": "This voice session has ended."}
+    if row["safety_outcome"] not in {"none", NORMAL}:
+        return {"result": "SAFETY_PRIORITY", "message": "Safety support takes priority. No ordinary action was taken."}
+    try:
+        return await _voice_action_impl(session_id, request, user, source="voice")
+    except HTTPException as exc:
+        code = "NOT_ALLOWED" if exc.status_code in {403, 404} else "FAILED"
+        return {"result": code, "message": "I could not complete that MindGuard action. No change should be assumed."}
+    except Exception:
+        logger.warning("Voice tool dispatch failed for session %s and action %s", session_id, name, exc_info=False)
+        return {"result": "FAILED", "message": "I could not complete that MindGuard action. No change should be assumed."}
+
+
+async def _resolve_spoken_confirmation(session_id: str, user: dict, transcript: str, socket) -> dict | None:
+    """Only resolve a fresh, server-prompted Voice action from an unambiguous reply."""
+    decision = _spoken_confirmation(transcript)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT pending_action_id,pending_action_expires_at,pending_action_source,pending_action_prompted_at,pending_action_state,safety_outcome "
+        "FROM voice_support_sessions WHERE id=? AND user_id=? AND status='active' AND active_expires_at>?",
+        (session_id, user["id"], _now()),
+    ).fetchone()
+    conn.close()
+    if not row or not row["pending_action_id"] or row["pending_action_state"] != "awaiting_confirmation":
+        return None
+    action_id = row["pending_action_id"]
+    if row["pending_action_source"] != "voice" or not row["pending_action_prompted_at"]:
+        return None
+    if not row["pending_action_expires_at"] or row["pending_action_expires_at"] <= _now():
+        _finish_voice_action(session_id, action_id, "expired")
+        return None
+    if row["safety_outcome"] not in {"none", NORMAL}:
+        _clear_voice_prompt_eligibility(session_id, action_id)
+        return None
+    if decision is None:
+        _clear_voice_prompt_eligibility(session_id, action_id)
+        return None
+    result = await _confirm_voice_action_impl(
+        session_id, action_id, VoiceActionConfirmation(confirmed=decision), user
+    )
+    if not decision:
+        result = {"result": result.get("result", "SUCCESS"), "message": "Okay. Nothing was saved or shared."}
+    followup_prompt = result.get("confirmation_prompt") if result.get("result") == "CONFIRMATION_REQUIRED" else None
+    message = str(result.get("message") or "The action was not completed.")[:500]
+    with suppress(Exception):
+        await socket.send(json.dumps({"type": "response.cancel"}))
+        await socket.send(json.dumps({
+            "type": "response.create",
+            "response": {
+                "modalities": ["audio", "text"],
+                "tools": [],
+                "tool_choice": "none",
+                "instructions": (
+                    "Ask this exact next confirmation question, then wait without acting: " + json.dumps(followup_prompt)
+                    if followup_prompt else
+                    "The server has resolved the user's immediate confirmation. Say this verified result briefly and "
+                    "do not add unsupported account facts: " + json.dumps({"result": result.get("result"), "message": message})
+                ),
+            },
+        }))
+    return {"pending_action_id": action_id, "prompt": followup_prompt} if followup_prompt else {}
+
+
 def _record_safety_state(session_id: str, user_id: str, state: str) -> tuple[bool, str]:
     """Persist only a coarse server-derived state; transcript remains ephemeral."""
     severity = {NORMAL: 0, "none": 0, DISTRESS: 1, HEIGHTENED_CONCERN: 2, POTENTIAL_IMMEDIATE_DANGER: 3, "user_requested_help": 3}
@@ -695,8 +961,20 @@ def _record_safety_state(session_id: str, user_id: str, state: str) -> tuple[boo
             except Exception:
                 delivery = "failed"
     conn.execute(
-        "UPDATE voice_support_sessions SET safety_outcome=?,alert_recipient_id=COALESCE(?,alert_recipient_id),alert_delivery_status=COALESCE(?,alert_delivery_status),updated_at=? WHERE id=?",
-        (state, recipient, delivery if state == POTENTIAL_IMMEDIATE_DANGER else None, now, session_id),
+        "UPDATE voice_support_sessions SET safety_outcome=?,alert_recipient_id=COALESCE(?,alert_recipient_id),"
+        "alert_delivery_status=COALESCE(?,alert_delivery_status),"
+        "pending_action_id=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_id END,"
+        "pending_action_type=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_type END,"
+        "pending_action_payload_encrypted=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_payload_encrypted END,"
+        "pending_action_expires_at=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_expires_at END,"
+        "pending_action_source=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_source END,"
+        "pending_action_confirmation_prompt=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_confirmation_prompt END,"
+        "pending_action_prompted_at=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE pending_action_prompted_at END,"
+        "pending_action_state=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN 'cancelled' ELSE pending_action_state END,"
+        "navigation_event_id=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE navigation_event_id END,"
+        "navigation_route_id=CASE WHEN ? IN ('distress','heightened_concern','potential_immediate_danger') THEN NULL ELSE navigation_route_id END,"
+        "updated_at=? WHERE id=?",
+        (state, recipient, delivery if state == POTENTIAL_IMMEDIATE_DANGER else None, state, state, state, state, state, state, state, state, state, state, now, session_id),
     )
     conn.commit()
     conn.close()
@@ -741,13 +1019,49 @@ async def _monitor_sideband(row: dict) -> None:
     if not api_key:
         _release_sideband_lease(session_id)
         return
+    user = _voice_user(row["user_id"])
+    if not user:
+        _mark_session_ending(session_id, final_status="failed", reason="voice_user_unavailable")
+        return
     provider = OpenAIRealtimeProvider(api_key)
     socket = None
+    pending_prompt_action_id = None
+    pending_prompt_text = None
+    expecting_prompt_response = False
+    prompt_response_id = None
     try:
         async with provider.sideband(row["provider_call_id"]) as socket:
-            # Do not let the browser begin media until this trusted control
-            # channel is actually attached. The WebRTC answer remains server-
-            # side until connect_voice_session observes this timestamp.
+            control_id = "mindguard_voice_tools_" + uuid.uuid4().hex
+            conn = get_db()
+            recipient, _kind = _care_recipient(conn, user)
+            minor = _is_minor(conn, user)
+            conn.close()
+            await socket.send(json.dumps({
+                "type": "session.update",
+                "event_id": control_id,
+                "session": {
+                    "instructions": _instructions(minor, bool(recipient)),
+                    "tools": voice_tool_definitions(user),
+                    "tool_choice": "auto",
+                },
+            }))
+            deadline = time.monotonic() + 8
+            configured = False
+            while time.monotonic() < deadline:
+                event = json.loads(await asyncio.wait_for(socket.recv(), timeout=max(0.1, deadline - time.monotonic())))
+                if event.get("type") == "error" and event.get("event_id") == control_id:
+                    raise VoiceProviderError("Realtime rejected the server-controlled Voice action configuration")
+                if event.get("type") == "session.updated" and event.get("client_event_id") == control_id:
+                    configured = True
+                    break
+                if event.get("type") == "session.closed":
+                    return
+            if not configured:
+                raise VoiceProviderError("Realtime did not acknowledge Voice action configuration")
+
+            # The browser does not receive SDP until this exact server-side
+            # configuration is acknowledged, so tool execution stays owned by
+            # the backend from the start of the conversation.
             connected_at = _now()
             conn = get_db()
             conn.execute(
@@ -757,6 +1071,33 @@ async def _monitor_sideband(row: dict) -> None:
             )
             conn.commit()
             conn.close()
+            conn = get_db()
+            pending = conn.execute(
+                "SELECT pending_action_id,pending_action_source,pending_action_confirmation_prompt,pending_action_prompted_at,pending_action_state,safety_outcome "
+                "FROM voice_support_sessions WHERE id=? AND user_id=?",
+                (session_id, row["user_id"]),
+            ).fetchone()
+            conn.close()
+            if (
+                pending and pending["pending_action_id"] and pending["pending_action_source"] == "voice"
+                and pending["pending_action_state"] == "awaiting_confirmation" and not pending["pending_action_prompted_at"]
+                and pending["safety_outcome"] in {"none", NORMAL}
+            ):
+                pending_prompt_action_id = pending["pending_action_id"]
+                try:
+                    pending_prompt_text = decrypt_pii(pending["pending_action_confirmation_prompt"])
+                except (TypeError, ValueError, RuntimeError):
+                    raise VoiceProviderError("Pending Voice confirmation could not be read securely")
+                expecting_prompt_response = True
+                await socket.send(json.dumps({
+                    "type": "response.create",
+                    "response": {
+                        "modalities": ["audio", "text"],
+                        "tools": [],
+                        "tool_choice": "none",
+                        "instructions": "Ask the user this exact confirmation question and then wait without acting: " + json.dumps(pending_prompt_text),
+                    },
+                }))
             while True:
                 current = _session_state(session_id)
                 if not current or current["status"] in {"completed", "failed", "expired"}:
@@ -787,7 +1128,7 @@ async def _monitor_sideband(row: dict) -> None:
                         )
                         with suppress(Exception):
                             await socket.send(json.dumps({"type": "response.cancel"}))
-                            await socket.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio", "text"], "instructions": instructions}}))
+                            await socket.send(json.dumps({"type": "response.create", "response": {"modalities": ["audio", "text"], "instructions": instructions, "tools": [], "tool_choice": "none"}}))
                         if state == POTENTIAL_IMMEDIATE_DANGER and delivery not in {"delivered", "acknowledged"}:
                             minor_conn = get_db()
                             user_context = minor_conn.execute("SELECT role_type,user_category FROM users WHERE id=?", (row["user_id"],)).fetchone()
@@ -795,6 +1136,64 @@ async def _monitor_sideband(row: dict) -> None:
                             minor_conn.close()
                             with suppress(Exception):
                                 await socket.send(json.dumps({"type": "session.update", "session": {"instructions": _instructions(minor, False) + " " + _urgent_fallback_message(minor)}}))
+                    elif state in {"none", NORMAL}:
+                        resolution = await _resolve_spoken_confirmation(session_id, user, transcript, socket)
+                        if resolution and resolution.get("prompt"):
+                            pending_prompt_action_id = resolution["pending_action_id"]
+                            pending_prompt_text = resolution["prompt"]
+                            prompt_response_id = None
+                            expecting_prompt_response = True
+                elif event_type == "response.created" and expecting_prompt_response:
+                    response = event.get("response") or {}
+                    prompt_response_id = response.get("id")
+                    expecting_prompt_response = False
+                elif event_type == "response.done":
+                    response = event.get("response") or {}
+                    if (
+                        pending_prompt_action_id and prompt_response_id
+                        and response.get("id") == prompt_response_id and response.get("status") == "completed"
+                    ):
+                        expected = _normalize_spoken_choice(pending_prompt_text or "")
+                        transcript_texts = [_normalize_spoken_choice(item) for item in _response_audio_transcripts(response)]
+                        if expected and any(expected in item for item in transcript_texts):
+                            _mark_voice_prompt_delivered(session_id, pending_prompt_action_id)
+                        pending_prompt_action_id = None
+                        pending_prompt_text = None
+                        prompt_response_id = None
+
+                    if response.get("status") != "completed":
+                        continue
+                    function_calls = [
+                        item for item in response.get("output", [])
+                        if isinstance(item, dict) and item.get("type") == "function_call" and item.get("status") == "completed"
+                    ]
+                    if not function_calls:
+                        continue
+                    tool_user = _voice_user(row["user_id"])
+                    if not tool_user:
+                        continue
+                    next_prompt = None
+                    for function_call in function_calls:
+                        call_id = function_call.get("call_id")
+                        name = function_call.get("name")
+                        arguments = function_call.get("arguments", "{}")
+                        if not isinstance(call_id, str) or len(call_id) > 200:
+                            continue
+                        if not isinstance(name, str) or not isinstance(arguments, str):
+                            result = {"result": "NOT_ALLOWED", "message": "That MindGuard action is unavailable."}
+                        else:
+                            result = await _dispatch_realtime_tool(session_id, tool_user, name, arguments)
+                        await socket.send(json.dumps({
+                            "type": "conversation.item.create",
+                            "item": {"type": "function_call_output", "call_id": call_id, "output": json.dumps(result, separators=(",", ":"))},
+                        }))
+                        if result.get("result") == "CONFIRMATION_REQUIRED" and result.get("pending_action_id"):
+                            next_prompt = (result["pending_action_id"], result.get("confirmation_prompt", ""))
+                    if next_prompt:
+                        pending_prompt_action_id, pending_prompt_text = next_prompt
+                        prompt_response_id = None
+                        expecting_prompt_response = True
+                    await socket.send(json.dumps({"type": "response.create"}))
                 elif event_type == "session.closed":
                     _mark_session_ending(session_id)
                     return
@@ -924,6 +1323,8 @@ async def create_voice_session(data: VoiceSessionCreate, request: Request, user:
             "type": "realtime",
             "model": model,
             "instructions": _instructions(minor, bool(recipient)),
+            "tools": voice_tool_definitions(user),
+            "tool_choice": "auto",
             "audio": {
                 "input": {"transcription": {"model": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")}},
                 "output": {"voice": os.getenv("OPENAI_REALTIME_VOICE", "marin")},
@@ -1037,17 +1438,45 @@ async def voice_session_state(session_id: str, user: dict = Depends(require_auth
         conn.execute(
             "UPDATE voice_support_sessions SET status='ending',pending_action_id=NULL,"
             "pending_action_type=NULL,pending_action_payload_encrypted=NULL,"
-            "pending_action_expires_at=NULL,pending_action_state='expired',updated_at=? "
+            "pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,"
+            "pending_action_prompted_at=NULL,pending_action_state='expired',updated_at=? "
             "WHERE id=? AND status='active'",
             (_now(), session_id),
         )
         conn.commit()
-        row = conn.execute("SELECT status,safety_outcome,alert_delivery_status,pending_action_id,pending_action_type,pending_action_expires_at,pending_action_state FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
+        row = conn.execute("SELECT status,safety_outcome,alert_delivery_status,pending_action_id,pending_action_type,pending_action_expires_at,pending_action_state,pending_action_source,pending_action_confirmation_prompt,pending_action_prompted_at,navigation_event_id,navigation_route_id FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
+    if row["pending_action_id"] and row["pending_action_expires_at"] and row["pending_action_expires_at"] <= _now():
+        conn.execute(
+            "UPDATE voice_support_sessions SET pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,"
+            "pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,"
+            "pending_action_prompted_at=NULL,pending_action_state='expired',updated_at=? WHERE id=? AND pending_action_id=?",
+            (_now(), session_id, row["pending_action_id"]),
+        )
+        conn.commit()
+        row = conn.execute("SELECT status,safety_outcome,alert_delivery_status,pending_action_id,pending_action_type,pending_action_expires_at,pending_action_state,pending_action_source,pending_action_confirmation_prompt,pending_action_prompted_at,navigation_event_id,navigation_route_id FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
     conn.close()
     pending = None
     if row["pending_action_id"] and row["pending_action_state"] == "awaiting_confirmation":
-        pending = {"id": row["pending_action_id"], "action": row["pending_action_type"], "expires_at": row["pending_action_expires_at"]}
-    return {"status": row["status"], "safety_state": row["safety_outcome"], "alert_delivery_status": row["alert_delivery_status"], "pending_action": pending}
+        action = row["pending_action_type"]
+        try:
+            confirmation_prompt = decrypt_pii(row["pending_action_confirmation_prompt"])
+        except (TypeError, ValueError, RuntimeError):
+            _finish_voice_action(session_id, row["pending_action_id"], "failed")
+            confirmation_prompt = None
+        if confirmation_prompt:
+            pending = {
+                "id": row["pending_action_id"], "action": action,
+                "expires_at": row["pending_action_expires_at"],
+                "source": row["pending_action_source"],
+                "sensitivity": SHARE_REQUIRED if action in {"propose_summary_share"} or (action == "propose_human_support" and user.get("role_type") == "workplace_employee") else CONFIRM_REQUIRED,
+                "confirmation_prompt": confirmation_prompt,
+                "voice_confirmation_ready": bool(row["pending_action_prompted_at"]),
+            }
+    route_ids = set(NAVIGATION_TARGETS.values()) | {"workplace-checkins", "workplace-support"}
+    navigation = None
+    if row["navigation_event_id"] and row["navigation_route_id"] in route_ids:
+        navigation = {"id": row["navigation_event_id"], "route_id": row["navigation_route_id"]}
+    return {"status": row["status"], "safety_state": row["safety_outcome"], "alert_delivery_status": row["alert_delivery_status"], "pending_action": pending, "navigation_event": navigation}
 
 
 @router.post("/sessions/{session_id}/request-help")
@@ -1070,7 +1499,7 @@ async def close_voice_session(session_id: str, data: VoiceClose, request: Reques
     conn = get_db(); row = _session_for_user(conn, session_id, user["id"])
     now = _now()
     if row["status"] == "expired" or row["active_expires_at"] <= now:
-        conn.execute("UPDATE voice_support_sessions SET status='expired',summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?", (now, now, session_id))
+        conn.execute("UPDATE voice_support_sessions SET status='expired',summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,pending_action_prompted_at=NULL,pending_action_state='expired',ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?", (now, now, session_id))
         conn.commit(); conn.close()
         raise HTTPException(410, "The voice-support session time limit has ended; no summary was saved")
     if row["status"] in {"completed", "failed"}:
@@ -1078,7 +1507,7 @@ async def close_voice_session(session_id: str, data: VoiceClose, request: Reques
         return {"ok": True, "status": row["status"]}
     target_status = "ending" if row["provider_call_id"] and row["status"] in {"active", "ending"} else "completed"
     conn.execute(
-        "UPDATE voice_support_sessions SET status=?,exercise=COALESCE(?,exercise),client_secret_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',ended_at=CASE WHEN ?='completed' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=? WHERE id=?",
+        "UPDATE voice_support_sessions SET status=?,exercise=COALESCE(?,exercise),client_secret_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,pending_action_prompted_at=NULL,pending_action_state='expired',ended_at=CASE WHEN ?='completed' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=? WHERE id=?",
         (target_status, data.exercise, target_status, now, now, session_id),
     )
     conn.commit(); conn.close()
@@ -1131,6 +1560,6 @@ async def voice_alerts_for_recipient(user: dict = Depends(require_auth)):
 def purge_expired_voice_summaries() -> int:
     conn = get_db(); now = _now()
     rows = conn.execute("SELECT id FROM voice_support_sessions WHERE expires_at<=? AND summary_encrypted IS NOT NULL", (now,)).fetchall()
-    conn.execute("UPDATE voice_support_sessions SET summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_state='expired',status=CASE WHEN status='active' THEN 'expired' ELSE status END,updated_at=? WHERE expires_at<=?", (now, now))
+    conn.execute("UPDATE voice_support_sessions SET summary_encrypted=NULL,pending_action_id=NULL,pending_action_type=NULL,pending_action_payload_encrypted=NULL,pending_action_expires_at=NULL,pending_action_source=NULL,pending_action_confirmation_prompt=NULL,pending_action_prompted_at=NULL,pending_action_state='expired',status=CASE WHEN status='active' THEN 'expired' ELSE status END,updated_at=? WHERE expires_at<=?", (now, now))
     conn.commit(); conn.close()
     return len(rows)

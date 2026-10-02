@@ -333,13 +333,21 @@ def test_voice_session_uses_server_controls_and_explicit_help_for_minor(
             class FakeSocket:
                 def __init__(self):
                     self.closed = asyncio.Event()
+                    self.control_event_id = None
+                    self.control_acknowledged = False
 
                 async def recv(self):
+                    if not self.control_acknowledged:
+                        self.control_acknowledged = True
+                        return json.dumps({"type": "session.updated", "client_event_id": self.control_event_id})
                     await self.closed.wait()
                     return json.dumps({"type": "session.closed"})
 
                 async def send(self, payload):
-                    if json.loads(payload).get("type") == "session.close":
+                    event = json.loads(payload)
+                    if event.get("type") == "session.update":
+                        self.control_event_id = event.get("event_id")
+                    if event.get("type") == "session.close":
                         self.closed.set()
 
             yield FakeSocket()

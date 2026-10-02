@@ -1,5 +1,6 @@
 """Focused integration coverage for server-authoritative Voice actions."""
 
+import asyncio
 import json
 import os
 import uuid
@@ -11,6 +12,25 @@ from fastapi.testclient import TestClient
 
 from backend.auth import hash_password
 from backend.services.crypto import decrypt_pii, encrypt_pii
+
+
+def test_realtime_tools_are_role_scoped_and_spoken_choices_are_unambiguous():
+    from backend.services.voice_actions import voice_tool_definitions
+    from backend.routes.voice_support import _spoken_confirmation
+
+    student_tools = {tool["name"] for tool in voice_tool_definitions({"role_type": "student"})}
+    worker_tools = {tool["name"] for tool in voice_tool_definitions({"role_type": "workplace_employee"})}
+    assert "get_my_upcoming_appointments" in student_tools
+    assert "propose_workplace_checkin" not in student_tools
+    assert "propose_workplace_checkin" in worker_tools
+    assert "propose_summary_share" in worker_tools
+    support_tool = next(tool for tool in voice_tool_definitions({"role_type": "workplace_employee"}) if tool["name"] == "propose_human_support")
+    assert support_tool["parameters"]["required"] == ["provider_id"]
+    assert "share_latest_checkin" not in support_tool["parameters"]["properties"]
+    assert _spoken_confirmation("Yes, please save it.") is True
+    assert _spoken_confirmation("Never mind.") is False
+    assert _spoken_confirmation("Yes, but maybe later") is None
+    assert _spoken_confirmation("") is None
 
 
 def _client():
@@ -373,24 +393,34 @@ def test_workplace_voice_actions_reuse_checkin_support_and_scoped_sharing(db, mo
             json={"action": "propose_human_support", "payload": {"provider_id": provider["id"], "share_latest_checkin": False}},
         )
         assert no_consent.json()["result"] == "CONSENT_REQUIRED"
-        request = client.post(
-            f"/api/v1/voice/sessions/{session_id}/actions",
-            headers=employee_headers,
-            json={"action": "propose_human_support", "payload": {"provider_id": provider["id"], "share_latest_checkin": True}},
+        from backend.routes.voice_support import _dispatch_realtime_tool
+
+        voice_request = asyncio.run(_dispatch_realtime_tool(
+            session_id, db.get_user_by_id(employee["id"]), "propose_human_support",
+            json.dumps({"provider_id": provider["id"]}),
+        ))
+        assert voice_request["result"] == "CONFIRMATION_REQUIRED"
+        assert "share your latest workplace check-in" in voice_request["confirmation_prompt"]
+        consent = client.post(
+            f"/api/v1/voice/sessions/{session_id}/actions/{voice_request['pending_action_id']}/confirm",
+            headers=employee_headers, json={"confirmed": True},
         )
-        assert request.json()["result"] == "CONFIRMATION_REQUIRED"
-        assert request.json()["sensitivity"] == "SHARE_REQUIRED"
-        case_id = None
+        assert consent.json()["result"] == "CONFIRMATION_REQUIRED"
+        assert consent.json()["stage"] == "final_confirmation"
         conn = db.get_db()
         assert conn.execute("SELECT COUNT(*) FROM workplace_support_cases WHERE user_id=?", (employee["id"],)).fetchone()[0] == 0
+        consent_payload = json.loads(decrypt_pii(conn.execute(
+            "SELECT pending_action_payload_encrypted FROM voice_support_sessions WHERE id=?", (session_id,)
+        ).fetchone()[0]))
+        assert consent_payload["share_latest_checkin"] is True
         conn.close()
-        created = client.post(
-            f"/api/v1/voice/sessions/{session_id}/actions/{request.json()['pending_action_id']}/confirm",
-            headers=employee_headers,
-            json={"confirmed": True},
+        submitted = client.post(
+            f"/api/v1/voice/sessions/{session_id}/actions/{voice_request['pending_action_id']}/confirm",
+            headers=employee_headers, json={"confirmed": True},
         )
-        assert created.json()["result"] == "SUCCESS"
-        case_id = created.json()["case_id"]
+        assert submitted.json()["result"] == "SUCCESS"
+        assert submitted.json()["case_id"]
+        case_id = submitted.json()["case_id"]
         duplicate = client.post(
             f"/api/v1/voice/sessions/{session_id}/actions",
             headers=employee_headers,
@@ -408,10 +438,16 @@ def test_workplace_voice_actions_reuse_checkin_support_and_scoped_sharing(db, mo
             json={"action": "propose_private_summary", "payload": {"summary": note}},
         )
         conn = db.get_db()
-        session_before = conn.execute("SELECT summary_encrypted,pending_action_payload_encrypted FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
+        session_before = conn.execute("SELECT summary_encrypted,pending_action_payload_encrypted,pending_action_confirmation_prompt FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
         assert session_before["summary_encrypted"] is None
         assert note not in session_before["pending_action_payload_encrypted"]
+        assert note not in session_before["pending_action_confirmation_prompt"]
+        assert decrypt_pii(session_before["pending_action_confirmation_prompt"]) == proposal.json()["confirmation_prompt"]
         conn.close()
+        worker_pending = client.get(f"/api/v1/voice/sessions/{session_id}/state", headers=employee_headers)
+        assert worker_pending.status_code == 200
+        assert worker_pending.json()["pending_action"]["confirmation_prompt"] == proposal.json()["confirmation_prompt"]
+        assert client.get(f"/api/v1/voice/sessions/{session_id}/state", headers=admin_headers).status_code == 404
         note_saved = client.post(
             f"/api/v1/voice/sessions/{session_id}/actions/{proposal.json()['pending_action_id']}/confirm",
             headers=employee_headers,
@@ -484,3 +520,112 @@ def test_workplace_voice_actions_reuse_checkin_support_and_scoped_sharing(db, mo
         assert report.status_code == 200
         assert report.json()["suppressed"] is True
         assert "voice" not in json.dumps(report.json()).lower()
+
+
+def test_sideband_dispatches_natural_tools_and_confirms_only_after_spoken_prompt(db, monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from backend.database import assign_student_to_counsellor, create_appointment
+    from backend.routes import voice_support
+    from backend.services.voice_safety import NORMAL
+
+    _configure_voice(monkeypatch)
+    student = db.create_user(
+        "natural.voice@example.test", "Natural Voice User",
+        hash_password("voice-action-test-password"), role_type="student",
+    )
+    counsellor = db.create_user(
+        "natural.counsellor@example.test", "Assigned Counsellor",
+        hash_password("voice-action-test-password"), role_type="counsellor",
+    )
+    conn = db.get_db()
+    conn.execute("UPDATE users SET status='approved' WHERE id IN (?,?)", (student["id"], counsellor["id"]))
+    conn.commit()
+    conn.close()
+    assign_student_to_counsellor(counsellor["id"], student["id"])
+    now = datetime.now(timezone.utc)
+    appointment = create_appointment(
+        student["id"], counsellor["id"], student["id"], "Wellbeing appointment",
+        (now + timedelta(days=2)).isoformat(), (now + timedelta(days=2, minutes=30)).isoformat(),
+        timezone_name="Africa/Nairobi", mode="video",
+    )
+    session_id = _active_session(db, student["id"])
+    call_id = "rtc_voice_tool_test"
+    conn = db.get_db()
+    conn.execute("UPDATE voice_support_sessions SET provider_call_id=? WHERE id=?", (call_id, session_id))
+    conn.commit()
+    conn.close()
+
+    draft = "I have been worried about an upcoming change, and decided to ask for support."
+    prompt = (
+        "Here is the private note I prepared for you: " + draft + ". "
+        "Would you like to save this note privately to your MindGuard account? "
+        "It will not be shared with a provider or employer."
+    )
+    events = [
+        {"type": "response.done", "response": {"id": "resp-tools-1", "status": "completed", "output": [
+            {"type": "function_call", "status": "completed", "name": "delete_everything", "call_id": "call-unknown", "arguments": "{}"},
+            {"type": "function_call", "status": "completed", "name": "get_my_upcoming_appointments", "call_id": "call-appointments", "arguments": "{}"},
+            {"type": "function_call", "status": "completed", "name": "navigate", "call_id": "call-navigation", "arguments": '{"target":"appointments"}'},
+        ]}},
+        {"type": "response.done", "response": {"id": "resp-tools-2", "status": "completed", "output": [
+            {"type": "function_call", "status": "completed", "name": "propose_private_summary", "call_id": "call-summary", "arguments": json.dumps({"summary": draft})},
+        ]}},
+        {"type": "response.created", "response": {"id": "resp-confirm-prompt"}},
+        {"type": "response.done", "response": {"id": "resp-confirm-prompt", "status": "completed", "output": [
+            {"type": "message", "content": [{"type": "audio", "transcript": prompt}]},
+        ]}},
+        {"type": "conversation.item.input_audio_transcription.completed", "transcript": "Yes, please save it."},
+        {"type": "session.closed"},
+    ]
+
+    class FakeSocket:
+        def __init__(self):
+            self.sent = []
+            self.acknowledged = False
+
+        async def send(self, payload):
+            self.sent.append(json.loads(payload))
+
+        async def recv(self):
+            if not self.acknowledged:
+                config = next(event for event in self.sent if event["type"] == "session.update")
+                self.acknowledged = True
+                return json.dumps({"type": "session.updated", "client_event_id": config["event_id"]})
+            if not events:
+                raise RuntimeError("Unexpected Realtime receive")
+            return json.dumps(events.pop(0))
+
+    socket = FakeSocket()
+
+    class FakeProvider:
+        def __init__(self, api_key):
+            assert api_key == "voice-action-fake-key"
+
+        @asynccontextmanager
+        async def sideband(self, provider_call_id):
+            assert provider_call_id == call_id
+            yield socket
+
+    monkeypatch.setattr(voice_support, "OpenAIRealtimeProvider", FakeProvider)
+    monkeypatch.setattr(voice_support, "get_secret", lambda name: "voice-action-fake-key" if name == "OPENAI_API_KEY" else "voice-action-fake-salt-value-0123456789")
+    monkeypatch.setattr(voice_support, "classify_voice_text", lambda *args: asyncio.sleep(0, result=NORMAL))
+
+    asyncio.run(voice_support._monitor_sideband({"id": session_id, "user_id": student["id"], "provider_call_id": call_id}))
+
+    outputs = {
+        event["item"]["call_id"]: json.loads(event["item"]["output"])
+        for event in socket.sent
+        if event.get("type") == "conversation.item.create" and event.get("item", {}).get("type") == "function_call_output"
+    }
+    assert outputs["call-unknown"]["result"] == "NOT_ALLOWED"
+    assert [item["id"] for item in outputs["call-appointments"]["appointments"]] == [appointment["id"]]
+    assert outputs["call-navigation"]["result"] == "SUCCESS"
+    assert outputs["call-summary"]["result"] == "CONFIRMATION_REQUIRED"
+    assert outputs["call-summary"]["confirmation_prompt"] == prompt
+    conn = db.get_db()
+    saved = conn.execute("SELECT summary_encrypted,status,navigation_route_id FROM voice_support_sessions WHERE id=?", (session_id,)).fetchone()
+    conn.close()
+    assert decrypt_pii(saved["summary_encrypted"]) == draft
+    assert saved["status"] == "completed"
+    assert saved["navigation_route_id"] == "appointments"
