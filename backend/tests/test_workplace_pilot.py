@@ -160,6 +160,120 @@ def test_company_demo_conversion_rejects_unqualified_and_institution_route(db):
     conn.close()
 
 
+def test_admin_demo_workplace_skips_live_setup_gates_but_cannot_become_live(db, monkeypatch):
+    from backend.routes import workplace
+
+    sent_emails = []
+    monkeypatch.setattr(
+        workplace,
+        "send_html_email",
+        lambda email, subject, body, **kwargs: (sent_emails.append((email, body)) or True, ""),
+    )
+    admin = _global_admin(db)
+    with _client() as client:
+        admin_headers = _login(client, admin["email"])
+        created = client.post(
+            "/api/v1/workplace/admin/demo-workplaces",
+            headers=admin_headers,
+            json={"name": "Example Demo", "admin_name": "Test Admin", "admin_email": "demo-admin@gmail.com"},
+        )
+        assert created.status_code == 201, created.text
+        demo = created.json()
+        assert demo["demo_mode"] is True and demo["invitation_sent"] is True
+        assert "token=" not in created.text
+        assert len(sent_emails) == 1 and sent_emails[0][0] == "demo-admin@gmail.com"
+
+        invite_token = re.search(r"token=([^&\"]+)", sent_emails[0][1]).group(1)
+        accepted = client.post(
+            "/api/auth/invite/accept",
+            json={"token": invite_token, "password": "demo-workplace-password"},
+        )
+        assert accepted.status_code == 200, accepted.text
+        company_headers = {"Authorization": f"Bearer {accepted.json()['access_token']}"}
+        assert client.post("/api/auth/terms", headers=company_headers).status_code == 200
+        non_admin_create = client.post(
+            "/api/v1/workplace/admin/demo-workplaces",
+            headers=company_headers,
+            json={"name": "Unauthorized Demo", "admin_name": "Worker", "admin_email": "another-demo@gmail.com"},
+        )
+        assert non_admin_create.status_code == 403
+
+        setup = client.get("/api/v1/workplace/admin/setup", headers=company_headers)
+        assert setup.status_code == 200 and setup.json()["demo_mode"] is True
+        assert setup.json()["approved_domains"] == []
+        link = client.post("/api/v1/workplace/admin/enrollment-link", headers=company_headers)
+        assert link.status_code == 200, link.text
+        resolved = client.get(f"/api/v1/workplace/enrollment/resolve?token={link.json()['token']}")
+        assert resolved.status_code == 200 and resolved.json()["demo_mode"] is True
+
+        joined = client.post(
+            "/api/v1/workplace/enrollment/start",
+            json={
+                "token": link.json()["token"],
+                "name": "Test Worker",
+                "email": "test-worker@yahoo.com",
+                "password": "demo-worker-password",
+                "accepted_notice": True,
+                "accepted_workplace_terms": True,
+            },
+        )
+        assert joined.status_code == 202, joined.text
+        assert len(sent_emails) == 2 and sent_emails[1][0] == "test-worker@yahoo.com"
+        code = re.search(r"<strong>(\d{6})</strong>", sent_emails[1][1]).group(1)
+        verified = client.post(
+            "/api/v1/workplace/enrollment/verify",
+            json={"challenge_id": joined.json()["challenge_id"], "code": code},
+        )
+        assert verified.status_code == 200, verified.text
+        worker_headers = {"Authorization": f"Bearer {verified.json()['access_token']}"}
+        context = client.get("/api/v1/workplace/member/context", headers=worker_headers)
+        assert context.status_code == 200
+        assert context.json() == {"company_name": "Example Demo", "demo_mode": True}
+
+        company_id = demo["id"]
+        assert client.post(
+            f"/api/v1/workplace/admin/companies/{company_id}/legal-review",
+            headers=admin_headers,
+            json={"reviewed": True, "reference": "test review reference"},
+        ).status_code == 409
+        assert client.post(
+            "/api/v1/workplace/admin/domains",
+            headers=company_headers,
+            json={"domain": "example.com"},
+        ).status_code == 409
+        assert client.put(
+            "/api/v1/workplace/admin/policy",
+            headers=company_headers,
+            json={
+                "privacy_contact_email": "privacy@example.com",
+                "employee_population_range": "1-50",
+                "retention_days": 365,
+                "privacy_notice_version": "workplace-v1",
+                "confirm_aggregate_only": True,
+            },
+        ).status_code == 409
+        assert client.put(
+            f"/api/v1/workplace/admin/companies/{company_id}/commercial",
+            headers=admin_headers,
+            json={"status": "ACTIVE", "reason": "Attempt live conversion"},
+        ).status_code == 409
+
+    conn = db.get_db()
+    settings = conn.execute(
+        "SELECT demo_mode,work_email_domains_json,legal_review_complete FROM workplace_settings WHERE company_id=?",
+        (company_id,),
+    ).fetchone()
+    credential = conn.execute(
+        "SELECT demo_only,registration_encrypted FROM workplace_provider_credentials WHERE provider_id IN (SELECT provider_id FROM workplace_providers WHERE company_id=?)",
+        (company_id,),
+    ).fetchone()
+    assert settings["demo_mode"] == 1 and settings["work_email_domains_json"] == "[]"
+    assert settings["legal_review_complete"] == 0
+    assert credential["demo_only"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM workplace_memberships WHERE company_id=?", (company_id,)).fetchone()[0] == 1
+    conn.close()
+
+
 def test_company_admin_is_not_allowed_legacy_school_or_social_routes(db):
     _, admin = _company(db)
     with _client() as client:
@@ -612,7 +726,7 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
         reviewed = client.post(
             f"/api/v1/workplace/admin/companies/{company_id}/legal-review",
             headers=root_headers,
-            json={"reviewed": True, "reference": "KE privacy review record 2026-01"},
+            json={"reviewed": True, "reference": "US privacy review record 2026-01"},
         )
         assert reviewed.status_code == 200
         policy = client.put(
@@ -635,10 +749,19 @@ def test_global_company_setup_keeps_legal_gate_and_separate_institution_listing(
                 "professional_title": "Counsellor",
                 "qualification": "Registered counsellor",
                 "registration_number": "REG-001",
-                "verification_reference": "Credential document reviewed",
+                "license_state": "California",
+                "verification_reference": "State licensing board lookup, 2026-01-10",
             },
         )
         assert credentials.status_code == 201, credentials.text
+        credential_conn = db.get_db()
+        credential_record = credential_conn.execute(
+            "SELECT license_state_encrypted FROM workplace_provider_credentials WHERE provider_id=?",
+            (provider["id"],),
+        ).fetchone()
+        credential_conn.close()
+        from backend.services.crypto import decrypt_pii
+        assert decrypt_pii(credential_record["license_state_encrypted"]) == "California"
         attached = client.post(
             "/api/v1/workplace/admin/providers",
             headers=company_headers,

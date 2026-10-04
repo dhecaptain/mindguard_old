@@ -170,6 +170,13 @@ def _company_admin(user: dict, *, owner: bool = False, terms: bool = True) -> st
     return user["institution_id"]
 
 
+def _is_demo_company(conn, company_id: str) -> bool:
+    row = conn.execute(
+        "SELECT demo_mode FROM workplace_settings WHERE company_id=?", (company_id,)
+    ).fetchone()
+    return bool(row and row["demo_mode"])
+
+
 def _assert_owner_in_transaction(conn, company_id: str, user_id: str) -> None:
     row = conn.execute(
         "SELECT u.workplace_admin_role,u.workplace_terms_version,u.status,i.status AS company_status "
@@ -208,16 +215,20 @@ def _company_enrollment_is_ready(conn, company_id: str | None = None, *, token: 
     if where:
         where = " AND " + where
     return conn.execute(
-        "SELECT l.id,l.company_id,s.work_email_domains_json,s.privacy_notice_version "
+        "SELECT l.id,l.company_id,s.work_email_domains_json,s.privacy_notice_version,s.demo_mode "
         "FROM workplace_enrollment_links l JOIN workplace_settings s ON s.company_id=l.company_id "
         "JOIN institutions i ON i.id=l.company_id WHERE 1=1" + where + " "
-        "AND i.type='company' AND i.status='ACTIVE' AND s.legal_review_complete=1 "
-        "AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
+        "AND i.type='company' AND i.status='ACTIVE' AND ((s.demo_mode=1 AND EXISTS (SELECT 1 FROM workplace_providers p "
         "JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id "
         "JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
-        "WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' "
+        "WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' AND c.demo_only=1 "
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))) OR "
+        "(s.demo_mode=0 AND s.legal_review_complete=1 AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
+        "JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id "
+        "JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
+        "WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' AND c.demo_only=0 "
         "AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) "
-        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active')) LIMIT 1",
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active')))) LIMIT 1",
         params,
     ).fetchone()
 
@@ -395,6 +406,21 @@ def _employee(user: dict) -> dict:
     return dict(row)
 
 
+@router.get("/member/context")
+async def workplace_member_context(user: dict = Depends(require_auth)):
+    """Return only the tenant name and demo marker for the worker workspace shell."""
+    membership = _employee(user)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT i.name,s.demo_mode FROM institutions i JOIN workplace_settings s ON s.company_id=i.id WHERE i.id=?",
+        (membership["company_id"],),
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "Workplace details were not found")
+    return {"company_name": row["name"], "demo_mode": bool(row["demo_mode"])}
+
+
 class EnrollmentStart(BaseModel):
     token: str = Field(min_length=32, max_length=200)
     name: str = Field(min_length=1, max_length=200)
@@ -449,6 +475,7 @@ class ProviderCredentialCreate(BaseModel):
     professional_title: str = Field(min_length=2, max_length=160)
     qualification: str = Field(min_length=2, max_length=300)
     registration_number: str = Field(min_length=2, max_length=160)
+    license_state: str = Field(min_length=2, max_length=80)
     verification_reference: str = Field(min_length=4, max_length=500)
     valid_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
@@ -459,6 +486,7 @@ class ProviderCredentialSubmission(BaseModel):
     professional_title: str = Field(min_length=2, max_length=160)
     qualification: str = Field(min_length=2, max_length=300)
     registration_number: str = Field(min_length=2, max_length=160)
+    license_state: str | None = Field(default=None, min_length=2, max_length=80)
 
 
 class ProviderCredentialReview(BaseModel):
@@ -496,6 +524,12 @@ class CompanyCreate(BaseModel):
     privacy_contact_email: EmailStr | None = None
     employee_population_range: str | None = Field(default=None, max_length=80)
     retention_days: int = Field(default=365, ge=30, le=3650)
+
+
+class DemoWorkplaceCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    admin_name: str = Field(min_length=2, max_length=200)
+    admin_email: EmailStr
 
 
 class CompanyPolicyUpdate(BaseModel):
@@ -599,15 +633,7 @@ async def start_enrollment(data: EnrollmentStart, request: Request):
             429, "Too many enrollment attempts. Please wait before trying again."
         )
     conn = get_db()
-    link = conn.execute(
-        "SELECT l.id, l.company_id, s.work_email_domains_json, s.privacy_notice_version "
-        "FROM workplace_enrollment_links l JOIN workplace_settings s ON s.company_id = l.company_id "
-        "JOIN institutions i ON i.id = l.company_id "
-        "WHERE l.token_hash = ? AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at > ?) "
-        "AND i.type = 'company' AND i.status = 'ACTIVE' AND s.legal_review_complete = 1 "
-        "AND s.policy_status = 'approved' AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=l.company_id AND p.status='active' AND c.status='verified' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
-        (hash_token(data.token), _now()),
-    ).fetchone()
+    link = _company_enrollment_is_ready(conn, token=data.token)
     if not link:
         conn.close()
         raise HTTPException(400, "This enrollment link is invalid, expired, or revoked")
@@ -618,7 +644,7 @@ async def start_enrollment(data: EnrollmentStart, request: Request):
         domains = json.loads(link["work_email_domains_json"])
     except (ValueError, TypeError):
         domains = []
-    if domain not in {str(d).lower().lstrip("@").strip() for d in domains}:
+    if not link["demo_mode"] and domain not in {str(d).lower().lstrip("@").strip() for d in domains}:
         conn.close()
         raise HTTPException(
             400, "Use an approved work email address for this enrollment"
@@ -701,7 +727,7 @@ async def start_existing_account_enrollment(data: ExistingEnrollmentStart, reque
     account = conn.execute("SELECT email,role_type,user_category,institution_id,status FROM users WHERE id=?", (user["id"],)).fetchone()
     email = str(account["email"]).strip().lower()
     domains = {str(d).strip().lower().lstrip("@") for d in json.loads(link["work_email_domains_json"] or "[]")}
-    if email.rsplit("@", 1)[-1] not in domains:
+    if not link["demo_mode"] and email.rsplit("@", 1)[-1] not in domains:
         conn.close()
         raise HTTPException(400, "Your registered email does not match an approved workplace domain")
     existing = conn.execute("SELECT company_id,status FROM workplace_memberships WHERE user_id=?", (user["id"],)).fetchone()
@@ -735,16 +761,21 @@ async def verify_existing_account_enrollment(data: ExistingEnrollmentVerify, use
     now = _now()
     conn.execute("BEGIN IMMEDIATE")
     row = conn.execute(
-        "SELECT c.*,s.work_email_domains_json FROM workplace_existing_enrollment_challenges c "
+        "SELECT c.*,s.work_email_domains_json,s.demo_mode FROM workplace_existing_enrollment_challenges c "
         "JOIN workplace_settings s ON s.company_id=c.company_id JOIN workplace_enrollment_links l ON l.id=c.link_id "
         "JOIN institutions i ON i.id=c.company_id WHERE c.id=? AND c.user_id=? AND c.used_at IS NULL AND c.expires_at>? "
         "AND l.revoked_at IS NULL AND (l.expires_at IS NULL OR l.expires_at>?) AND i.type='company' AND i.status='ACTIVE' "
-        "AND s.legal_review_complete=1 AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
+        "AND ((s.demo_mode=1 AND EXISTS (SELECT 1 FROM workplace_providers p "
         "JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id "
         "LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
-        "WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' "
+        "WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pc.demo_only=1 "
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))) OR "
+        "(s.demo_mode=0 AND s.legal_review_complete=1 AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p "
+        "JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id "
+        "LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id "
+        "WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pc.demo_only=0 "
         "AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) "
-        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
+        "AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))))",
         (data.challenge_id, user["id"], now, now),
     ).fetchone()
     if not row:
@@ -760,7 +791,7 @@ async def verify_existing_account_enrollment(data: ExistingEnrollmentVerify, use
         raise HTTPException(400, "The verification code is invalid or expired")
     account = conn.execute("SELECT email,role_type,user_category,institution_id,status FROM users WHERE id=?", (user["id"],)).fetchone()
     domains = {str(d).strip().lower().lstrip("@") for d in json.loads(row["work_email_domains_json"] or "[]")}
-    if not account or account["role_type"] != "student" or account["user_category"] != "adult" or account["institution_id"] or str(account["status"]).lower() not in {"approved", "active"} or str(account["email"]).strip().lower().rsplit("@", 1)[-1] not in domains:
+    if not account or account["role_type"] != "student" or account["user_category"] != "adult" or account["institution_id"] or str(account["status"]).lower() not in {"approved", "active"} or (not row["demo_mode"] and str(account["email"]).strip().lower().rsplit("@", 1)[-1] not in domains):
         conn.rollback(); conn.close()
         raise HTTPException(409, "Your account or approved work domain changed. Start enrollment again or contact support.")
     if conn.execute("SELECT 1 FROM workplace_memberships WHERE user_id=?", (user["id"],)).fetchone():
@@ -867,6 +898,108 @@ async def create_workplace_company(
     }
 
 
+@router.post("/admin/demo-workplaces", status_code=201)
+async def create_demo_workplace(data: DemoWorkplaceCreate, actor: dict = Depends(require_auth)):
+    """Create a visibly marked demo tenant with synthetic support capacity."""
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+
+    from backend.database import _make_referral_code
+
+    company_id = str(uuid.uuid4())
+    admin_id = str(uuid.uuid4())
+    provider_id = str(uuid.uuid4())
+    admin_email = str(data.admin_email).strip().lower()
+    name = data.name.strip()
+    now = _now()
+    invite_token = secrets.token_urlsafe(32)
+    invite_expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    provider_email = f"sample-counsellor+{provider_id}@demo.mindguard.invalid"
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM users WHERE lower(email)=?", (admin_email,)).fetchone():
+            raise HTTPException(409, "Use a new email address for the demo administrator invitation")
+
+        admin_referral = _make_referral_code()
+        while conn.execute("SELECT 1 FROM users WHERE referral_code=?", (admin_referral,)).fetchone():
+            admin_referral = _make_referral_code()
+        provider_referral = _make_referral_code()
+        while conn.execute("SELECT 1 FROM users WHERE referral_code=?", (provider_referral,)).fetchone():
+            provider_referral = _make_referral_code()
+
+        conn.execute(
+            "INSERT INTO institutions (id,name,type,status,created_by,created_at,updated_at) VALUES (?,?, 'company','ACTIVE',?,?,?)",
+            (company_id, name, actor["id"], now, now),
+        )
+        conn.execute(
+            "INSERT INTO users (id,email,name,role_type,password_hash,status,created_at,referral_code,institution_id,user_category,terms_accepted_at,invitation_token_hash,invitation_expires_at,invited_at,workplace_admin_role,workplace_invitation_status,workplace_terms_version) "
+            "VALUES (?,?,?,'company_admin',?,'pending',?,?,?,'company_staff',NULL,?,?,?,'owner','pending',NULL)",
+            (admin_id, admin_email, data.admin_name.strip(), hash_password(secrets.token_urlsafe(32)), now, admin_referral, company_id, hash_token(invite_token), invite_expires, now),
+        )
+        conn.execute(
+            "INSERT INTO users (id,email,name,role_type,password_hash,status,created_at,referral_code,institution_id,user_category,onboarding_completed_at) "
+            "VALUES (?,?,?,'workplace_provider',?,'active',?,?,NULL,'workplace_provider',?)",
+            (provider_id, provider_email, "Sample counsellor (demo)", hash_password(secrets.token_urlsafe(32)), now, provider_referral, now),
+        )
+        conn.execute(
+            "INSERT INTO workplace_settings (company_id,work_email_domains_json,privacy_notice_version,provider_service_enabled,legal_review_complete,privacy_contact_encrypted,employee_population_range,retention_days,policy_status,created_at,updated_at,demo_mode) "
+            "VALUES (?,'[]','workplace-demo-v1',1,0,?,'Demo workspace',30,'approved',?,?,1)",
+            (company_id, encrypt_pii(admin_email), now, now),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_credentials (provider_id,professional_type,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_by,reviewed_at,valid_from,expires_at,demo_only,license_state_encrypted) "
+            "VALUES (?,?,?,?,?,?,'verified',?,?,NULL,NULL,1,?)",
+            (provider_id, encrypt_pii("Sample provider"), encrypt_pii("Sample counsellor (demo)"), encrypt_pii("Synthetic demo profile"), encrypt_pii("DEMO-NOT-A-LICENSE"), encrypt_pii("Synthetic sample only; not credential-verified"), actor["id"], now, encrypt_pii("Demo only")),
+        )
+        conn.execute("UPDATE users SET professional_title=? WHERE id=?", (encrypt_pii("Sample counsellor (demo)"), provider_id))
+        conn.execute(
+            "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,changed_by,changed_at) VALUES (?,'active','available',?,?)",
+            (provider_id, actor["id"], now),
+        )
+        conn.execute(
+            "INSERT INTO workplace_providers (company_id,provider_id,status,created_at) VALUES (?,?,'active',?)",
+            (company_id, provider_id, now),
+        )
+        ensure_commercial_account(conn, company_id, population_range="Demo workspace", starts_on=now[:10], plan_key="pilot")
+        record_commercial_event(conn, company_id, actor["id"], "ACCOUNT_CREATED", None, "PILOT", "Demo workplace created", at=now)
+        _audit(conn, company_id, actor["id"], "WORKPLACE_DEMO_CREATED")
+        _audit(conn, company_id, actor["id"], "WORKPLACE_DEMO_PROVIDER_SEEDED")
+        _audit(conn, company_id, actor["id"], "WORKPLACE_ADMIN_INVITATION_CREATED")
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(500, "Unable to create demo workplace") from exc
+    conn.close()
+
+    base = __import__("os").getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+    sent, error = send_html_email(
+        admin_email,
+        f"Try the MindGuard workplace demo for {name}",
+        f"<p>Hello {data.admin_name.strip()},</p><p>You have been invited to explore a clearly marked MindGuard demo workplace for <strong>{name}</strong>.</p><p>This demo uses synthetic provider information. Do not enter real employee wellbeing details.</p><p><a href=\"{base}/invite?token={invite_token}\">Accept demo administrator invitation</a></p><p>This single-use link expires in 7 days.</p>",
+        related_type="workplace_demo_admin_invitation",
+        related_id=admin_id,
+        metadata={"company_id": company_id},
+    )
+    conn = get_db()
+    _audit(conn, company_id, actor["id"], "WORKPLACE_ADMIN_INVITATION_QUEUED" if sent else "WORKPLACE_ADMIN_INVITATION_DELIVERY_FAILED")
+    conn.commit()
+    conn.close()
+    return {
+        "id": company_id,
+        "name": name,
+        "demo_mode": True,
+        "administrator_invitation_status": "pending",
+        "invitation_sent": sent,
+        "invitation_error": error or None,
+    }
+
+
 @router.post("/admin/demo-requests/{demo_request_id}/convert", status_code=201)
 async def convert_workplace_demo_request(demo_request_id: str, data: WorkplaceDemoConversion, request: Request, actor: dict = Depends(require_auth)):
     """Convert a qualified company lead into a separately governed workplace tenant."""
@@ -942,7 +1075,7 @@ async def list_workplace_companies(actor: dict = Depends(require_auth)):
         raise HTTPException(403, "Global administrator access required")
     conn = get_db()
     rows = conn.execute(
-        "SELECT i.id, i.name, i.status, s.work_email_domains_json, s.legal_review_complete, s.legal_review_reference, s.legal_reviewed_at, s.employee_population_range, s.retention_days, s.policy_status FROM institutions i JOIN workplace_settings s ON s.company_id = i.id WHERE i.type = 'company' ORDER BY i.name COLLATE NOCASE"
+        "SELECT i.id, i.name, i.status, s.demo_mode, s.work_email_domains_json, s.legal_review_complete, s.legal_review_reference, s.legal_reviewed_at, s.employee_population_range, s.retention_days, s.policy_status FROM institutions i JOIN workplace_settings s ON s.company_id = i.id WHERE i.type = 'company' ORDER BY i.name COLLATE NOCASE"
     ).fetchall()
     result = []
     for row in rows:
@@ -952,7 +1085,7 @@ async def list_workplace_companies(actor: dict = Depends(require_auth)):
         ending_providers = conn.execute("SELECT COUNT(*) FROM workplace_providers WHERE company_id=? AND status IN ('ending','ended')", (row["id"],)).fetchone()[0]
         admins = conn.execute("SELECT id,name,email,status FROM users WHERE institution_id=? AND role_type='company_admin' ORDER BY created_at LIMIT 10", (row["id"],)).fetchall()
         result.append({
-            "id": row["id"], "name": row["name"], "status": row["status"],
+            "id": row["id"], "name": row["name"], "status": row["status"], "demo_mode": bool(row["demo_mode"]),
             "approved_work_email_domains": json.loads(row["work_email_domains_json"]),
             "legal_review_complete": bool(row["legal_review_complete"]),
             "legal_review_reference": row["legal_review_reference"],
@@ -1072,9 +1205,11 @@ async def update_workplace_commercial(company_id: str, data: WorkplaceCommercial
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        company = conn.execute("SELECT id FROM institutions WHERE id=? AND lower(type)='company'", (company_id,)).fetchone()
+        company = conn.execute("SELECT i.id,s.demo_mode FROM institutions i JOIN workplace_settings s ON s.company_id=i.id WHERE i.id=? AND lower(i.type)='company'", (company_id,)).fetchone()
         if not company:
             raise HTTPException(404, "Workplace company not found")
+        if company["demo_mode"]:
+            raise HTTPException(409, "Demo workplaces cannot be converted into or billed as customer tenants")
         ensure_commercial_account(conn, company_id)
         current = resolve_commercial_account(conn, company_id)
         if not current:
@@ -1207,11 +1342,14 @@ async def record_legal_review(
         )
     conn = get_db()
     company = conn.execute(
-        "SELECT id FROM institutions WHERE id = ? AND type = 'company'", (company_id,)
+        "SELECT i.id,s.demo_mode FROM institutions i JOIN workplace_settings s ON s.company_id=i.id WHERE i.id = ? AND i.type = 'company'", (company_id,)
     ).fetchone()
     if not company:
         conn.close()
         raise HTTPException(404, "Workplace company not found")
+    if company["demo_mode"]:
+        conn.close()
+        raise HTTPException(409, "Demo workplaces cannot record or claim a real privacy review")
     now = _now()
     conn.execute(
         "UPDATE workplace_settings SET legal_review_complete = 1, legal_review_reference = ?, legal_reviewed_by = ?, legal_reviewed_at = ?, updated_at = ? WHERE company_id = ?",
@@ -1271,13 +1409,15 @@ async def workplace_setup(user: dict = Depends(require_auth)):
     }
     if company["status"] == "SUSPENDED": readiness = "suspended"
     elif company["status"] == "ARCHIVED": readiness = "archived"
+    elif company["demo_mode"]: readiness = "demo_ready" if links else "demo_enrollment"
     elif not checks["administrator"]: readiness = "awaiting_administrator"
     elif not checks["privacy_review"]: readiness = "privacy_review_required"
     elif not checks["policy"] or not checks["provider"]: readiness = "provider_setup"
     elif not checks["enrollment_link"]: readiness = "enrollment_setup"
     else: readiness = "ready"
     return {
-        "company": {"id": company_id, "name": company["name"], "status": company["status"]},
+        "company": {"id": company_id, "name": company["name"], "status": company["status"], "demo_mode": bool(company["demo_mode"])},
+        "demo_mode": bool(company["demo_mode"]),
         "commercial": commercial,
         "readiness": readiness,
         "checklist": checks,
@@ -1306,6 +1446,9 @@ async def add_workplace_domain(data: WorkplaceDomain, user: dict = Depends(requi
     domain = _normalize_domains([data.domain])[0]
     conn = get_db(); conn.execute("BEGIN IMMEDIATE")
     _assert_owner_in_transaction(conn, company_id, user["id"])
+    if _is_demo_company(conn, company_id):
+        conn.rollback(); conn.close()
+        raise HTTPException(409, "Demo workplaces do not require company email domains")
     row = conn.execute("SELECT work_email_domains_json FROM workplace_settings WHERE company_id=?", (company_id,)).fetchone()
     domains = sorted({str(d).lower().lstrip("@") for d in json.loads(row["work_email_domains_json"] or "[]")})
     if domain in domains:
@@ -1324,6 +1467,9 @@ async def remove_workplace_domain(data: WorkplaceDomain, user: dict = Depends(re
     domain = _normalize_domains([data.domain])[0]
     conn = get_db(); conn.execute("BEGIN IMMEDIATE")
     _assert_owner_in_transaction(conn, company_id, user["id"])
+    if _is_demo_company(conn, company_id):
+        conn.rollback(); conn.close()
+        raise HTTPException(409, "Demo workplaces do not use company email domains")
     row = conn.execute("SELECT work_email_domains_json FROM workplace_settings WHERE company_id=?", (company_id,)).fetchone()
     domains = sorted({str(d).lower().lstrip("@") for d in json.loads(row["work_email_domains_json"] or "[]")})
     if domain not in domains:
@@ -1342,6 +1488,11 @@ async def remove_workplace_domain(data: WorkplaceDomain, user: dict = Depends(re
 @router.put("/admin/policy")
 async def update_company_policy(data: CompanyPolicyUpdate, user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
+    conn = get_db()
+    if _is_demo_company(conn, company_id):
+        conn.close()
+        raise HTTPException(409, "Demo workplace settings are synthetic and cannot be approved as a customer policy")
+    conn.close()
     if not data.confirm_aggregate_only:
         raise HTTPException(400, "Confirm that employer reporting remains aggregate-only")
     conn = get_db(); now = _now()
@@ -1522,7 +1673,7 @@ async def provision_workplace_provider(
     now = _now()
     try:
         conn.execute(
-            "INSERT INTO workplace_provider_credentials (provider_id, professional_type, title_encrypted, qualification_encrypted, registration_encrypted, verification_reference_encrypted, status, reviewed_by, reviewed_at, valid_from, expires_at) VALUES (?,?,?,?,?,?,'verified',?,?,?,?)",
+            "INSERT INTO workplace_provider_credentials (provider_id, professional_type, title_encrypted, qualification_encrypted, registration_encrypted, verification_reference_encrypted, status, reviewed_by, reviewed_at, valid_from, expires_at, license_state_encrypted, demo_only) VALUES (?,?,?,?,?,?,'verified',?,?,?,?,?,0)",
             (
                 provider["id"],
                 encrypt_pii(data.professional_type.strip()) if data.professional_type else None,
@@ -1534,6 +1685,7 @@ async def provision_workplace_provider(
                 now,
                 data.valid_from,
                 data.expires_at,
+                encrypt_pii(data.license_state.strip()),
             ),
         )
         conn.execute(
@@ -1541,8 +1693,8 @@ async def provision_workplace_provider(
             (provider["id"], actor["id"], now),
         )
         conn.execute(
-            "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at) VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?,?)",
-            (str(uuid.uuid4()), provider["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), encrypt_pii(data.verification_reference.strip()), now, actor["id"], now, data.valid_from, data.expires_at),
+            "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,license_state_encrypted) VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?,?,?)",
+            (str(uuid.uuid4()), provider["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), encrypt_pii(data.verification_reference.strip()), now, actor["id"], now, data.valid_from, data.expires_at, encrypt_pii(data.license_state.strip())),
         )
         conn.execute(
             "UPDATE users SET role_type = 'workplace_provider', user_category = 'workplace_provider', professional_title = ?, terms_accepted_at = NULL WHERE id = ?",
@@ -1572,7 +1724,7 @@ async def provision_workplace_provider(
         "email": str(data.provider_email).lower(),
         "credential_reviewed_by": actor["id"],
         "reviewed_at": now,
-        "note": "The entered verification reference records a human review; this endpoint does not validate a professional registry automatically.",
+            "note": "The entered reference records a human review; this endpoint does not validate a state licensing board automatically.",
     }
 
 
@@ -1647,8 +1799,8 @@ async def submit_provider_reverification(data: ProviderCredentialSubmission, use
     now = _now()
     conn = get_db()
     conn.execute(
-        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,status,submitted_at) VALUES (?,?,?,?,?,?,'pending_review',?)",
-        (str(uuid.uuid4()), user["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), now),
+        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,license_state_encrypted,status,submitted_at) VALUES (?,?,?,?,?,?,?,'pending_review',?)",
+        (str(uuid.uuid4()), user["id"], encrypt_pii(data.professional_type.strip()) if data.professional_type else None, encrypt_pii(data.professional_title.strip()), encrypt_pii(data.qualification.strip()), encrypt_pii(data.registration_number.strip()), encrypt_pii(data.license_state.strip()) if data.license_state else None, now),
     )
     for row in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (user["id"],)).fetchall():
         _audit(conn, row["company_id"], None, "WORKPLACE_PROVIDER_CREDENTIAL_SUBMITTED")
@@ -1696,7 +1848,7 @@ async def admin_provider_operations(actor: dict = Depends(require_auth)):
             (row["id"],),
         ).fetchall()
         pending = conn.execute(
-            "SELECT id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,submitted_at "
+            "SELECT id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,license_state_encrypted,submitted_at "
             "FROM workplace_provider_credential_history WHERE provider_id=? AND status='pending_review' ORDER BY submitted_at DESC",
             (row["id"],),
         ).fetchall()
@@ -1709,7 +1861,9 @@ async def admin_provider_operations(actor: dict = Depends(require_auth)):
             "professional_type": decrypt_pii(row["professional_type"]) if row["professional_type"] else None,
             "title": decrypt_pii(row["title_encrypted"]),
             "associations": [dict(item) for item in associations],
-            "pending_reviews": [{"id": item["id"], "professional_type": decrypt_pii(item["professional_type_encrypted"]) if item["professional_type_encrypted"] else None, "title": decrypt_pii(item["title_encrypted"]), "qualification": decrypt_pii(item["qualification_encrypted"]), "registration_number": decrypt_pii(item["registration_encrypted"]), "submitted_at": item["submitted_at"]} for item in pending],
+            "demo_only": bool(row["demo_only"]),
+            "license_state": decrypt_pii(row["license_state_encrypted"]) if row["license_state_encrypted"] else None,
+            "pending_reviews": [{"id": item["id"], "professional_type": decrypt_pii(item["professional_type_encrypted"]) if item["professional_type_encrypted"] else None, "title": decrypt_pii(item["title_encrypted"]), "qualification": decrypt_pii(item["qualification_encrypted"]), "registration_number": decrypt_pii(item["registration_encrypted"]), "license_state": decrypt_pii(item["license_state_encrypted"]) if item["license_state_encrypted"] else None, "submitted_at": item["submitted_at"]} for item in pending],
         })
     conn.commit()
     conn.close()
@@ -1732,13 +1886,13 @@ async def review_provider_credential(review_id: str, data: ProviderCredentialRev
             raise HTTPException(404, "Pending provider credential review not found")
         if data.decision == "verify":
             conn.execute(
-                "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at) "
-                "SELECT ?,provider_id,professional_type,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_at,reviewed_by,reviewed_at,valid_from,expires_at FROM workplace_provider_credentials WHERE provider_id=?",
+                "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,license_state_encrypted) "
+                "SELECT ?,provider_id,professional_type,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_at,reviewed_by,reviewed_at,valid_from,expires_at,license_state_encrypted FROM workplace_provider_credentials WHERE provider_id=?",
                 (str(uuid.uuid4()), review["provider_id"]),
             )
             conn.execute(
-                "UPDATE workplace_provider_credentials SET professional_type=?,title_encrypted=?,qualification_encrypted=?,registration_encrypted=?,verification_reference_encrypted=?,status='verified',reviewed_by=?,reviewed_at=?,valid_from=?,expires_at=?,reason_encrypted=NULL WHERE provider_id=?",
-                (review["professional_type_encrypted"], review["title_encrypted"], review["qualification_encrypted"], review["registration_encrypted"], encrypt_pii(data.verification_reference.strip()), actor["id"], now, data.valid_from, data.expires_at, review["provider_id"]),
+                "UPDATE workplace_provider_credentials SET professional_type=?,title_encrypted=?,qualification_encrypted=?,registration_encrypted=?,verification_reference_encrypted=?,license_state_encrypted=COALESCE(?,license_state_encrypted),status='verified',reviewed_by=?,reviewed_at=?,valid_from=?,expires_at=?,reason_encrypted=NULL WHERE provider_id=?",
+                (review["professional_type_encrypted"], review["title_encrypted"], review["qualification_encrypted"], review["registration_encrypted"], encrypt_pii(data.verification_reference.strip()), review["license_state_encrypted"], actor["id"], now, data.valid_from, data.expires_at, review["provider_id"]),
             )
             conn.execute(
                 "UPDATE workplace_provider_credential_history SET status='verified',reviewed_by=?,reviewed_at=?,verification_reference_encrypted=?,valid_from=?,expires_at=? WHERE id=?",
@@ -1806,8 +1960,8 @@ async def revoke_provider_credential(provider_id: str, data: ProviderCredentialR
         raise HTTPException(404, "Provider credential not found")
     conn.execute("UPDATE workplace_provider_credentials SET status='revoked',reviewed_by=?,reviewed_at=?,reason_encrypted=? WHERE provider_id=?", (actor["id"], now, encrypt_pii(data.reason.strip()), provider_id))
     conn.execute(
-        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,reason_encrypted) VALUES (?,?,?,?,?,? ,?,'revoked',?,?,?,?,?,?)",
-        (str(uuid.uuid4()), provider_id, credential["professional_type"], credential["title_encrypted"], credential["qualification_encrypted"], credential["registration_encrypted"], credential["verification_reference_encrypted"], now, actor["id"], now, credential["valid_from"], credential["expires_at"], encrypt_pii(data.reason.strip())),
+        "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,reason_encrypted,license_state_encrypted) VALUES (?,?,?,?,?,? ,?,'revoked',?,?,?,?,?,?,?)",
+        (str(uuid.uuid4()), provider_id, credential["professional_type"], credential["title_encrypted"], credential["qualification_encrypted"], credential["registration_encrypted"], credential["verification_reference_encrypted"], now, actor["id"], now, credential["valid_from"], credential["expires_at"], encrypt_pii(data.reason.strip()), credential["license_state_encrypted"]),
     )
     _mark_provider_cases_for_reassignment(conn, provider_id, "credential_revoked")
     for company in conn.execute("SELECT DISTINCT company_id FROM workplace_providers WHERE provider_id=?", (provider_id,)).fetchall():
@@ -1822,14 +1976,14 @@ async def revoke_provider_credential(provider_id: str, data: ProviderCredentialR
 async def verify_enrollment(data: EnrollmentVerify):
     conn = get_db()
     challenge = conn.execute(
-        "SELECT c.*, s.work_email_domains_json, s.privacy_notice_version FROM workplace_enrollment_challenges c "
+        "SELECT c.*, s.work_email_domains_json, s.privacy_notice_version, s.demo_mode FROM workplace_enrollment_challenges c "
         "JOIN workplace_settings s ON s.company_id = c.company_id "
         "JOIN workplace_enrollment_links l ON l.id = c.link_id AND l.company_id = c.company_id "
         "JOIN institutions i ON i.id = c.company_id "
         "WHERE c.id = ? AND c.used_at IS NULL AND c.expires_at > ? AND l.revoked_at IS NULL "
-        "AND (l.expires_at IS NULL OR l.expires_at > ?) AND s.legal_review_complete = 1 "
-        "AND s.policy_status = 'approved' AND i.type = 'company' AND i.status = 'ACTIVE' "
-        "AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))",
+        "AND (l.expires_at IS NULL OR l.expires_at > ?) AND i.type = 'company' AND i.status = 'ACTIVE' "
+        "AND ((s.demo_mode=1 AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pc.demo_only=1 AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))) OR "
+        "(s.demo_mode=0 AND s.legal_review_complete=1 AND s.policy_status='approved' AND EXISTS (SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials pc ON pc.provider_id=p.provider_id JOIN users pu ON pu.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=c.company_id AND p.status='active' AND pc.status='verified' AND pc.demo_only=0 AND (pc.valid_from IS NULL OR pc.valid_from<=date('now')) AND (pc.expires_at IS NULL OR pc.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND pu.status IN ('approved','active'))))",
         (data.challenge_id, _now(), _now()),
     ).fetchone()
     if not challenge:
@@ -1856,7 +2010,7 @@ async def verify_enrollment(data: EnrollmentVerify):
         conn.close()
         raise HTTPException(503, "Unable to complete enrollment securely")
     approved_domains = {str(domain).strip().lower().lstrip("@") for domain in json.loads(challenge["work_email_domains_json"] or "[]")}
-    if str(email).strip().lower().rsplit("@", 1)[-1] not in approved_domains:
+    if not challenge["demo_mode"] and str(email).strip().lower().rsplit("@", 1)[-1] not in approved_domains:
         conn.close()
         raise HTTPException(409, "This work email domain is no longer approved. Ask your workplace administrator for guidance.")
     try:
@@ -2203,22 +2357,28 @@ async def create_enrollment_link(user: dict = Depends(require_auth)):
         conn.commit(); conn.close()
         raise HTTPException(403, "New enrollment links are unavailable for this workplace plan or commercial status")
     setup = conn.execute(
-        "SELECT legal_review_complete, policy_status,work_email_domains_json FROM workplace_settings WHERE company_id = ?",
+        "SELECT demo_mode,legal_review_complete, policy_status,work_email_domains_json FROM workplace_settings WHERE company_id = ?",
         (company_id,),
     ).fetchone()
-    if not setup or not setup["legal_review_complete"]:
+    if not setup:
         conn.close()
-        raise HTTPException(
-            403,
-            "A documented Kenyan legal/privacy review is required before enabling employee enrollment",
-        )
-    provider = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
-    if setup["policy_status"] != "approved" or not provider:
-        conn.close()
-        raise HTTPException(403, "Complete company privacy policy and configure an operational independent provider before enabling enrollment")
-    if not json.loads(setup["work_email_domains_json"] or "[]"):
-        conn.close()
-        raise HTTPException(403, "Add at least one approved work email domain before enabling enrollment")
+        raise HTTPException(404, "Workplace setup was not found")
+    if setup["demo_mode"]:
+        provider = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND c.demo_only=1 AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
+        if not provider:
+            conn.close()
+            raise HTTPException(409, "The sample demo provider is not available")
+    else:
+        if not setup["legal_review_complete"]:
+            conn.close()
+            raise HTTPException(403, "A documented US privacy and legal review is required before real employee enrollment")
+        provider = conn.execute("SELECT 1 FROM workplace_providers p JOIN workplace_provider_credentials c ON c.provider_id=p.provider_id JOIN users u ON u.id=p.provider_id LEFT JOIN workplace_provider_operations po ON po.provider_id=p.provider_id WHERE p.company_id=? AND p.status='active' AND c.status='verified' AND c.demo_only=0 AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now')) AND COALESCE(po.access_status,'active')='active' AND u.status IN ('approved','active') LIMIT 1", (company_id,)).fetchone()
+        if setup["policy_status"] != "approved" or not provider:
+            conn.close()
+            raise HTTPException(403, "Complete the company privacy policy and configure an approved provider before real employee enrollment")
+        if not json.loads(setup["work_email_domains_json"] or "[]"):
+            conn.close()
+            raise HTTPException(403, "Add at least one approved company email domain before real employee enrollment")
     link_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     expires = (now + timedelta(days=90)).isoformat()
@@ -2231,6 +2391,19 @@ async def create_enrollment_link(user: dict = Depends(require_auth)):
     conn.close()
     # This is the only time the cleartext link is returned. No redemption data is exposed.
     return {"id": link_id, "token": token, "expires_at": expires, "revocable": True}
+
+
+@router.get("/enrollment/resolve")
+async def resolve_enrollment_link(token: str):
+    """Return only the company name and demo marker needed by the public join screen."""
+    conn = get_db()
+    link = _company_enrollment_is_ready(conn, token=token)
+    if not link:
+        conn.close()
+        raise HTTPException(404, "This enrollment link is invalid, expired, revoked, or not ready")
+    company = conn.execute("SELECT name FROM institutions WHERE id=?", (link["company_id"],)).fetchone()
+    conn.close()
+    return {"company_name": company["name"] if company else "Workplace", "demo_mode": bool(link["demo_mode"])}
 
 
 @router.get("/admin/enrollment-links")
@@ -2260,6 +2433,9 @@ async def list_enrollment_links(user: dict = Depends(require_auth)):
 async def attach_provider(data: ProviderAttach, user: dict = Depends(require_auth)):
     company_id = _company_admin(user)
     conn = get_db()
+    if _is_demo_company(conn, company_id):
+        conn.close()
+        raise HTTPException(409, "A sample provider is already included in the demo workplace")
     conn.execute("BEGIN IMMEDIATE")
     if not commercial_can_use(conn, company_id, "provider_services"):
         conn.commit(); conn.close()
@@ -2267,7 +2443,7 @@ async def attach_provider(data: ProviderAttach, user: dict = Depends(require_aut
     account = resolve_commercial_account(conn, company_id)
     provider_limit = commercial_plan_limit(account, "provider_limit") if account else 0
     provider = conn.execute(
-        "SELECT u.id FROM users u JOIN workplace_provider_credentials c ON c.provider_id = u.id AND c.status = 'verified' LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id WHERE u.email = ? AND u.role_type = 'workplace_provider' AND u.status IN ('approved','active') AND COALESCE(po.access_status,'active')='active' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now'))",
+        "SELECT u.id FROM users u JOIN workplace_provider_credentials c ON c.provider_id = u.id AND c.status = 'verified' AND c.demo_only=0 LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id WHERE u.email = ? AND u.role_type = 'workplace_provider' AND u.status IN ('approved','active') AND COALESCE(po.access_status,'active')='active' AND (c.valid_from IS NULL OR c.valid_from<=date('now')) AND (c.expires_at IS NULL OR c.expires_at>=date('now'))",
         (str(data.provider_email).lower(),),
     ).fetchone()
     if not provider:
