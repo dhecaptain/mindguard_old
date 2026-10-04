@@ -363,9 +363,20 @@ def _provider_access(
         conn.close()
         raise HTTPException(403, "Approved workplace provider access required")
     state = _provider_credential_state(conn, user["id"])
-    if not state or not state["credential_valid"] or state["access_status"] != "active":
+    if not state:
         conn.close()
-        raise HTTPException(403, "Provider access is unavailable; review your credential or account status")
+        raise HTTPException(403, "Provider access is unavailable because no credential record was found")
+    if not state["credential_valid"]:
+        current_day = datetime.now(timezone.utc).date().isoformat()
+        conn.close()
+        if state["status"] == "verified" and state["valid_from"] and str(state["valid_from"])[:10] > current_day:
+            raise HTTPException(403, f"Your license is verified but does not become effective until {str(state['valid_from'])[:10]}")
+        if state["status"] == "verified" and state["expires_at"] and str(state["expires_at"])[:10] < current_day:
+            raise HTTPException(403, f"Your verified license expired on {str(state['expires_at'])[:10]}")
+        raise HTTPException(403, "Provider access is unavailable because the credential is not currently valid")
+    if state["access_status"] != "active":
+        conn.close()
+        raise HTTPException(403, "Provider access is paused. Contact MindGuard Admin for help")
     valid_association = conn.execute(
         "SELECT 1 FROM workplace_providers p JOIN institutions i ON i.id=p.company_id "
         "WHERE p.provider_id=? AND i.type='company' AND i.status='ACTIVE' AND (p.status='active' OR "
@@ -2049,6 +2060,7 @@ async def admin_provider_operations(actor: dict = Depends(require_auth)):
             "invitation_pending": bool(row["invitation_token_hash"]),
             "invitation_expires_at": row["invitation_expires_at"],
             "credential_status": state["status"] if state else "pending_review", "credential_valid": bool(state and state["credential_valid"]),
+            "valid_from": state["valid_from"] if state else None,
             "expires_at": state["expires_at"] if state else None, "access_status": state["access_status"] if state else "active",
             "expires_soon": bool(state and state["expires_at"] and datetime.now(timezone.utc).date() <= date.fromisoformat(str(state["expires_at"])[:10]) <= datetime.now(timezone.utc).date() + timedelta(days=30)),
             "availability": state["availability"] if state else "unavailable",
@@ -2641,10 +2653,31 @@ async def attach_provider(data: ProviderAttach, user: dict = Depends(require_aut
         (str(data.provider_email).lower(),),
     ).fetchone()
     if not provider:
+        candidate = conn.execute(
+            "SELECT u.status AS account_status,c.status AS credential_status,c.demo_only,c.valid_from,c.expires_at,"
+            "COALESCE(po.access_status,'active') AS access_status FROM users u "
+            "LEFT JOIN workplace_provider_credentials c ON c.provider_id=u.id "
+            "LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id "
+            "WHERE lower(u.email)=? AND u.role_type='workplace_provider' LIMIT 1",
+            (str(data.provider_email).lower(),),
+        ).fetchone()
         conn.close()
-        raise HTTPException(
-            404, "No approved workplace provider is registered for that email"
-        )
+        if not candidate:
+            raise HTTPException(404, "No workplace provider account is registered for that email")
+        if str(candidate["account_status"]).lower() not in {"approved", "active"}:
+            raise HTTPException(409, "The provider must accept their invitation before a workplace can connect them")
+        if not candidate["credential_status"] or candidate["credential_status"] != "verified":
+            raise HTTPException(409, "The provider’s license review is not approved yet")
+        if candidate["demo_only"]:
+            raise HTTPException(409, "Demo providers can only be used in demo workplaces")
+        current_day = datetime.now(timezone.utc).date().isoformat()
+        if candidate["valid_from"] and str(candidate["valid_from"])[:10] > current_day:
+            raise HTTPException(409, f"The license is verified but does not become effective until {str(candidate['valid_from'])[:10]}. Ask MindGuard Admin to correct the effective date if it was entered incorrectly.")
+        if candidate["expires_at"] and str(candidate["expires_at"])[:10] < current_day:
+            raise HTTPException(409, f"The provider’s license expired on {str(candidate['expires_at'])[:10]} and must be updated before connection")
+        if candidate["access_status"] != "active":
+            raise HTTPException(409, "Provider access is paused. Ask MindGuard Admin to reactivate it before connecting")
+        raise HTTPException(409, "The provider account is not currently eligible to connect. Ask MindGuard Admin to review the account status")
     already_attached = conn.execute("SELECT 1 FROM workplace_providers WHERE company_id=? AND provider_id=? AND status='active'", (company_id, provider["id"])).fetchone()
     active_provider_count = conn.execute("SELECT COUNT(*) AS n FROM workplace_providers WHERE company_id=? AND status='active'", (company_id,)).fetchone()["n"]
     if not already_attached and provider_limit is not None and active_provider_count >= provider_limit:

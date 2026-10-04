@@ -42,7 +42,7 @@ export function WorkerOverview({checkins,cases,providers,onNavigate}:{checkins:W
   </div>
 }
 
-type ProviderStatus = {credential_status:string;credential_valid:boolean;reverification_pending:boolean;expires_at?:string|null;access_status:string;availability:string;active_case_count:number;action_required_count:number;connected_workplace_count:number;can_receive_new_cases:boolean}
+type ProviderStatus = {credential_status:string;credential_valid:boolean;reverification_pending:boolean;valid_from?:string|null;expires_at?:string|null;access_status:string;availability:string;active_case_count:number;action_required_count:number;connected_workplace_count:number;can_receive_new_cases:boolean}
 type ProviderAppointment = {id:string;starts_at:string;status:string;employee_name:string}
 
 export function ProviderOverview({onNavigate}:{onNavigate:(page:PageKey)=>void}) {

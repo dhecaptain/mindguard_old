@@ -1377,6 +1377,7 @@ def test_global_admin_creates_new_independent_provider_and_invites_them(db, monk
         )
         assert accepted.status_code == 200, accepted.text
         assert accepted.json()["user"]["role_type"] == "workplace_provider"
+        provider = db.get_user_by_email(payload["provider_email"])
         provider_headers = {"Authorization": f"Bearer {accepted.json()['access_token']}"}
         before_connection = client.get("/api/v1/workplace/provider/status", headers=provider_headers)
         assert before_connection.status_code == 200, before_connection.text
@@ -1391,6 +1392,33 @@ def test_global_admin_creates_new_independent_provider_and_invites_them(db, monk
         conn.commit()
         conn.close()
         company_headers = _login(client, company_admin["email"])
+
+        from datetime import datetime, timedelta, timezone
+        future_date = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+        conn = db.get_db()
+        conn.execute("UPDATE workplace_provider_credentials SET valid_from=? WHERE provider_id=?", (future_date, provider["id"]))
+        conn.commit()
+        conn.close()
+        not_yet_effective = client.post(
+            "/api/v1/workplace/admin/providers",
+            headers=company_headers,
+            json={"provider_email": payload["provider_email"]},
+        )
+        assert not_yet_effective.status_code == 409
+        assert future_date in not_yet_effective.json()["detail"]
+        provider_status = client.get("/api/v1/workplace/provider/status", headers=provider_headers)
+        assert provider_status.status_code == 200 and provider_status.json()["credential_valid"] is False
+        provider_cases = client.get("/api/v1/workplace/provider/cases", headers=provider_headers)
+        assert provider_cases.status_code == 403 and future_date in provider_cases.json()["detail"]
+        operations = client.get("/api/v1/workplace/admin/provider-operations", headers=admin_headers)
+        assert operations.status_code == 200
+        listed_provider = next(item for item in operations.json() if item["id"] == provider["id"])
+        assert listed_provider["valid_from"] == future_date and listed_provider["credential_valid"] is False
+
+        conn = db.get_db()
+        conn.execute("UPDATE workplace_provider_credentials SET valid_from=NULL WHERE provider_id=?", (provider["id"],))
+        conn.commit()
+        conn.close()
         connected = client.post(
             "/api/v1/workplace/admin/providers",
             headers=company_headers,
@@ -1404,7 +1432,6 @@ def test_global_admin_creates_new_independent_provider_and_invites_them(db, monk
         assert after_connection.status_code == 200
         assert after_connection.json()["connected_workplace_count"] == 1
 
-        provider = db.get_user_by_email(payload["provider_email"])
         assert provider["status"] == "approved"
         assert provider["user_category"] == "workplace_provider"
         assert provider["institution_id"] is None
