@@ -6,6 +6,7 @@ listing, filtering, or export endpoints for company administrators.
 """
 
 import json
+import html
 import re
 import secrets
 import uuid
@@ -479,6 +480,10 @@ class ProviderCredentialCreate(BaseModel):
     verification_reference: str = Field(min_length=4, max_length=500)
     valid_from: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     expires_at: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
+class WorkplaceProviderAccountCreate(ProviderCredentialCreate):
+    full_name: str = Field(min_length=2, max_length=200)
 
 
 class ProviderCredentialSubmission(BaseModel):
@@ -1728,6 +1733,175 @@ async def provision_workplace_provider(
     }
 
 
+@router.post("/admin/provider-accounts", status_code=201)
+async def create_workplace_provider_account(
+    data: WorkplaceProviderAccountCreate, actor: dict = Depends(require_auth)
+):
+    """Create a new independent workplace-provider account and invite its owner."""
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    _validate_credential_period(data.valid_from, data.expires_at)
+    from backend.database import _make_referral_code
+
+    provider_id = str(uuid.uuid4())
+    email = str(data.provider_email).strip().lower()
+    now = _now()
+    invite_token = secrets.token_urlsafe(32)
+    invite_expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    conn = get_db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM users WHERE lower(email)=?", (email,)).fetchone():
+            raise HTTPException(
+                409,
+                "This email already has a MindGuard account. Existing accounts are not converted; use an unused email for a new independent provider.",
+            )
+        referral_code = _make_referral_code()
+        while conn.execute("SELECT 1 FROM users WHERE referral_code=?", (referral_code,)).fetchone():
+            referral_code = _make_referral_code()
+        conn.execute(
+            "INSERT INTO users (id,email,name,role_type,password_hash,status,created_at,referral_code,institution_id,user_category,onboarding_completed_at,professional_title,invitation_token_hash,invitation_expires_at,invited_at,workplace_invitation_status,terms_accepted_at) "
+            "VALUES (?,?,?,'workplace_provider',?,'pending',?,?,NULL,'workplace_provider',NULL,?,?,?,?,'pending',NULL)",
+            (
+                provider_id,
+                email,
+                data.full_name.strip(),
+                hash_password(secrets.token_urlsafe(32)),
+                now,
+                referral_code,
+                encrypt_pii(data.professional_title.strip()),
+                hash_token(invite_token),
+                invite_expires,
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_credentials (provider_id,professional_type,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,reviewed_by,reviewed_at,valid_from,expires_at,license_state_encrypted,demo_only) "
+            "VALUES (?,?,?,?,?,?,'verified',?,?,?,?,?,0)",
+            (
+                provider_id,
+                encrypt_pii(data.professional_type.strip()) if data.professional_type else None,
+                encrypt_pii(data.professional_title.strip()),
+                encrypt_pii(data.qualification.strip()),
+                encrypt_pii(data.registration_number.strip()),
+                encrypt_pii(data.verification_reference.strip()),
+                actor["id"],
+                now,
+                data.valid_from,
+                data.expires_at,
+                encrypt_pii(data.license_state.strip()),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_operations (provider_id,access_status,availability,changed_by,changed_at) VALUES (?,'active','available',?,?)",
+            (provider_id, actor["id"], now),
+        )
+        conn.execute(
+            "INSERT INTO workplace_provider_credential_history (id,provider_id,professional_type_encrypted,title_encrypted,qualification_encrypted,registration_encrypted,verification_reference_encrypted,status,submitted_at,reviewed_by,reviewed_at,valid_from,expires_at,license_state_encrypted) "
+            "VALUES (?,?,?,?,?,?,?,'verified',?,?,?,?,?,?)",
+            (
+                str(uuid.uuid4()),
+                provider_id,
+                encrypt_pii(data.professional_type.strip()) if data.professional_type else None,
+                encrypt_pii(data.professional_title.strip()),
+                encrypt_pii(data.qualification.strip()),
+                encrypt_pii(data.registration_number.strip()),
+                encrypt_pii(data.verification_reference.strip()),
+                now,
+                actor["id"],
+                now,
+                data.valid_from,
+                data.expires_at,
+                encrypt_pii(data.license_state.strip()),
+            ),
+        )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(409, "Unable to create independent provider account") from exc
+    conn.close()
+
+    base = __import__("os").getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+    safe_name = html.escape(data.full_name.strip())
+    sent, error = send_html_email(
+        email,
+        "Your MindGuard independent provider account",
+        f"<p>Hello {safe_name},</p><p>A MindGuard operations administrator created an independent provider account for you after recording a human review of your professional license.</p><p>Accept the invitation and set your password to access the workplace provider workspace:</p><p><a href=\"{base}/invite?token={invite_token}\">Accept provider invitation</a></p><p>This single-use link expires in 7 days. You can only see workplace cases that an employee explicitly shares with you.</p>",
+        related_type="workplace_provider_invitation",
+        related_id=provider_id,
+        metadata={"provider_id": provider_id, "credential_reviewed": True},
+    )
+    write_audit(
+        actor["id"],
+        "admin",
+        "WORKPLACE_PROVIDER_ACCOUNT_CREATED",
+        "user",
+        provider_id,
+        {"credential_reviewed": True, "invitation_sent": bool(sent)},
+    )
+    return {
+        "id": provider_id,
+        "email": email,
+        "account_status": "pending",
+        "credential_status": "verified",
+        "invitation_pending": True,
+        "invitation_sent": sent,
+        "invitation_error": error or None,
+    }
+
+
+@router.post("/admin/provider-accounts/{provider_id}/resend")
+async def resend_workplace_provider_invitation(
+    provider_id: str, actor: dict = Depends(require_auth)
+):
+    if actor.get("role_type") != "admin":
+        raise HTTPException(403, "Global administrator access required")
+    conn = get_db()
+    provider = conn.execute(
+        "SELECT id,name,email,status FROM users WHERE id=? AND role_type='workplace_provider' AND EXISTS (SELECT 1 FROM workplace_provider_credentials WHERE provider_id=users.id AND demo_only=0)",
+        (provider_id,),
+    ).fetchone()
+    if not provider:
+        conn.close()
+        raise HTTPException(404, "Independent workplace provider not found")
+    if str(provider["status"]).lower() not in {"pending", "invited"}:
+        conn.close()
+        raise HTTPException(409, "This provider has already accepted the invitation")
+    token = secrets.token_urlsafe(32)
+    expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    now = _now()
+    conn.execute(
+        "UPDATE users SET invitation_token_hash=?,invitation_expires_at=?,invited_at=?,workplace_invitation_status='pending' WHERE id=?",
+        (hash_token(token), expires, now, provider_id),
+    )
+    conn.commit()
+    conn.close()
+    base = __import__("os").getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")
+    safe_name = html.escape(provider["name"])
+    sent, error = send_html_email(
+        provider["email"],
+        "Your MindGuard independent provider invitation",
+        f"<p>Hello {safe_name},</p><p>Use this single-use link to activate your independent provider account:</p><p><a href=\"{base}/invite?token={token}\">Accept provider invitation</a></p><p>The link expires in 7 days.</p>",
+        related_type="workplace_provider_invitation",
+        related_id=provider_id,
+        metadata={"provider_id": provider_id},
+    )
+    write_audit(
+        actor["id"],
+        "admin",
+        "WORKPLACE_PROVIDER_INVITATION_RESENT" if sent else "WORKPLACE_PROVIDER_INVITATION_DELIVERY_FAILED",
+        "user",
+        provider_id,
+        {"invitation_sent": bool(sent)},
+    )
+    return {"id": provider_id, "invitation_pending": True, "invitation_sent": sent, "invitation_error": error or None}
+
+
 @router.get("/provider/status")
 async def workplace_provider_status(user: dict = Depends(require_auth)):
     if user.get("role_type") != "workplace_provider":
@@ -1835,7 +2009,7 @@ async def admin_provider_operations(actor: dict = Depends(require_auth)):
         raise HTTPException(403, "Global administrator access required")
     conn = get_db()
     rows = conn.execute(
-        "SELECT u.id,u.name,u.email,u.status AS account_status,pc.*,COALESCE(po.access_status,'active') AS access_status, "
+        "SELECT u.id,u.name,u.email,u.status AS account_status,u.invitation_token_hash,u.invitation_expires_at,pc.*,COALESCE(po.access_status,'active') AS access_status, "
         "COALESCE(po.availability,'available') AS availability FROM users u "
         "JOIN workplace_provider_credentials pc ON pc.provider_id=u.id LEFT JOIN workplace_provider_operations po ON po.provider_id=u.id "
         "WHERE u.role_type='workplace_provider' ORDER BY u.name COLLATE NOCASE"
@@ -1854,6 +2028,8 @@ async def admin_provider_operations(actor: dict = Depends(require_auth)):
         ).fetchall()
         providers.append({
             "id": row["id"], "name": row["name"], "email": row["email"], "account_status": row["account_status"],
+            "invitation_pending": bool(row["invitation_token_hash"]),
+            "invitation_expires_at": row["invitation_expires_at"],
             "credential_status": state["status"] if state else "pending_review", "credential_valid": bool(state and state["credential_valid"]),
             "expires_at": state["expires_at"] if state else None, "access_status": state["access_status"] if state else "active",
             "expires_soon": bool(state and state["expires_at"] and datetime.now(timezone.utc).date() <= date.fromisoformat(str(state["expires_at"])[:10]) <= datetime.now(timezone.utc).date() + timedelta(days=30)),

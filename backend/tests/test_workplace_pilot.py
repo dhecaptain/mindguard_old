@@ -1331,3 +1331,81 @@ def test_workplace_retention_decisions_respect_live_dependencies():
     assert retention_decision("closed_case", old, 365) == "DELETE"
     assert retention_decision("membership", old, 365) == "RETAIN"
     assert retention_decision("audit_event", old, 365) == "RETAIN"
+
+
+def test_global_admin_creates_new_independent_provider_and_invites_them(db, monkeypatch):
+    from backend.routes import workplace
+
+    sent = []
+    monkeypatch.setattr(
+        workplace,
+        "send_html_email",
+        lambda email, subject, body, **kwargs: (sent.append((email, subject, body, kwargs)) or True, ""),
+    )
+    admin = _global_admin(db)
+    with _client() as client:
+        admin_headers = _login(client, admin["email"])
+        payload = {
+            "full_name": "Jordan Provider",
+            "provider_email": "jordan.provider@gmail.com",
+            "professional_type": "Counselor",
+            "professional_title": "Licensed Professional Counselor",
+            "qualification": "Master's degree",
+            "registration_number": "LIC-12345",
+            "license_state": "California",
+            "verification_reference": "California board lookup 2026-10-04",
+        }
+        created = client.post(
+            "/api/v1/workplace/admin/provider-accounts",
+            headers=admin_headers,
+            json=payload,
+        )
+        assert created.status_code == 201, created.text
+        result = created.json()
+        assert result["account_status"] == "pending"
+        assert result["invitation_pending"] is True
+        assert result["invitation_sent"] is True
+        assert "token" not in created.text.lower()
+        assert len(sent) == 1 and sent[0][0] == payload["provider_email"]
+
+        invite_token = re.search(r"token=([^&\"]+)", sent[0][2]).group(1)
+        verified = client.post("/api/auth/invite/verify", json={"token": invite_token})
+        assert verified.status_code == 200
+        accepted = client.post(
+            "/api/auth/invite/accept",
+            json={"token": invite_token, "password": "new-provider-password"},
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["user"]["role_type"] == "workplace_provider"
+
+        provider = db.get_user_by_email(payload["provider_email"])
+        assert provider["status"] == "approved"
+        assert provider["user_category"] == "workplace_provider"
+        assert provider["institution_id"] is None
+        conn = db.get_db()
+        credential = conn.execute(
+            "SELECT status,demo_only FROM workplace_provider_credentials WHERE provider_id=?",
+            (provider["id"],),
+        ).fetchone()
+        audit = conn.execute(
+            "SELECT action FROM audit_log WHERE target_id=? AND action='WORKPLACE_PROVIDER_INVITATION_ACCEPTED'",
+            (provider["id"],),
+        ).fetchone()
+        conn.close()
+        assert credential["status"] == "verified" and credential["demo_only"] == 0
+        assert audit
+
+        existing = db.create_user(
+            "existing.counsellor@gmail.com",
+            "Existing Counsellor",
+            hash_password("workplace-test-password"),
+            role_type="counsellor",
+        )
+        duplicate = client.post(
+            "/api/v1/workplace/admin/provider-accounts",
+            headers=admin_headers,
+            json={**payload, "provider_email": existing["email"]},
+        )
+        assert duplicate.status_code == 409
+        unchanged = db.get_user_by_id(existing["id"])
+        assert unchanged["role_type"] == "counsellor"

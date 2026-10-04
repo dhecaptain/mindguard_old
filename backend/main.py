@@ -3608,6 +3608,72 @@ async def accept_invite(data: dict, request: Request):
             "access_token": token_value,
             "user": {"id": fresh["id"], "email": fresh["email"], "name": fresh["name"], "role_type": fresh["role_type"], "user_category": _auth_user_category(fresh), "institution_id": fresh.get("institution_id"), "profile_completed": True},
         }
+    if user.get("role_type") == "workplace_provider":
+        conn = get_db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT u.*,c.status AS credential_status,c.demo_only FROM users u "
+                "JOIN workplace_provider_credentials c ON c.provider_id=u.id "
+                "WHERE u.id=? AND u.invitation_token_hash=?",
+                (user["id"], token_hash),
+            ).fetchone()
+            if (
+                not current
+                or current["status"] not in ("pending", "invited")
+                or current["credential_status"] != "verified"
+                or current["demo_only"]
+                or current["workplace_invitation_status"] == "revoked"
+            ):
+                conn.rollback()
+                conn.close()
+                raise HTTPException(400, "Invalid, revoked, or already used provider invitation")
+            expiry = current["invitation_expires_at"]
+            if expiry and datetime.fromisoformat(expiry.replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                conn.execute(
+                    "UPDATE users SET workplace_invitation_status='expired',invitation_token_hash=NULL WHERE id=?",
+                    (user["id"],),
+                )
+                conn.commit()
+                conn.close()
+                raise HTTPException(400, "Invitation has expired")
+            conn.execute(
+                "UPDATE users SET password_hash=?,status='approved',user_category='workplace_provider',terms_accepted_at=NULL,invitation_token_hash=NULL,invitation_expires_at=NULL,workplace_invitation_status='accepted' WHERE id=?",
+                (pw_hash, user["id"]),
+            )
+            conn.commit()
+        except HTTPException:
+            if conn:
+                conn.close()
+            raise
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise HTTPException(409, "Unable to activate this workplace provider invitation")
+        conn.close()
+        write_audit(
+            user["id"],
+            "workplace_provider",
+            "WORKPLACE_PROVIDER_INVITATION_ACCEPTED",
+            "user",
+            user["id"],
+            payload={"email": user["email"]},
+            ip=_client_ip(request),
+        )
+        fresh = get_user_by_id(user["id"])
+        token_value = create_access_token(fresh["id"], fresh["role_type"])
+        return {
+            "ok": True,
+            "access_token": token_value,
+            "user": {
+                "id": fresh["id"],
+                "email": fresh["email"],
+                "name": fresh["name"],
+                "role_type": fresh["role_type"],
+                "user_category": _auth_user_category(fresh),
+                "institution_id": fresh.get("institution_id"),
+            },
+        }
     update_user_password(user["id"], pw_hash)
     update_user_status(user["id"], "approved")
     mark_user_as_staff(user["id"])
