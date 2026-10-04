@@ -1377,6 +1377,32 @@ def test_global_admin_creates_new_independent_provider_and_invites_them(db, monk
         )
         assert accepted.status_code == 200, accepted.text
         assert accepted.json()["user"]["role_type"] == "workplace_provider"
+        provider_headers = {"Authorization": f"Bearer {accepted.json()['access_token']}"}
+        before_connection = client.get("/api/v1/workplace/provider/status", headers=provider_headers)
+        assert before_connection.status_code == 200, before_connection.text
+        assert before_connection.json()["connected_workplace_count"] == 0
+        empty_appointments = client.get("/api/v1/workplace/provider/appointments", headers=provider_headers)
+        assert empty_appointments.status_code == 200 and empty_appointments.json() == []
+
+        company, company_admin = _company(db)
+        from backend.services.workplace_commercial import ensure_account
+        conn = db.get_db()
+        ensure_account(conn, company["id"], plan_key="pilot")
+        conn.commit()
+        conn.close()
+        company_headers = _login(client, company_admin["email"])
+        connected = client.post(
+            "/api/v1/workplace/admin/providers",
+            headers=company_headers,
+            json={"provider_email": payload["provider_email"]},
+        )
+        assert connected.status_code == 201, connected.text
+        company_provider_list = client.get("/api/v1/workplace/admin/providers", headers=company_headers)
+        assert company_provider_list.status_code == 200
+        assert len(company_provider_list.json()) == 1
+        after_connection = client.get("/api/v1/workplace/provider/status", headers=provider_headers)
+        assert after_connection.status_code == 200
+        assert after_connection.json()["connected_workplace_count"] == 1
 
         provider = db.get_user_by_email(payload["provider_email"])
         assert provider["status"] == "approved"

@@ -343,7 +343,13 @@ def _provider_can_receive_case(conn, provider_id: str, company_id: str) -> bool:
     )
 
 
-def _provider_access(user: dict, *, case_id: str | None = None, writable: bool = False):
+def _provider_access(
+    user: dict,
+    *,
+    case_id: str | None = None,
+    writable: bool = False,
+    require_association: bool = True,
+):
     """One authorization path for active provider, valid credential and assigned case scope."""
     if user.get("role_type") != "workplace_provider":
         raise HTTPException(403, "Approved workplace provider access required")
@@ -384,7 +390,7 @@ def _provider_access(user: dict, *, case_id: str | None = None, writable: bool =
             raise HTTPException(404, "Active workplace support case not found")
         return dict(row)
     conn.close()
-    if not valid_association:
+    if require_association and not valid_association:
         raise HTTPException(403, "No active workplace provider relationship")
     return None
 
@@ -1932,6 +1938,11 @@ async def workplace_provider_status(user: dict = Depends(require_auth)):
         "SELECT 1 FROM workplace_provider_credential_history WHERE provider_id=? AND status='pending_review' LIMIT 1",
         (user["id"],),
     ).fetchone()
+    connected_workplaces = conn.execute(
+        "SELECT COUNT(*) AS n FROM workplace_providers p JOIN institutions i ON i.id=p.company_id "
+        "WHERE p.provider_id=? AND p.status='active' AND i.type='company' AND i.status='ACTIVE'",
+        (user["id"],),
+    ).fetchone()["n"]
     conn.commit()
     conn.close()
     return {
@@ -1945,6 +1956,7 @@ async def workplace_provider_status(user: dict = Depends(require_auth)):
         "availability": credential["availability"],
         "active_case_count": int(counts["active_cases"] or 0),
         "action_required_count": int(counts["action_required"] or 0),
+        "connected_workplace_count": int(connected_workplaces or 0),
         "can_receive_new_cases": bool(live_user and str(live_user["status"]).lower() in {"approved", "active"}) and credential["credential_valid"] and credential["access_status"] == "active" and credential["availability"] == "available",
     }
 
@@ -2947,7 +2959,10 @@ async def send_provider_workplace_message(case_id: str, data: WorkplaceMessageBo
 
 @router.get("/provider/appointments")
 async def provider_workplace_appointments(user: dict = Depends(require_auth)):
-    _provider_access(user)
+    # A newly invited provider can sign in before any company has connected
+    # them. In that state, their appointment list is simply empty. The query
+    # below still scopes every row to an active workplace relationship.
+    _provider_access(user, require_association=False)
     conn=get_db()
     rows=conn.execute("SELECT a.id,a.case_id,a.starts_at,a.mode,a.location_or_link_encrypted,a.status,a.created_at,u.name AS employee_name FROM workplace_appointments a JOIN workplace_support_cases c ON c.id=a.case_id AND c.provider_id=a.provider_id AND c.assignment_status='assigned' JOIN users u ON u.id=a.user_id JOIN workplace_providers p ON p.company_id=a.company_id AND p.provider_id=a.provider_id AND p.status='active' JOIN institutions i ON i.id=a.company_id AND i.type='company' AND i.status='ACTIVE' WHERE a.provider_id=? AND c.withdrawn_at IS NULL ORDER BY a.starts_at DESC",(user["id"],)).fetchall();conn.close()
     return [{"id":r["id"],"case_id":r["case_id"],"starts_at":r["starts_at"],"mode":r["mode"],"location_or_link":decrypt_pii(r["location_or_link_encrypted"]) if r["location_or_link_encrypted"] else None,"status":r["status"],"created_at":r["created_at"],"employee_name":r["employee_name"]} for r in rows]
