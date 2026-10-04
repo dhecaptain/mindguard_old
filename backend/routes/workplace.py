@@ -7,6 +7,7 @@ listing, filtering, or export endpoints for company administrators.
 
 import json
 import html
+import logging
 import re
 import secrets
 import uuid
@@ -51,6 +52,7 @@ from backend.services.workplace_lifecycle import (
 from backend.services.workplace_analytics import AVAILABLE as ANALYTICS_AVAILABLE, get_workplace_insights
 
 router = APIRouter(prefix="/api/v1/workplace", tags=["workplace"])
+logger = logging.getLogger(__name__)
 NOTICE_VERSION = "workplace-v1"
 WORKPLACE_ADMIN_TERMS_VERSION = "workplace-admin-v1"
 WORKPLACE_EMPLOYEE_TERMS_VERSION = "workplace-participant-v1"
@@ -1823,7 +1825,11 @@ async def create_workplace_provider_account(
     except Exception as exc:
         conn.rollback()
         conn.close()
-        raise HTTPException(409, "Unable to create independent provider account") from exc
+        logger.exception(
+            "Unable to create independent workplace provider account (provider_id=%s)",
+            provider_id,
+        )
+        raise HTTPException(500, "Unable to create independent provider account. Please try again or contact MindGuard support.") from exc
     conn.close()
 
     base = __import__("os").getenv("APP_BASE_URL", "https://app.mindguardai.me").rstrip("/")

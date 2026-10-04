@@ -466,6 +466,7 @@ export function WorkplaceAdminPage() {
   const [reference, setReference] = useState('')
   const [providerName, setProviderName] = useState('')
   const [providerEmail, setProviderEmail] = useState('')
+  const [providerFeedback, setProviderFeedback] = useState<{type:'success'|'error';message:string}|null>(null)
   const [providerTitle, setProviderTitle] = useState('')
   const [professionalType, setProfessionalType] = useState('')
   const [qualification, setQualification] = useState('')
@@ -539,9 +540,16 @@ export function WorkplaceAdminPage() {
     finally { setBusy(false) }
   }
   const provisionProvider = async () => {
-    setBusy(true); setNotice('')
-    try { const {data}=await api.post('/v1/workplace/admin/provider-accounts', { full_name:providerName, provider_email: providerEmail, professional_type:professionalType||null, professional_title: providerTitle, qualification, registration_number: registration, license_state:licenseState, verification_reference: credentialReference, valid_from:credentialValidFrom||null, expires_at:credentialExpiresAt||null }); setProviderName(''); setProviderEmail(''); setProviderTitle(''); setProfessionalType(''); setQualification(''); setRegistration(''); setLicenseState(''); setCredentialReference(''); setCredentialValidFrom(''); setCredentialExpiresAt(''); setNotice(data.invitation_sent?'Independent provider account created and invitation sent. They can connect to a workplace after accepting.':`Provider account created, but the invitation could not be sent${data.invitation_error?`: ${data.invitation_error}`:'.'} Use Resend invitation in the provider list.`); await load(); setProviderListVersion(value=>value+1) }
-    catch (e) { setNotice(e instanceof Error ? e.message : 'Unable to provision provider.') }
+    setBusy(true); setProviderFeedback(null)
+    try {
+      const {data}=await api.post('/v1/workplace/admin/provider-accounts', { full_name:providerName, provider_email: providerEmail, professional_type:professionalType||null, professional_title: providerTitle, qualification, registration_number: registration, license_state:licenseState, verification_reference: credentialReference, valid_from:credentialValidFrom||null, expires_at:credentialExpiresAt||null })
+      setProviderName(''); setProviderEmail(''); setProviderTitle(''); setProfessionalType(''); setQualification(''); setRegistration(''); setLicenseState(''); setCredentialReference(''); setCredentialValidFrom(''); setCredentialExpiresAt('')
+      setProviderFeedback(data.invitation_sent
+        ? {type:'success',message:'Provider account created. The invitation email was sent; they can connect to a workplace after accepting it.'}
+        : {type:'error',message:`Provider account created, but its invitation email could not be sent${data.invitation_error?`: ${data.invitation_error}`:'.'} You can resend it from the provider list.`})
+      await load(); setProviderListVersion(value=>value+1)
+    }
+    catch (e) { setProviderFeedback({type:'error',message:e instanceof Error ? e.message : 'Unable to create the provider account. Please try again.'}) }
     finally { setBusy(false) }
   }
   const lifecycle = async (id:string,action:'activate'|'suspend'|'archive') => {
@@ -626,6 +634,7 @@ export function WorkplaceAdminPage() {
         <label className="text-sm font-medium sm:col-span-2">Where and when you checked the license<input className="mt-1 w-full rounded-lg border p-3" placeholder="State board lookup · YYYY-MM-DD" required value={credentialReference} onChange={e=>setCredentialReference(e.target.value)} /><span className="mt-1 block text-xs font-normal text-slate-500">This note records your manual check; it is not an upload or automated verification.</span></label>
       </div>
       <button className={`${button} mt-4`} disabled={busy||providerName.trim().length<2||!emailPattern.test(providerEmail.trim())||providerTitle.trim().length<2||qualification.trim().length<2||registration.trim().length<2||licenseState.trim().length<2||credentialReference.trim().length<4} onClick={provisionProvider}>{busy?'Creating account…':'Create provider and send invitation'}</button>
+      {providerFeedback&&<p role={providerFeedback.type==='error'?'alert':'status'} aria-live={providerFeedback.type==='error'?'assertive':'polite'} className={`mt-3 rounded-lg p-3 text-sm ${providerFeedback.type==='error'?'border border-rose-200 bg-rose-50 text-rose-900':'border border-emerald-200 bg-emerald-50 text-emerald-900'}`}>{providerFeedback.message}</p>}
     </section>
     <ProviderOperationsPanel key={providerListVersion} />
     <section className={card}><h2 className="text-lg font-semibold">Workplace offboarding</h2><p className="mt-1 text-sm text-slate-600">Scheduled endings preserve access until the effective date. Termination never deletes a company or worker account.</p>{companies.filter(c=>c.offboarding&&c.offboarding.status!=='NOT_STARTED'&&c.offboarding.status!=='COMPLETED').length===0?<p className="mt-3 text-sm text-slate-500">No companies are currently scheduled for offboarding.</p>:<div className="mt-3 divide-y">{companies.filter(c=>c.offboarding&&c.offboarding.status!=='NOT_STARTED'&&c.offboarding.status!=='COMPLETED').map(c=><div key={c.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="font-semibold">{c.name} · {c.offboarding?.status?.replaceAll('_',' ')}</p><p className="text-sm text-slate-600">Effective {c.offboarding?.effective_date||'date pending'} · continuity through {c.offboarding?.continuity_deadline?new Date(c.offboarding.continuity_deadline).toLocaleDateString():'not started'} · retention through {c.offboarding?.retention_deadline?new Date(c.offboarding.retention_deadline).toLocaleDateString():'not set'}</p><p className="text-xs text-slate-500">Active case obligations: {c.offboarding?.active_support_obligations??0} · provider relationships ending/ended: {c.offboarding?.provider_relationships_ending_or_ended??0}</p></div>{c.offboarding?.completion_ready&&<button className="rounded-lg border border-rose-300 px-3 py-2 text-sm font-semibold text-rose-800" disabled={busy} onClick={()=>void completeOffboarding(c)}>Finalize offboarding</button>}</div>)}</div>}</section>
